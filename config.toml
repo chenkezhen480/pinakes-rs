@@ -1,0 +1,54 @@
+# Service configuration. Secrets stay in environment variables, never in this file:
+# KB_ADMIN_KEY (admin routes), later ANTHROPIC_API_KEY and NEO4J_PASSWORD.
+# Sections marked (Mx) are read from that milestone on; until then they are ignored.
+
+[server]
+host = "127.0.0.1"             # Docker (M7) sets 0.0.0.0
+port = 8080
+
+[data]
+dir = "./data"                 # the Docker image will point this at its /data volume (M7)
+
+[identity]
+mode = "api_key"               # "jwt" arrives in M7
+key_header = "Authorization"   # "Bearer <key>"
+user_header = "X-User-Id"
+admin_key_env = "KB_ADMIN_KEY"
+# jwt mode (M7):
+# public_key_file = "keys/auth.pem"
+# tenant_claim = "tenant_id"
+# user_claim = "sub"
+
+[store]                        # one SQLite file per tenant, WAL mode
+file_name = "kb.sqlite"
+
+[librarian]                    # (M4) the only LLM the service calls
+provider = "anthropic"         # or "openai_compatible"
+model = "claude-sonnet-5"
+# base_url = "http://localhost:11434/v1"   # for openai_compatible
+
+[search]                       # (M2)
+languages = ["en", "zh"]
+default_mode = "keyword"       # keyword, semantic, both or auto
+slots = { memories = 3, knowledge = 3, relations = 5 }
+hop = { top_memories = 3, depth = 1 }
+
+[embedding]                    # (M5) local, runs inside the process
+model = "multilingual-e5-small"
+
+[graph]                        # (M3)
+backend = "neo4j"              # or "sqlite", for tests and trying it out
+max_depth = 3
+max_nodes = 100
+
+[neo4j]                        # (M3)
+uri = "bolt://localhost:7687"
+user = "neo4j"                 # password from NEO4J_PASSWORD
+
+[acquisition]                  # (M9) off by default, opt-in per tenant
+enabled = false
+providers = []
+daily_token_budget = 200000
+
+[jobs]                         # (M4)
+keep_finished_minutes = 60

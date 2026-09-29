@@ -11,6 +11,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Before calling a task done, run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - On this Windows machine cargo lives in `%USERPROFILE%\.cargo\bin`; in Git Bash prefix commands
   with `export PATH="$HOME/.cargo/bin:$PATH";` if `cargo` is not found.
+- The shell has `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` pointing at a local proxy (127.0.0.1:7897).
+  When curling the local server, first `unset HTTP_PROXY HTTPS_PROXY ALL_PROXY; export NO_PROXY=127.0.0.1,localhost`.
+- Run the server bound to `127.0.0.1` locally; binding `0.0.0.0` pops a Windows Firewall dialog.
+  Start it with `run_in_background`, never with `&` inside a foreground command (that hangs the tool).
 
 ## Rules
 
