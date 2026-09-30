@@ -1,6 +1,6 @@
 //! Replaying traces: each recorded search runs again with the current code and config, on the
 //! wiki it ran on (rebuilt from the tenant's wiki history) or on today's wiki, and the report
-//! lists what changed. Used by `kb-replay` and by tests.
+//! lists what changed. Used by `pinakes-replay` and by tests.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;

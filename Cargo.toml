@@ -1,8 +1,8 @@
 [package]
-name = "kb"
+name = "pinakes"
 version = "0.1.0"
 edition = "2024"
-default-run = "kb"
+default-run = "pinakes"
 
 [dependencies]
 aho-corasick = "1"

@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use axum::http::StatusCode;
 use common::app::{Caller, TestApp};
 use common::testset;
-use kb::tenants::{group_dir_name, user_dir_name};
-use kb::wiki::{Page, PagePath, WikiFs};
+use pinakes::tenants::{group_dir_name, user_dir_name};
+use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::{Value, json};
 
 struct World {

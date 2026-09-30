@@ -1,8 +1,8 @@
-//! `kb-replay`: runs recorded searches again against the current code and wiki, and reports
+//! `pinakes-replay`: runs recorded searches again against the current code and wiki, and reports
 //! what changed (design, "Search traces and replay").
 //!
 //! ```text
-//! kb-replay [--config config.toml] [--days N] [--wiki recorded|current] [--json report.json]
+//! pinakes-replay [--config config.toml] [--days N] [--wiki recorded|current] [--json report.json]
 //!           [TRACE_FILE_OR_FOLDER ...]
 //! ```
 //!
@@ -19,23 +19,23 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
-use kb::config::Config;
-use kb::tenants::Tenants;
-use kb::trace::replay::{TraceReader, WikiSource, replay, trace_files};
+use pinakes::config::Config;
+use pinakes::tenants::Tenants;
+use pinakes::trace::replay::{TraceReader, WikiSource, replay, trace_files};
 
 /// Days of traces replayed by default.
 const DEFAULT_DAYS: u32 = 7;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: kb-replay [--config config.toml] [--days N] [--wiki recorded|current] [--json report.json] [TRACE_FILE_OR_FOLDER ...]"
+        "usage: pinakes-replay [--config config.toml] [--days N] [--wiki recorded|current] [--json report.json] [TRACE_FILE_OR_FOLDER ...]"
     );
     std::process::exit(2)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut config_path = std::env::var_os("KB_CONFIG").map(PathBuf::from);
+    let mut config_path = std::env::var_os("PINAKES_CONFIG").map(PathBuf::from);
     let mut json_out: Option<PathBuf> = None;
     let mut days = DEFAULT_DAYS;
     let mut wiki = WikiSource::Recorded;
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
             _ => paths.push(PathBuf::from(arg)),
         }
     }
-    // A config named on the command line or in KB_CONFIG must exist; otherwise
+    // A config named on the command line or in PINAKES_CONFIG must exist; otherwise
     // ./config.toml is used when present, and the defaults when not.
     let config = match config_path {
         Some(path) => Config::load(&path)?,
@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         config.store.file_name.clone(),
         Duration::from_secs(60),
     )
-    .graph_backend(kb::graph::GraphBackend::from_config(&config));
+    .graph_backend(pinakes::graph::GraphBackend::from_config(&config));
     let report = replay(&tenants, &config.search, wiki, records.by_ref()).await?;
     for e in &records.errors {
         eprintln!("could not read {e}");

@@ -19,9 +19,9 @@ use std::path::PathBuf;
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
-use kb::AppState;
-use kb::config::Config;
-use kb::tenants::CreateTenantError;
+use pinakes::AppState;
+use pinakes::config::Config;
+use pinakes::tenants::CreateTenantError;
 use tower::ServiceExt;
 
 #[tokio::main]
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(config.tenants_dir())?;
     let state = AppState::new(config, None);
     state.prepare().await?;
-    let app = kb::router(state.clone());
+    let app = pinakes::router(state.clone());
 
     for t in testset::tenants() {
         let created = match state.tenants.create(&t.id, "testset").await {

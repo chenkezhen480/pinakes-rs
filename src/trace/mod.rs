@@ -49,7 +49,7 @@ pub struct TraceRecord {
     /// always use today's graph and report when it changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<String>,
-    /// The code that answered (`kb::SERVICE`).
+    /// The code that answered (`pinakes::SERVICE`).
     #[serde(default)]
     pub service: String,
     /// Fingerprint of the search settings (`SearchConfig::fingerprint`).

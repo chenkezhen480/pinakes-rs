@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kb::kinds::Kind;
-use kb::tenants::{group_dir_name, user_dir_name};
-use kb::wiki::{Page, PagePath};
+use pinakes::kinds::Kind;
+use pinakes::tenants::{group_dir_name, user_dir_name};
+use pinakes::wiki::{Page, PagePath};
 use serde::Deserialize;
 
 fn testset_dir() -> PathBuf {

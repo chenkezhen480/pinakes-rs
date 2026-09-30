@@ -20,7 +20,7 @@ fn main() {
         }
         _ => "unknown".to_owned(),
     };
-    println!("cargo:rustc-env=KB_GIT_COMMIT={commit}");
+    println!("cargo:rustc-env=PINAKES_GIT_COMMIT={commit}");
     // Rebuild the stamp when the checked-out branch, its commit or the tracked sources change.
     // `.git/HEAD` only names the branch; a commit moves the branch's ref.
     for path in [

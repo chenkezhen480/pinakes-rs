@@ -1,5 +1,5 @@
 # Service configuration. Secrets stay in environment variables, never in this file:
-# KB_ADMIN_KEY (admin routes), later ANTHROPIC_API_KEY and NEO4J_PASSWORD.
+# PINAKES_ADMIN_KEY (admin routes), later ANTHROPIC_API_KEY and NEO4J_PASSWORD.
 # Sections marked (Mx) are read from that milestone on; until then they are ignored.
 
 [server]
@@ -16,7 +16,7 @@ default_tenant = "000000"      # personal: created on first start, key in <data>
 default_user = "admin"         # personal: the user when no user header is sent (no admin rights)
 key_header = "Authorization"   # "Bearer <key>"
 user_header = "X-User-Id"
-admin_key_env = "KB_ADMIN_KEY"
+admin_key_env = "PINAKES_ADMIN_KEY"
 # jwt mode (M7):
 # public_key_file = "keys/auth.pem"
 # tenant_claim = "tenant_id"

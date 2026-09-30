@@ -1,4 +1,4 @@
-# cyrene-memory (crate `kb`)
+# Pinakes (crate `pinakes`)
 
 A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 (the original is `docs/Design.docx`). Read the relevant section before starting a milestone.
@@ -14,8 +14,8 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - The shell has `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` pointing at a local proxy (127.0.0.1:7897).
   When curling the local server, first `unset HTTP_PROXY HTTPS_PROXY ALL_PROXY; export NO_PROXY=127.0.0.1,localhost`.
 - Graph tests against Neo4j (M3 on): `NEO4J_PASSWORD=... docker compose up -d neo4j`, then
-  `KB_TEST_NEO4J_URI=bolt://127.0.0.1:7687 KB_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset`.
-  Without `KB_TEST_NEO4J_URI` that test is skipped; the SQLite backend always runs.
+  `PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset`.
+  Without `PINAKES_TEST_NEO4J_URI` that test is skipped; the SQLite backend always runs.
 - Run the server bound to `127.0.0.1` locally; binding `0.0.0.0` pops a Windows Firewall dialog.
   Start it with `run_in_background`, never with `&` inside a foreground command (that hangs the tool).
 
@@ -53,5 +53,5 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 ## Layout
 
 Single package: `src/lib.rs` holds the modules, `src/main.rs` only reads config and starts the
-server, `src/bin/kb-replay.rs` replays search traces, and `tests/` holds HTTP-level integration
+server, `src/bin/pinakes-replay.rs` replays search traces, and `tests/` holds HTTP-level integration
 tests that drive the axum `Router` directly (shared helpers in `tests/common/`).

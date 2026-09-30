@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use kb::AppState;
-use kb::config::Config;
+use pinakes::AppState;
+use pinakes::config::Config;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -11,12 +11,13 @@ async fn main() -> anyhow::Result<()> {
     // Span close events carry `time.busy`/`time.idle`, which is the per-step timing.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,kb=debug")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,pinakes=debug")),
         )
         .with_span_events(FmtSpan::CLOSE)
         .init();
 
-    let config_path = std::env::var_os("KB_CONFIG")
+    let config_path = std::env::var_os("PINAKES_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config.toml"));
     let config = if config_path.exists() {
@@ -43,10 +44,15 @@ async fn main() -> anyhow::Result<()> {
         // Shown once; it is also kept in the key file.
         println!(
             "Created the default tenant. Its API key (also in {}):\n{key}",
-            state.config.data.dir.join(kb::PERSONAL_KEY_FILE).display()
+            state
+                .config
+                .data
+                .dir
+                .join(pinakes::PERSONAL_KEY_FILE)
+                .display()
         );
     }
-    let app = kb::router(state.clone());
+    let app = pinakes::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

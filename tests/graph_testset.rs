@@ -10,10 +10,10 @@
 //!
 //! ```text
 //! NEO4J_PASSWORD=... docker compose up -d neo4j
-//! KB_TEST_NEO4J_URI=bolt://127.0.0.1:7687 KB_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset
+//! PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset
 //! ```
 //!
-//! Without `KB_TEST_NEO4J_URI` the Neo4j test says so and passes. Run with `-- --nocapture` for
+//! Without `PINAKES_TEST_NEO4J_URI` the Neo4j test says so and passes. Run with `-- --nocapture` for
 //! the per-category report.
 
 mod common;
@@ -129,12 +129,12 @@ async fn m3_questions_with_the_sqlite_backend() {
 
 #[tokio::test]
 async fn m3_questions_with_the_neo4j_backend() {
-    let Ok(uri) = std::env::var("KB_TEST_NEO4J_URI") else {
-        println!("KB_TEST_NEO4J_URI is not set; skipping the Neo4j run");
+    let Ok(uri) = std::env::var("PINAKES_TEST_NEO4J_URI") else {
+        println!("PINAKES_TEST_NEO4J_URI is not set; skipping the Neo4j run");
         return;
     };
     let config = format!(
-        "[graph]\nbackend = \"neo4j\"\n[neo4j]\nuri = {uri:?}\npassword_env = \"KB_TEST_NEO4J_PASSWORD\"\n"
+        "[graph]\nbackend = \"neo4j\"\n[neo4j]\nuri = {uri:?}\npassword_env = \"PINAKES_TEST_NEO4J_PASSWORD\"\n"
     );
     let suffix = format!("-{}", hex_suffix());
     let (app, keys, out) = run(&config, &suffix, &["M2", "M3"]).await;

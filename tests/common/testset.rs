@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kb::tenants::{group_dir_name, user_dir_name};
+use pinakes::tenants::{group_dir_name, user_dir_name};
 use serde::Deserialize;
 use serde_json::{Value, json};
 

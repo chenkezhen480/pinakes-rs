@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use common::app::{Caller, TestApp};
 use common::testset;
-use kb::tenants::{Tenants, group_dir_name, tenant_dir_name, user_dir_name};
-use kb::trace::replay::{TraceReader, WikiSource, replay, trace_files};
-use kb::trace::{Endpoint, TraceRecord};
-use kb::wiki::{Page, PagePath, WikiFs};
+use pinakes::tenants::{Tenants, group_dir_name, tenant_dir_name, user_dir_name};
+use pinakes::trace::replay::{TraceReader, WikiSource, replay, trace_files};
+use pinakes::trace::{Endpoint, TraceRecord};
+use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::json;
 
 async fn shopline() -> (TestApp, String) {
@@ -63,7 +63,7 @@ async fn searches_and_reads_leave_one_line_each() {
         json!({ "page": "experience/partial-refund-after-shipment", "match": "alias" })
     );
     assert!(search.snapshot.is_some());
-    assert_eq!(search.service, kb::SERVICE);
+    assert_eq!(search.service, pinakes::SERVICE);
     assert_eq!(search.search_config, app.config().search.fingerprint());
     for step in [
         "prepare",
@@ -79,7 +79,7 @@ async fn searches_and_reads_leave_one_line_each() {
     assert_eq!(read.result["pages"][1]["error"], "not_found");
 
     // Raw user and group ids never reach the file.
-    let text = std::fs::read_to_string(kb::trace::trace_file(
+    let text = std::fs::read_to_string(pinakes::trace::trace_file(
         &app.config().tenants_dir(),
         &tenant_dir_name("shopline"),
         &search.at[..10],
@@ -154,7 +154,7 @@ async fn replay_reports_what_changed() {
         app.config().tenants_dir(),
         app.config().store.file_name.clone(),
     );
-    // A fresh registry per replay, as the kb-replay tool opens one.
+    // A fresh registry per replay, as the pinakes-replay tool opens one.
     let tenants = || Tenants::new(&root, store_file.clone(), Duration::from_secs(60));
 
     // Same code, same wiki: nothing changes. A record that no longer validates is skipped
@@ -170,7 +170,7 @@ async fn replay_reports_what_changed() {
     assert_eq!(report.skipped, 1);
     assert!(report.failed.is_empty());
     assert_eq!((report.wiki_changed, report.wiki_missing), (0, 0));
-    assert_eq!(report.recorded_services.get(kb::SERVICE), Some(&2));
+    assert_eq!(report.recorded_services.get(pinakes::SERVICE), Some(&2));
     assert_eq!(report.search_config, cfg.fingerprint());
 
     // A new page that outranks the old answer.
@@ -216,7 +216,7 @@ async fn replay_reports_what_changed() {
         app.data
             .path()
             .join("tenants")
-            .join(kb::tenants::tenant_dir_name("shopline"))
+            .join(pinakes::tenants::tenant_dir_name("shopline"))
             .join("history"),
     )
     .unwrap();

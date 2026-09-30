@@ -6,9 +6,9 @@ mod common;
 
 use axum::http::StatusCode;
 use common::app::{Caller, TestApp};
-use kb::PERSONAL_KEY_FILE;
-use kb::tenants::user_dir_name;
-use kb::wiki::{Page, PagePath, WikiFs};
+use pinakes::PERSONAL_KEY_FILE;
+use pinakes::tenants::user_dir_name;
+use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::json;
 
 const PERSONAL: &str = "[identity]\ndeployment = \"personal\"\n";

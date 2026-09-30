@@ -690,8 +690,11 @@ async fn partial_names_are_traced() {
     );
     assert!(resp.get("partial_names").is_none());
     w.app.state.traces.flush();
-    let files = kb::trace::replay::trace_files(&[w.app.config().tenants_dir()], Some(7)).unwrap();
-    let last = kb::trace::replay::TraceReader::new(files).last().unwrap();
+    let files =
+        pinakes::trace::replay::trace_files(&[w.app.config().tenants_dir()], Some(7)).unwrap();
+    let last = pinakes::trace::replay::TraceReader::new(files)
+        .last()
+        .unwrap();
     assert_eq!(
         last.result["partial_names"],
         json!([{ "keyword": "airbeat", "nodes": ["mainland:product/p1"] }])
@@ -859,7 +862,7 @@ async fn page_anchors_are_filtered_when_browsing() {
 #[tokio::test]
 async fn an_unreachable_graph_store() {
     let mut w = world().await;
-    let broken = "[graph]\nbackend = \"neo4j\"\n[neo4j]\nuri = \"bolt://127.0.0.1:1\"\npassword_env = \"KB_TEST_NO_SUCH_PASSWORD\"\n";
+    let broken = "[graph]\nbackend = \"neo4j\"\n[neo4j]\nuri = \"bolt://127.0.0.1:1\"\npassword_env = \"PINAKES_TEST_NO_SUCH_PASSWORD\"\n";
     w.app.restart_with_config(broken);
     let started = std::time::Instant::now();
     assert!(w.app.state.prepare().await.is_err());
@@ -947,8 +950,11 @@ async fn response_formats_follow_the_conventions() {
 
     // Traces keep edges as objects and leave out an absent intent.
     w.app.state.traces.flush();
-    let files = kb::trace::replay::trace_files(&[w.app.config().tenants_dir()], Some(7)).unwrap();
-    let last = kb::trace::replay::TraceReader::new(files).last().unwrap();
+    let files =
+        pinakes::trace::replay::trace_files(&[w.app.config().tenants_dir()], Some(7)).unwrap();
+    let last = pinakes::trace::replay::TraceReader::new(files)
+        .last()
+        .unwrap();
     assert!(
         last.result["relations"]["edges"][0].is_object(),
         "{}",

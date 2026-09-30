@@ -1,4 +1,4 @@
-# Knowledge Base Service in Rust — Design
+# Pinakes: Knowledge Base Service in Rust — Design
 
 Sep 29, 2026 · @Banks Jorge
 
@@ -166,7 +166,7 @@ updated: 2026-09-29
 - **Follow-ups.** `/graph` returns the walked nodes, their edges and the visible pages anchored to them or to the start node's type; `/graph/path` looks for at most 6 hops and never joins two spaces. Unknown and hidden nodes are both 404.
 - **Visibility details.** A restricted space is visible to its owner (the user who created it) as well as its members (decided with the user 2026-09-30). `GET /pages/{path}` filters a page's `about` anchors by the same rules as search hits: node anchors only in visible spaces, type anchors only for node types that exist. Space names are unique across the tenant, hidden spaces included, so creating a taken name is a 409; this tells a caller that a name is taken, even by a space they can't see. It can't be avoided while names are unique in a tenant, which `space:type/key` references need. Visibility and members are fixed at creation until an update endpoint comes (not in M3).
 - **Neo4j model.** Each node is labelled `KbNode` plus its type, with `tenant`, `space`, `type`, `key`, `name` and `aliases`; each edge is a `KB_REL` relationship with `tenant`, `space` and `type`. Each deployment has its own Neo4j (confirmed with the user 2026-09-30), so `tenant` is the tenant id. Checked on Neo4j 5.26.28 Community: the composite uniqueness constraint on `(tenant, space, type, key)` works there (node key and existence constraints are Enterprise only), plus indexes on the tenant id of nodes and relationships.
-- **Traces.** Each search trace records the graph snapshot's version. Graph data has no history, so `kb-replay` always runs on today's graph and reports which replays saw a different one.
+- **Traces.** Each search trace records the graph snapshot's version. Graph data has no history, so `pinakes-replay` always runs on today's graph and reports which replays saw a different one.
 
 **Why a graph still fits A-RAG.** A-RAG's critique of graph-based RAG, such as GraphRAG and HippoRAG2, is that those systems "rely on predefined retrieval algorithms rather than model-driven decisions." Here the graph is reached through the same agent-driven search, and the agent decides whether to follow a graph route.
 
@@ -353,7 +353,7 @@ Every `/search` and `/read` that is answered leaves one line in the tenant's `lo
 - **Wiki history.** Every wiki version a search snapshot is built from is kept in the tenant's `history/`, content-addressed so an unchanged page is stored once (`history/objects/`, plus one manifest per version in `history/versions/`). No git is needed, and a wiki the host keeps in its own git is left alone. Next to each day's traces, `logs/versions-<date>.txt` lists the versions that day's lines ran on.
 - **Retention.** Trace files and version lists older than `retention_days` (30 by default, in `[trace]`) are removed, then the wiki versions no remaining list names and nothing built recently, with the page objects only they used. Deleting a user does not touch traces; they expire with the retention period. It does remove that user's pages from every kept wiki version (decided 2026-09-30), since those copies hold the pages' full text; searches by that user can then no longer be replayed on their recorded wiki.
 - **Weak slots.** A weak slot is visible in its line, which is the miss log that lint reviews (see "Misses improve the wiki").
-- **Replay.** `kb-replay` reads trace files and runs each recorded search again with the current code and config, on the wiki version it ran on (rebuilt from the history, the default) or on today's wiki (`--wiki current`). On the recorded wiki a difference comes from the code or the settings alone, which is what an experiment on search needs; on today's wiki it shows what users would get now. The report lists which results stayed the same and which changed (pages added, dropped or reordered, coverage flips), which code and settings answered at the time and now, and which searches had to fall back to today's wiki because their version had expired. By default it replays the last 7 days (`--days N`, 0 for all of the 30 kept); it streams the files line by line, so its memory stays flat however much it replays. Replays never write traces, never mark pages as read, and never consume or delete what they read.
+- **Replay.** `pinakes-replay` reads trace files and runs each recorded search again with the current code and config, on the wiki version it ran on (rebuilt from the history, the default) or on today's wiki (`--wiki current`). On the recorded wiki a difference comes from the code or the settings alone, which is what an experiment on search needs; on today's wiki it shows what users would get now. The report lists which results stayed the same and which changed (pages added, dropped or reordered, coverage flips), which code and settings answered at the time and now, and which searches had to fall back to today's wiki because their version had expired. By default it replays the last 7 days (`--days N`, 0 for all of the 30 kept); it streams the files line by line, so its memory stays flat however much it replays. Replays never write traces, never mark pages as read, and never consume or delete what they read.
 
 ## Architecture
 
@@ -521,7 +521,7 @@ One axum server exposes three interfaces, and all of them call the same core fun
 - `match` says how something was found: `alias` or `keyword` for page hits; `path`, `relation`, `node_type`, `neighbor` or `anchor` for edges.
 - Keys are snake_case; errors are `{"error": {"code", "message"}}` everywhere.
 - Stored forms use the same field names as the API: a schema definition is the same in the request, in SQLite and in its description's front matter; a node or edge is the same in a data request, in SQLite and as Neo4j properties. The one exception is `front_matter` in `GET /pages/{path}`: it is the page file as stored, so empty lists are left out as in the file.
-- Search traces use the response's names, with edges as `{from, type, to}` objects (`kb-replay` also reads the `[from, type, to]` arrays of earlier traces).
+- Search traces use the response's names, with edges as `{from, type, to}` objects (`pinakes-replay` also reads the `[from, type, to]` arrays of earlier traces).
 
 Here is an example insert, a decision record. The search example is in "Retrieval for agents":
 
@@ -556,7 +556,7 @@ The tool descriptions carry the retrieval guidance from "Retrieval for agents". 
 
 ### Streaming test chat
 
-The test chat is for developers trying the service out, not part of the real API. A small page at `/dev` sends questions to `POST /dev/chat`, which builds an LLM answer from `/search` results and the follow-ups they point to. The answer streams back as Server-Sent Events, next to the slots it used. Both routes exist only when `KB_DEV=1` is set.
+The test chat is for developers trying the service out, not part of the real API. A small page at `/dev` sends questions to `POST /dev/chat`, which builds an LLM answer from `/search` results and the follow-ups they point to. The answer streams back as Server-Sent Events, next to the slots it used. Both routes exist only when `PINAKES_DEV=1` is set.
 
 ## Crates we'll use
 
@@ -656,7 +656,7 @@ async fn search(
 The project is a single crate, with one module per job. Everything a developer might want to change without touching code lives in `config.toml`, `rules/` and `prompts/`.
 
 ```text
-kb/
+pinakes/
 ├── Cargo.toml
 ├── Dockerfile           build on the official Rust image, run on a slim one
 ├── docker-compose.yml   the service plus the official Neo4j image
@@ -751,21 +751,21 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=build /src/target/release/kb /usr/local/bin/kb
+COPY --from=build /src/target/release/pinakes /usr/local/bin/pinakes
 COPY config.toml ./
 COPY rules ./rules
 COPY prompts ./prompts
 VOLUME ["/data"]
 EXPOSE 8080
-CMD ["kb"]
+CMD ["pinakes"]
 ```
 
 ```yaml
 services:
-  kb:
+  pinakes:
     build: .
     ports: ["8080:8080"]
-    volumes: ["kb-data:/data"]
+    volumes: ["pinakes-data:/data"]
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}
@@ -777,7 +777,7 @@ services:
     volumes: ["neo4j-data:/data"]
 
 volumes:
-  kb-data:
+  pinakes-data:
   neo4j-data:
 ```
 
@@ -827,7 +827,7 @@ There are nine milestones, and each ends with a check you can run yourself. Isol
 | # | Build | Done when |
 |---|---|---|
 | M1 | Skeleton: config, identity in API key mode, tenant folders and id mapping, the `Store` trait with one SQLite file per tenant, pages as files, `/pages`, a tracing span per step | Two tenants' pages and SQLite files are completely invisible to each other over HTTP |
-| M2 | One entry, keyword mode: name matcher, English and Chinese tokenizers with the jieba dictionary, per-tenant tantivy index (in memory, rebuilt from the wiki when the tenant opens), the three channels and their slots, routes, `/read` of pages with the read tracker, search traces and `kb-replay`, the personal deployment defaults | The test set's questions come back in the right slot, in both languages |
+| M2 | One entry, keyword mode: name matcher, English and Chinese tokenizers with the jieba dictionary, per-tenant tantivy index (in memory, rebuilt from the wiki when the tenant opens), the three channels and their slots, routes, `/read` of pages with the read tracker, search traces and `pinakes-replay`, the personal deployment defaults | The test set's questions come back in the right slot, in both languages |
 | M3 | Graph: `/ingest/graph/schema`, `/space` and `/data`, schema definitions and descriptions, spaces under schemas with their visibility, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, instance names in the name matcher, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords; nothing from a space the caller can't see ever appears; and the tests pass against the Neo4j container |
 | M4 | Librarian and inserts: `LlmClient` with both backends, plan and verify steps, the other four insert entry points, anchoring, per-tenant write queue, `/jobs`, proposals, rules for all five kinds, raw records in `sources/` and `/read` of the sources a visible page cites | New content updates the related pages instead of duplicating them, every memory is anchored, and unsupported edits are held for review |
 | M5 | Hop and meaning: the memory-to-knowledge hop, embeddings computed at write time with the e5 prefixes and stored in SQLite, `mode` with `semantic`, `both` and `auto` | Questions that need a memory plus the knowledge it leads to are answered, and semantic mode recovers cross-language misses |

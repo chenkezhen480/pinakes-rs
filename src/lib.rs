@@ -22,7 +22,7 @@ use tenants::Tenants;
 
 /// The code answering requests: crate version plus the git commit it was built from
 /// (`-dirty` with uncommitted changes), as traces and replay reports record it.
-pub const SERVICE: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("KB_GIT_COMMIT"));
+pub const SERVICE: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("PINAKES_GIT_COMMIT"));
 
 /// State shared by every request.
 #[derive(Clone)]

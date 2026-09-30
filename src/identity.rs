@@ -53,7 +53,7 @@ impl Scope {
         &self.groups
     }
 
-    /// A scope for offline tools that already hold the data folder, such as `kb-replay`,
+    /// A scope for offline tools that already hold the data folder, such as `pinakes-replay`,
     /// rebuilt from the folder names a trace recorded. Request handlers never use this: over
     /// HTTP a Scope only comes from credentials.
     pub(crate) fn offline(

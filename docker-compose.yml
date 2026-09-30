@@ -1,5 +1,5 @@
 # Neo4j for development and the M3 graph tests: `NEO4J_PASSWORD=... docker compose up -d neo4j`.
-# The kb service itself joins this file in M7. Ports are bound to 127.0.0.1 only.
+# The pinakes service itself joins this file in M7. Ports are bound to 127.0.0.1 only.
 services:
   neo4j:
     # Pinned: the version the neo4rs driver (0.9.0-rc.10) is tested against here.

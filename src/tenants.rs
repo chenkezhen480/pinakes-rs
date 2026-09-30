@@ -385,7 +385,7 @@ impl Tenants {
     }
 
     /// Opens a tenant by its folder name (`t_` plus 16 hex digits), for offline tools such as
-    /// `kb-replay`. Anything else, and unknown folders, give `None`.
+    /// `pinakes-replay`. Anything else, and unknown folders, give `None`.
     pub(crate) async fn open(&self, dir_name: &str) -> anyhow::Result<Option<Arc<Tenant>>> {
         let well_formed = dir_name.strip_prefix("t_").is_some_and(|h| {
             h.len() == HASH_HEX_LEN

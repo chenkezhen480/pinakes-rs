@@ -280,7 +280,7 @@ fn default_group_header() -> String {
     "X-User-Groups".into()
 }
 fn default_admin_key_env() -> String {
-    "KB_ADMIN_KEY".into()
+    "PINAKES_ADMIN_KEY".into()
 }
 fn default_session_idle_minutes() -> u64 {
     30

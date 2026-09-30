@@ -1041,37 +1041,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kb"
-version = "0.1.0"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "async-trait",
- "axum",
- "hex",
- "http-body-util",
- "jieba-rs",
- "neo4rs",
- "petgraph",
- "rand",
- "rusqlite",
- "rust-stemmers",
- "serde",
- "serde_json",
- "serde_norway",
- "sha2",
- "tantivy",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tower",
- "tracing",
- "tracing-subscriber",
- "unicode-normalization",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1447,6 +1416,37 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pinakes"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "hex",
+ "http-body-util",
+ "jieba-rs",
+ "neo4rs",
+ "petgraph",
+ "rand",
+ "rusqlite",
+ "rust-stemmers",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
+ "tantivy",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-normalization",
+]
 
 [[package]]
 name = "pkg-config"
