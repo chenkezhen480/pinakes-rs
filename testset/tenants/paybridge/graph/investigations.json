@@ -1,0 +1,20 @@
+{
+  "space": "investigations",
+  "schema": "payments",
+  "nodes": [
+    { "type": "merchant", "key": "mch_950", "name": "Shadow Parts Ltd", "aliases": ["影子配件", "Shadow Parts"] },
+    { "type": "merchant", "key": "mch_951", "name": "QuickSpare Trading", "aliases": ["快配贸易", "QuickSpare"] },
+    { "type": "transaction", "key": "txn_77001", "name": "Transaction txn_77001", "aliases": [] },
+    { "type": "transaction", "key": "txn_77002", "name": "Transaction txn_77002", "aliases": [] },
+    { "type": "transaction", "key": "txn_77003", "name": "Transaction txn_77003", "aliases": [] },
+    { "type": "risk_rule", "key": "rr_card_testing", "name": "Card testing pattern", "aliases": ["盗卡测试规则", "card testing rule"] }
+  ],
+  "edges": [
+    { "from": "transaction/txn_77001", "type": "charged_by", "to": "merchant/mch_950" },
+    { "from": "transaction/txn_77002", "type": "charged_by", "to": "merchant/mch_950" },
+    { "from": "transaction/txn_77003", "type": "charged_by", "to": "merchant/mch_951" },
+    { "from": "transaction/txn_77001", "type": "flagged_by", "to": "risk_rule/rr_card_testing" },
+    { "from": "transaction/txn_77003", "type": "flagged_by", "to": "risk_rule/rr_card_testing" },
+    { "from": "merchant/mch_951", "type": "sub_merchant_of", "to": "merchant/mch_950" }
+  ]
+}

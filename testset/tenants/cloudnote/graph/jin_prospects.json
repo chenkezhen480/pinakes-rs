@@ -1,0 +1,15 @@
+{
+  "space": "jin_prospects",
+  "schema": "accounts",
+  "nodes": [
+    { "type": "workspace", "key": "ws_orca", "name": "Orca Labs", "aliases": ["逆戟鲸实验室", "Orca"] },
+    { "type": "subscription", "key": "sub_trial_9", "name": "Orca Labs trial", "aliases": ["Orca 试用"] },
+    { "type": "plan", "key": "business", "name": "Business plan", "aliases": ["商业版"] },
+    { "type": "member", "key": "m_leo", "name": "Leo Wang", "aliases": ["王磊"] }
+  ],
+  "edges": [
+    { "from": "workspace/ws_orca", "type": "has_subscription", "to": "subscription/sub_trial_9" },
+    { "from": "subscription/sub_trial_9", "type": "on_plan", "to": "plan/business" },
+    { "from": "member/m_leo", "type": "member_of", "to": "workspace/ws_orca" }
+  ]
+}

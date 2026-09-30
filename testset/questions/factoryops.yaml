@@ -212,6 +212,7 @@ questions:
     category: graph
     milestone: M3
     lang: zh
+    user: sarah
     query: "武汉工厂的CNC-07用的是什么轴承？"
     keywords: [武汉工厂, CNC-07, 轴承]
     expect:
@@ -293,3 +294,28 @@ questions:
     keywords: [bearing safety stock, 6205]
     must_not: [users/ligong/decisions/raise-bearing-stock]
     notes: Li Gong's decision; Sarah may still get the part and supplier through the graph.
+
+  # --- graph space visibility: wuhan is restricted to sarah and the wuhan-maintenance group ---
+  - id: factoryops-spi-01
+    category: space_isolation
+    milestone: M3
+    lang: zh
+    user: ligong
+    query: "武汉工厂的CNC-07用的是什么轴承？"
+    keywords: [武汉工厂, CNC-07, 轴承]
+    must_not_spaces: [wuhan]
+    notes: >
+      Li Gong is neither a listed member nor in the group, so nothing from the Wuhan space may
+      appear, not even the space's name as a matched entity. Suzhou's CNC-07 (shared) may.
+  - id: factoryops-gra-07
+    category: graph
+    milestone: M3
+    lang: zh
+    user: ligong
+    groups: [wuhan-maintenance]
+    query: "武汉工厂的CNC-07用的是什么轴承？"
+    keywords: [武汉工厂, CNC-07, 轴承]
+    expect:
+      relations:
+        - { from: "wuhan:machine/CNC-07", type: uses_part, to: "wuhan:part/P-BRG-6206" }
+    notes: The same caller as factoryops-spi-01, now sent with the wuhan-maintenance group.

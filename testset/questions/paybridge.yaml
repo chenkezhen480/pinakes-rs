@@ -278,3 +278,36 @@ questions:
     keywords: [KYC review postponed, periodic review]
     must_not: [users/chen/decisions/postpone-kyc-review]
     notes: Chen's decision; Marco may still see the KYC requirements page.
+
+  # --- graph space visibility: investigations is restricted to marco and risk-team ----------
+  - id: paybridge-gra-06
+    category: graph
+    milestone: M3
+    lang: en
+    user: marco
+    query: "Which transactions were charged for Shadow Parts?"
+    keywords: [Shadow Parts, transactions]
+    expect:
+      relations:
+        - { from: "investigations:transaction/txn_77001", type: charged_by, to: "investigations:merchant/mch_950" }
+        - { from: "investigations:transaction/txn_77002", type: charged_by, to: "investigations:merchant/mch_950" }
+    notes: Marco is a listed member of the restricted investigations space.
+  - id: paybridge-spi-01
+    category: space_isolation
+    milestone: M3
+    lang: zh
+    user: chen
+    query: "影子配件有哪些交易？"
+    keywords: [影子配件, 交易]
+    must_not_spaces: [investigations]
+    expect_empty: [relations]
+    notes: Chen is not on the member list; the merchant exists only in the restricted space.
+  - id: paybridge-spi-02
+    category: space_isolation
+    milestone: M3
+    lang: en
+    query: "Which merchant is QuickSpare Trading a sub-merchant of?"
+    keywords: [QuickSpare Trading, sub-merchant]
+    must_not_spaces: [investigations]
+    expect_empty: [relations]
+    notes: A caller with no user id only ever sees shared spaces.

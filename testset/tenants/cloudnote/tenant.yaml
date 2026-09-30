@@ -11,3 +11,9 @@ graph:
   schemas: [accounts]
   spaces:
     - { id: customers, schema: accounts, name: 客户账户, aliases: [customer accounts, customers] }
+    - id: jin_prospects
+      schema: accounts
+      name: 金浩的潜在客户
+      aliases: [Jin's prospects, 潜在客户, prospects]
+      visibility: private
+      owner: jin

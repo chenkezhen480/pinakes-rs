@@ -33,6 +33,9 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   matcher from the graph data.
 - Entity references: `schema:type` for a node type, `space:type/key` for a node. Space names are
   unique in a tenant and never equal a schema name.
+- Graph spaces are shared (default), private (owner only) or restricted (member users and groups).
+  Compute the caller's visible spaces once per request and drop everything from other spaces
+  before responding; edges never cross spaces; hidden nodes are 404.
 - Tenant and user folder names come from the id-mapping function (`tenants::tenant_dir_name`,
   `tenants::user_dir_name`), never from raw ids.
 - A page another user owns, or another tenant's anything, is reported as not found (404), never

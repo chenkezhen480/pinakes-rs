@@ -106,7 +106,23 @@ A **schema** defines a set of node types and relation types. A **graph space** i
 
 Code, not the librarian, owns the structural fields of a description (node types, relation types, their ends and keys), copied from the stored definition; the librarian writes what each type means in both languages, the aliases and the summary. So an LLM edit can never change what data is accepted. In version 1 a schema change may only add types, relations and aliases: removing a type or relation that a space still uses, or changing a key, is rejected.
 
-Space names are unique within a tenant and never equal a schema name, so an entity reference is unambiguous: `schema:type` names a node type (`commerce:order`), and `space:type/key` names one node (`mainland:order/1042`). Two spaces of one schema can each hold an order 1042. A space is registered with a display name and aliases (`跨境站`, "cross-border store"), which go into the name matcher like node names, so "跨境站的订单1042" narrows the search to that space; without a space named, searches cover every space of the tenant and each edge says which space it came from.
+Space names are unique within a tenant and never equal a schema name, so an entity reference is unambiguous: `schema:type` names a node type (`commerce:order`), and `space:type/key` names one node (`mainland:order/1042`). Two spaces of one schema can each hold an order 1042. A space is registered with a display name and aliases (`跨境站`, "cross-border store"), which go into the name matcher like node names, so "跨境站的订单1042" narrows the search to that space; without a space named, searches cover every space the caller can see and each edge says which space it came from.
+
+**Who can see a graph space.** Each space has a visibility, set when it is created:
+
+| Visibility | Who can see it | Typical use |
+|---|---|---|
+| `shared` (default) | Everyone in the tenant | A product catalog, an org chart, a plant's equipment |
+| `private` | Only its owner, the user who created it | A salesperson's own map of prospects |
+| `restricted` | The users and groups on its member list | A fraud investigation only the risk team may see |
+
+- The owner of a private space comes from the credentials of the call that creates it, never from the body. A restricted space lists member user ids and group ids. Groups come from the caller's credentials like the user id (see "Tenants, users and identity"), because the service manages neither accounts nor groups.
+- Every request works out once, from its `Scope`, which spaces the caller can see. Name-matcher hits, relation edges, walks, paths and anchors in any other space are dropped before anything is returned, so a hidden space's node names never appear, not even among the matched entities or in `unmatched_keywords` feedback. `/graph` and `/graph/path` on a node in a hidden space return 404.
+- Edges never cross spaces, so a shared space can't lead into a private or restricted one.
+- Tenant-level pages may anchor only to node types and to nodes in shared spaces; a user's own pages may also anchor to nodes in spaces that user can see. The librarian is only shown what the page's scope can see, and lint flags anchors that break this.
+- Writing data to a space requires seeing it. Changing a space's visibility or members needs its owner (private) or the admin key.
+- Schemas are always tenant-wide: a description holds types, never data, so any space can use any schema.
+- Deleting a user deletes their private spaces and removes them from member lists.
 
 **What the description holds.** The node types and relation types of the schema, what each one means in English and Chinese, a few aliases, and the key fields. It changes only when the schema itself changes.
 
@@ -151,7 +167,7 @@ The service never creates or authenticates end users. The host system passes ten
 | API key (default) | Bound to the key; each key belongs to one tenant | The `X-User-Id` header, set by the calling backend | A backend or agent platform calling the service directly |
 | JWT | A claim in a token the host signs | A claim in the same token | Setups where end-user tokens reach the service |
 
-Ids are opaque strings: the service never reads meaning into them. Header names, claim names and key lists are all set in config, so developers can adapt the service without changing code.
+Group ids are optional and only matter for restricted graph spaces: in API key mode they come from the `X-User-Groups` header (comma-separated), in JWT mode from a claim in the same token. Ids are opaque strings: the service never reads meaning into them. Header names, claim names and key lists are all set in config, so developers can adapt the service without changing code.
 
 **How isolation is enforced.**
 
@@ -160,6 +176,7 @@ Ids are opaque strings: the service never reads meaning into them. Header names,
 - **Filters the caller can't remove.** The service adds the tenant and user filters to every search, graph walk and read, and request bodies can't widen them. Anchors that lead into another user's pages are dropped before a walk starts.
 - **One graph database, filtered.** Neo4j Community edition runs a single database, so every node and edge carries the tenant id, with an index on it, and every Cypher query the service sends filters on it.
 - **Separate ranking statistics.** Separate indexes mean one tenant's content never shifts another tenant's search results.
+- **Graph spaces with a visibility.** Shared spaces are open to the whole tenant; private and restricted spaces are filtered out of every search, walk and anchor for callers who may not see them (see "Who can see a graph space").
 - **A scoped librarian.** The librarian only ever sees pages from the same scope, so another tenant's content never enters a prompt.
 - **Clean deletion.** Deleting a tenant deletes its folder and its nodes and edges in Neo4j. Deleting a user removes their decision history and preferences, with the anchors and vectors that came from them.
 - **Loaded on demand.** A tenant's index, vectors and graph load on first use, from its files, its SQLite file and Neo4j. Busy tenants stay in memory, and idle ones cost only disk space.
@@ -435,7 +452,7 @@ One axum server exposes three interfaces, and all of them call the same core fun
 | POST | `/ingest/decision` | Add a user's decision and its outcome; returns a job id |
 | POST | `/ingest/expertise` | Add a domain document or manual; returns a job id |
 | POST | `/ingest/graph/schema` | Create or change a graph schema (additive only); the librarian writes its description; returns a job id |
-| POST | `/ingest/graph/space` | Create a graph space under a schema; no LLM, no wiki page |
+| POST | `/ingest/graph/space` | Create a graph space under a schema, with its visibility (shared, private or restricted with members); no LLM, no wiki page |
 | POST | `/ingest/graph/data` | Add nodes and edges to a space, checked by code against its schema; no LLM, no wiki page |
 | POST | `/ingest/preference` | Add a user's stated preference or observed habit; returns a job id |
 | GET | `/jobs/{id}` | Status and result of an ingest or lint job |
@@ -626,10 +643,12 @@ dir = "/data"                  # the Docker volume
 [identity]
 mode = "api_key"               # or "jwt"
 user_header = "X-User-Id"
+group_header = "X-User-Groups"   # optional; used by restricted graph spaces
 # jwt mode:
 # public_key_file = "keys/auth.pem"
 # tenant_claim = "tenant_id"
 # user_claim = "sub"
+# groups_claim = "groups"
 
 [librarian]                    # the only LLM the service calls
 provider = "anthropic"         # or "openai_compatible"
@@ -757,7 +776,7 @@ There are nine milestones, and each ends with a check you can run yourself. Isol
 |---|---|---|
 | M1 | Skeleton: config, identity in API key mode, tenant folders and id mapping, the `Store` trait with one SQLite file per tenant, pages as files, `/pages`, a tracing span per step | Two tenants' pages and SQLite files are completely invisible to each other over HTTP |
 | M2 | One entry, keyword mode: name matcher, English and Chinese tokenizers with the jieba dictionary, per-tenant tantivy index, the three channels and their slots, routes, `/read` with the read tracker | The test set's questions come back in the right slot, in both languages |
-| M3 | Graph: `/ingest/graph/schema`, `/space` and `/data`, schema definitions and descriptions, spaces under schemas, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, instance names in the name matcher, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords, and the tests pass against the Neo4j container |
+| M3 | Graph: `/ingest/graph/schema`, `/space` and `/data`, schema definitions and descriptions, spaces under schemas with their visibility, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, instance names in the name matcher, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords; nothing from a space the caller can't see ever appears; and the tests pass against the Neo4j container |
 | M4 | Librarian and inserts: `LlmClient` with both backends, plan and verify steps, the other four insert entry points, anchoring, per-tenant write queue, `/jobs`, proposals, rules for all five kinds | New content updates the related pages instead of duplicating them, every memory is anchored, and unsupported edits are held for review |
 | M5 | Hop and meaning: the memory-to-knowledge hop, embeddings computed at write time with the e5 prefixes and stored in SQLite, `mode` with `semantic`, `both` and `auto` | Questions that need a memory plus the knowledge it leads to are answered, and semantic mode recovers cross-language misses |
 | M6 | Speed: caches, loading tenants on demand, a benchmark at 1k, 10k and 100k pages | Per-step timings meet the targets in "How it stays fast", in both modes |

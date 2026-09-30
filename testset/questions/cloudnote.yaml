@@ -280,3 +280,28 @@ questions:
     keywords: [China region, Shanghai region]
     must_not: [users/jin/decisions/china-region-hosting]
     notes: Jin's decision; Ana may still get the data residency page in the knowledge slot.
+
+  # --- graph space visibility: jin_prospects is Jin's private space --------------------------
+  - id: cloudnote-gra-06
+    category: graph
+    milestone: M3
+    lang: zh
+    user: jin
+    query: "Orca Labs 在试用哪个套餐？"
+    keywords: [Orca Labs, 套餐, 试用]
+    expect:
+      relations:
+        - { from: "jin_prospects:workspace/ws_orca", type: has_subscription, to: "jin_prospects:subscription/sub_trial_9" }
+        - { from: "jin_prospects:subscription/sub_trial_9", type: on_plan, to: "jin_prospects:plan/business" }
+    trap: [expertise/plan-limits]
+    notes: Jin owns the private space, so the two-hop answer comes from it.
+  - id: cloudnote-spi-01
+    category: space_isolation
+    milestone: M3
+    lang: en
+    user: ana
+    query: "Which plan is Orca Labs trying out?"
+    keywords: [Orca Labs, plan, trial]
+    must_not_spaces: [jin_prospects]
+    expect_empty: [relations]
+    notes: Ana is in the same tenant but the space is private to Jin.

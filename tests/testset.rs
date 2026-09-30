@@ -42,6 +42,25 @@ struct SpaceEntry {
     #[serde(default)]
     #[allow(dead_code)]
     aliases: Vec<String>,
+    #[serde(default = "shared")]
+    visibility: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    members: Option<Members>,
+}
+
+fn shared() -> String {
+    "shared".into()
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Members {
+    #[serde(default)]
+    users: Vec<String>,
+    #[serde(default)]
+    groups: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,6 +144,8 @@ struct Question {
     lang: String,
     #[serde(default)]
     user: Option<String>,
+    #[serde(default)]
+    groups: Vec<String>,
     query: String,
     #[serde(default)]
     keywords: Vec<String>,
@@ -134,6 +155,8 @@ struct Question {
     expect_empty: Vec<String>,
     #[serde(default)]
     must_not: Vec<String>,
+    #[serde(default)]
+    must_not_spaces: Vec<String>,
     #[serde(default)]
     trap: Vec<String>,
     #[serde(default)]
@@ -175,6 +198,9 @@ struct Schema {
 
 struct Space {
     schema: String,
+    visibility: String,
+    owner: Option<String>,
+    members: Members,
     /// `type/key` of every node in the data.
     instances: HashSet<String>,
     /// `from|rel|to`, all as `type/key`.
@@ -190,6 +216,21 @@ struct Tenant {
 
 struct Report {
     errors: Vec<String>,
+}
+
+impl Space {
+    /// Whether a caller with this user id and these groups may see the space.
+    fn visible_to(&self, user: Option<&str>, groups: &[String]) -> bool {
+        match self.visibility.as_str() {
+            "shared" => true,
+            "private" => user.is_some() && user == self.owner.as_deref(),
+            "restricted" => {
+                user.is_some_and(|u| self.members.users.iter().any(|m| m == u))
+                    || groups.iter().any(|g| self.members.groups.contains(g))
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Report {
@@ -370,6 +411,32 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
         if sp.name.trim().is_empty() {
             report.err(format!("{name}: space {} has no display name", sp.id));
         }
+        let users: HashSet<&str> = file.users.iter().map(|u| u.id.as_str()).collect();
+        let members = sp.members.clone().unwrap_or_default();
+        match sp.visibility.as_str() {
+            "shared" if sp.owner.is_none() && sp.members.is_none() => {}
+            "private" if sp.members.is_none() => match &sp.owner {
+                Some(o) if users.contains(o.as_str()) => {}
+                other => report.err(format!(
+                    "{name}: private space {} has owner {other:?}",
+                    sp.id
+                )),
+            },
+            "restricted" if sp.owner.is_none() => {
+                if members.users.is_empty() && members.groups.is_empty() {
+                    report.err(format!("{name}: restricted space {} has no members", sp.id));
+                }
+                for u in &members.users {
+                    if !users.contains(u.as_str()) {
+                        report.err(format!("{name}: space {} lists unknown user {u}", sp.id));
+                    }
+                }
+            }
+            v => report.err(format!(
+                "{name}: space {} has visibility {v:?} with the wrong owner/members fields",
+                sp.id
+            )),
+        }
         let Some(schema) = schemas.get(&sp.schema) else {
             report.err(format!(
                 "{name}: space {} uses unknown schema {}",
@@ -435,6 +502,9 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
                 sp.id.clone(),
                 Space {
                     schema: sp.schema.clone(),
+                    visibility: sp.visibility.clone(),
+                    owner: sp.owner.clone(),
+                    members,
                     instances,
                     edges,
                 },
@@ -495,7 +565,17 @@ fn check_anchors(t: &Tenant, report: &mut Report) {
     for (fixture, fp) in &t.pages {
         for anchor in &fp.page.front.about {
             let res = if anchor.contains(':') {
-                check_entity(t, anchor)
+                check_entity(t, anchor).and_then(|()| {
+                    let space = anchor.split_once(':').and_then(|(sp, rest)| {
+                        rest.contains('/').then(|| &t.spaces[sp])
+                    });
+                    match space {
+                        Some(space) if !space.visible_to(fp.owner.as_deref(), &[]) => Err(format!(
+                            "{anchor:?}: its space is not visible to everyone who can read this page"
+                        )),
+                        _ => Ok(()),
+                    }
+                })
             } else {
                 match t.pages.get(anchor) {
                     None => Err(format!("{anchor:?}: no such page")),
@@ -532,6 +612,7 @@ const CATEGORIES: &[(&str, &str)] = &[
     ("cross_lang", "M5"),
     ("negative", "M2"),
     ("isolation", "M2"),
+    ("space_isolation", "M3"),
 ];
 const SLOTS: &[&str] = &["memories", "knowledge", "relations"];
 
@@ -604,6 +685,13 @@ fn check_questions(
                         report.err(format!("{w}: isolation needs a user and must_not"));
                     }
                 }
+                "space_isolation" => {
+                    if q.must_not_spaces.is_empty() || !q.expect.relations.is_empty() {
+                        report.err(format!(
+                            "{w}: space_isolation needs must_not_spaces and expects no edges"
+                        ));
+                    }
+                }
                 _ if !has_expectation => report.err(format!("{w}: expects nothing")),
                 _ => {}
             }
@@ -650,6 +738,15 @@ fn check_questions(
                     }
                 }
             }
+            for sp in &q.must_not_spaces {
+                match t.spaces.get(sp) {
+                    None => report.err(format!("{w}: unknown space {sp} in must_not_spaces")),
+                    Some(space) if space.visible_to(q.user.as_deref(), &q.groups) => report.err(
+                        format!("{w}: the caller can see {sp}, so it can't be hidden"),
+                    ),
+                    _ => {}
+                }
+            }
             for p in q.must_not.iter().chain(&q.trap) {
                 if !t.pages.contains_key(p) {
                     report.err(format!("{w}: page {p} does not exist"));
@@ -681,6 +778,9 @@ fn check_questions(
                 };
                 if !t.schemas[&space.schema].relations.contains_key(&e.rel) {
                     report.err(format!("{w}: unknown relation {}", e.rel));
+                }
+                if !space.visible_to(q.user.as_deref(), &q.groups) {
+                    report.err(format!("{w}: the caller can't see space {fs_}"));
                 }
                 if !space.edges.contains(&format!("{from}|{}|{to}", e.rel)) {
                     report.err(format!("{w}: edge {from} {} {to} not in graph data", e.rel));

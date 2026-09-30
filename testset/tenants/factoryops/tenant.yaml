@@ -11,4 +11,9 @@ graph:
   schemas: [plant]
   spaces:
     - { id: suzhou, schema: plant, name: 苏州工厂, aliases: [Suzhou plant, 苏州] }
-    - { id: wuhan, schema: plant, name: 武汉工厂, aliases: [Wuhan plant, 武汉] }
+    - id: wuhan
+      schema: plant
+      name: 武汉工厂
+      aliases: [Wuhan plant, 武汉]
+      visibility: restricted
+      members: { users: [sarah], groups: [wuhan-maintenance] }

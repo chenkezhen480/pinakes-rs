@@ -11,3 +11,9 @@ graph:
   schemas: [payments]
   spaces:
     - { id: acquiring, schema: payments, name: 收单业务, aliases: [acquiring, card acquiring] }
+    - id: investigations
+      schema: payments
+      name: 风险调查
+      aliases: [fraud investigations, investigations, 调查]
+      visibility: restricted
+      members: { users: [marco], groups: [risk-team] }

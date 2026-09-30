@@ -14,11 +14,15 @@ Each scenario is one tenant, so the set also exercises tenant isolation.
 | Tenant | Business | Main language | Graph schema | Graph spaces |
 |---|---|---|---|---|
 | `shopline` | E-commerce marketplace | Chinese | `commerce` | `mainland` (国内站), `crossborder` (跨境站) |
-| `cloudnote` | B2B note-taking SaaS | English | `accounts` | `customers` |
+| `cloudnote` | B2B note-taking SaaS | English | `accounts` | `customers`, `jin_prospects` (private to jin) |
 | `swiftcargo` | Cross-border logistics | Mixed | `network` | `forwarding` |
-| `paybridge` | Payments and risk | English | `payments` | `acquiring` |
+| `paybridge` | Payments and risk | English | `payments` | `acquiring`, `investigations` (restricted: marco, group risk-team) |
 | `mediclinic` | Clinic network, bookings and billing | Chinese | `care` | `clinics` |
-| `factoryops` | Factory equipment maintenance | Chinese | `plant` | `suzhou` (苏州工厂), `wuhan` (武汉工厂) |
+| `factoryops` | Factory equipment maintenance | Chinese | `plant` | `suzhou` (苏州工厂), `wuhan` (武汉工厂, restricted: sarah, group wuhan-maintenance) |
+
+Spaces are shared unless marked otherwise. In `tenant.yaml` a space can say
+`visibility: private` with an `owner`, or `visibility: restricted` with
+`members: { users: [...], groups: [...] }`.
 
 Every tenant has all five knowledge kinds: agent experience playbooks, vertical expertise pages,
 one graph schema description with one or more graph spaces of instance data, and two users with
@@ -61,6 +65,7 @@ questions:
     milestone: M2                # first milestone that can answer it
     lang: en                     # language of the query: en, zh or mixed
     user: lily                   # optional; the X-User-Id of the caller
+    groups: [risk-team]          # optional; the caller's X-User-Groups
     query: "..."                 # what the agent sends as `query`
     keywords: ["...", "..."]     # optional; what a good agent would pass as `keywords`
     expect:                      # what must show up, per slot
@@ -70,6 +75,7 @@ questions:
         - { from: "mainland:order/1042", type: placed_by, to: "mainland:customer/c_5521" }
     expect_empty: [relations]    # optional; slots that must come back empty or weak
     must_not: [users/lily/decisions/double11-coupon-budget]   # optional; must appear nowhere
+    must_not_spaces: [investigations]   # optional; nothing from these spaces may appear
     trap: [expertise/refund-regulations]   # optional; prose pages sharing the query's keywords
     notes: "why this question exists"
 ```
@@ -89,6 +95,7 @@ User pages are referenced with the raw user id (`users/lily/...`), like the fixt
 | `cross_lang` | Query and page in different languages with no alias in common; needs `mode: semantic` | M5 |
 | `negative` | Out-of-scope question: every slot empty or weak | M2 |
 | `isolation` | Another user's memories never appear | M2 |
+| `space_isolation` | Nothing from a graph space the caller can't see appears: no edges, no node or space names | M3 |
 
 A question counts as passed when every expected item is in the top `k` of its slot (default slot
 sizes: memories 3, knowledge 3, relations 5), nothing in `must_not` appears anywhere, and every
@@ -105,6 +112,9 @@ slot in `expect_empty` is empty or marked weak. Other hits in a slot don't fail 
   edge's ends exist;
 - every question's expected pages exist, sit in the right slot for their kind, and belong to the
   question's user when user-scoped; expected edges exist in the graph data;
+- space visibility is well-formed; every expected edge is in a space the caller can see, every
+  `must_not_spaces` entry is one the caller can't see, and tenant-level pages anchor only to
+  shared spaces;
 - ids are unique, categories and milestones are consistent, and each of the five knowledge kinds
   has at least 30 questions.
 
