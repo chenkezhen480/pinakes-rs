@@ -7,7 +7,6 @@ use axum::extract::rejection::JsonRejection;
 use crate::AppState;
 use crate::error::ApiError;
 use crate::identity::Scope;
-use crate::search::tracker::ReadState;
 use crate::search::{SearchRequest, SearchResponse};
 use crate::trace::Endpoint;
 
@@ -22,16 +21,16 @@ pub async fn search(
     req.validate().map_err(ApiError::BadRequest)?;
     let tenant = scope.tenant();
     let snapshot = tenant.snapshot().await?;
-    let reads = match &req.session {
-        Some(session) => tenant
-            .reads
-            .state(scope.user().map(|u| u.dir.as_str()), session),
-        None => ReadState::default(),
-    };
-    let response = crate::search::search(&snapshot, &scope, &req, &app.config.search, &reads)?;
+    // The graph loads on the tenant's first use. If its stores can't be read (Neo4j down), this
+    // search answers from the wiki alone, with an empty relations slot.
+    let graph = tenant.graph_or_empty().await;
+    let reads = scope.read_state(req.session.as_deref());
+    let response =
+        crate::search::search(&snapshot, &graph, &scope, &req, &app.config.search, &reads)?;
 
     let mut record = scope.trace_record(Endpoint::Search);
     record.snapshot = Some(snapshot.version.clone());
+    record.graph = Some(graph.version.clone());
     record.search_config = app.search_fingerprint.clone();
     record.request = serde_json::to_value(&req).unwrap_or_default();
     record.result = response.trace_summary();

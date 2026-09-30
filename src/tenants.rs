@@ -6,12 +6,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 
+use crate::graph::{GraphBackend, GraphSnapshot, GraphStore};
 use crate::search::SearchSnapshot;
 use crate::search::tracker::ReadTracker;
 use crate::store::{SqliteStore, Store};
@@ -103,7 +104,19 @@ pub struct Tenant {
     /// Which pages each agent session has read.
     pub reads: ReadTracker,
     keep_history: bool,
+    /// Where this tenant's graph nodes and edges are stored.
+    pub graph_store: Arc<dyn GraphStore>,
+    /// The in-memory graph searches and walks read, loaded on first use.
+    graph: std::sync::RwLock<Option<Arc<GraphSnapshot>>>,
+    graph_loading: Mutex<()>,
+    /// When loading the graph last failed, if it did since the last success.
+    graph_failed_at: std::sync::Mutex<Option<Instant>>,
+    /// Held by every graph write (schemas, spaces, data), so they apply one at a time.
+    pub graph_writer: Mutex<()>,
 }
+
+/// How long after a failed graph load requests fail at once rather than try again.
+pub const GRAPH_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 impl std::fmt::Debug for Tenant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -156,6 +169,77 @@ impl Tenant {
         Ok(())
     }
 
+    fn current_graph(&self) -> Option<Arc<GraphSnapshot>> {
+        self.graph.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The in-memory graph, read from the stores on first use: schema definitions and spaces
+    /// from SQLite, nodes and edges from the graph store.
+    ///
+    /// After a failed load, calls fail at once for [`GRAPH_RETRY_AFTER`] instead of each
+    /// waiting on an unreachable store again; requests queued behind the failed load too.
+    pub async fn graph(&self) -> anyhow::Result<Arc<GraphSnapshot>> {
+        if let Some(g) = self.current_graph() {
+            return Ok(g);
+        }
+        self.check_graph_failure()?;
+        let _loading = self.graph_loading.lock().await;
+        if let Some(g) = self.current_graph() {
+            return Ok(g);
+        }
+        self.check_graph_failure()?;
+        let loaded = async {
+            let schemas = self.store.graph_schemas().await?;
+            let spaces = self.store.graph_spaces().await?;
+            let data = self.graph_store.load().await?;
+            tokio::task::spawn_blocking(move || GraphSnapshot::build(schemas, spaces, data))
+                .await
+                .context("building the graph snapshot panicked")
+        }
+        .await;
+        let failed = &self.graph_failed_at;
+        match loaded {
+            Ok(graph) => {
+                *failed.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                let graph = Arc::new(graph);
+                *self.graph.write().unwrap_or_else(|e| e.into_inner()) = Some(graph.clone());
+                Ok(graph)
+            }
+            Err(e) => {
+                // Logged here, once per attempt; the requests that fail fast after it don't.
+                tracing::error!(tenant = %self.dir_name, error = %format!("{e:#}"), "could not load the graph");
+                *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                Err(e)
+            }
+        }
+    }
+
+    /// The graph for a read that can do without it: when it can't be loaded (Neo4j down), an
+    /// empty graph, so the caller answers from the wiki alone. `graph` logs the failure.
+    pub async fn graph_or_empty(&self) -> Arc<GraphSnapshot> {
+        self.graph()
+            .await
+            .unwrap_or_else(|_| Arc::new(GraphSnapshot::empty()))
+    }
+
+    fn check_graph_failure(&self) -> anyhow::Result<()> {
+        let failed = *self
+            .graph_failed_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match failed {
+            Some(at) if at.elapsed() < GRAPH_RETRY_AFTER => {
+                anyhow::bail!("the graph could not be loaded; retrying soon")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Swaps in a new graph after a write. Callers hold `graph_writer`.
+    pub fn set_graph(&self, graph: GraphSnapshot) {
+        *self.graph.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(graph));
+    }
+
     async fn has_key_hash(&self, hash: &str) -> bool {
         self.key_hashes.read().await.contains(hash)
     }
@@ -183,6 +267,7 @@ pub struct Tenants {
     session_idle: Duration,
     /// Keep every wiki version a snapshot is built from, for replays (see `wiki::History`).
     keep_history: bool,
+    graph_backend: GraphBackend,
     /// Open tenants. The lock is only ever held for a map lookup or insert, never across disk
     /// work, so loading one tenant can't stall requests for the others.
     open: RwLock<HashMap<String, Arc<Tenant>>>,
@@ -201,6 +286,7 @@ impl Tenants {
             store_file: store_file.into(),
             session_idle,
             keep_history: false,
+            graph_backend: GraphBackend::Sqlite,
             open: RwLock::new(HashMap::new()),
             creating: Mutex::new(()),
         }
@@ -211,6 +297,17 @@ impl Tenants {
     pub fn keep_history(mut self, on: bool) -> Self {
         self.keep_history = on;
         self
+    }
+
+    /// Where tenants' graph data is stored (SQLite in each tenant's folder by default).
+    pub fn graph_backend(mut self, backend: GraphBackend) -> Self {
+        self.graph_backend = backend;
+        self
+    }
+
+    /// The graph backend tenants open their stores from.
+    pub fn graph(&self) -> &GraphBackend {
+        &self.graph_backend
     }
 
     pub fn root(&self) -> &Path {
@@ -236,6 +333,12 @@ impl Tenants {
         {
             return Err(CreateTenantError::AlreadyExists);
         }
+        // A new tenant starts with no graph data, even if a deleted tenant with the same id left
+        // some in a shared graph database. If that can't be checked, nothing is created.
+        self.graph_backend
+            .clear_tenant(tenant_id)
+            .await
+            .context("clearing old graph data for this tenant id")?;
 
         let api_key = new_api_key(&dir_name);
         let key_hash = hash_api_key(&api_key);
@@ -329,6 +432,12 @@ impl Tenants {
             "tenant folder {dir_name} records id that maps elsewhere"
         );
         let key_hashes = store.api_key_hashes().await?.into_iter().collect();
+        let (backend, tenant_id, tenant_dir) =
+            (self.graph_backend.clone(), id.clone(), dir.clone());
+        let graph_store =
+            tokio::task::spawn_blocking(move || backend.open(&tenant_id, &tenant_dir))
+                .await
+                .context("opening the graph store panicked")??;
         Ok(Tenant {
             id,
             dir_name: dir_name.to_owned(),
@@ -339,6 +448,11 @@ impl Tenants {
             building: Mutex::new(()),
             reads: ReadTracker::new(self.session_idle),
             keep_history: self.keep_history,
+            graph_store,
+            graph: std::sync::RwLock::new(None),
+            graph_loading: Mutex::new(()),
+            graph_failed_at: std::sync::Mutex::new(None),
+            graph_writer: Mutex::new(()),
         })
     }
 }

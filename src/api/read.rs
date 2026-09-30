@@ -54,10 +54,10 @@ pub struct ReadItem {
     /// Already read in this session: the text is left out.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub already_read: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<LinkSummary>,
     /// `not_found`, `unreadable` (the page's file can't be parsed) or `heading_not_found`;
-    /// other fields are then absent.
+    /// the other single-value fields are then absent and `links` is empty (lists are always
+    /// present; design, "Response formats").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<&'static str>,
 }

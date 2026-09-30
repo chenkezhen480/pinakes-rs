@@ -1,5 +1,6 @@
-//! Per-tenant operational storage: API keys, the audit log, and later jobs, proposals and
-//! embeddings. Each tenant has its own backend instance, so a store never sees another tenant.
+//! Per-tenant operational storage: API keys, the audit log, graph schema definitions and the
+//! registry of graph spaces, and later jobs, proposals and embeddings. Each tenant has its own
+//! backend instance, so a store never sees another tenant.
 
 mod sqlite;
 
@@ -7,6 +8,8 @@ pub use sqlite::SqliteStore;
 
 use async_trait::async_trait;
 use serde::Serialize;
+
+use crate::graph::{SchemaDef, SpaceDef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuditEntry {
@@ -30,4 +33,16 @@ pub trait Store: Send + Sync {
 
     /// The most recent audit entries, newest first.
     async fn audit_log(&self, limit: usize) -> anyhow::Result<Vec<AuditEntry>>;
+
+    /// Every graph schema definition, the authoritative copies.
+    async fn graph_schemas(&self) -> anyhow::Result<Vec<SchemaDef>>;
+
+    /// Creates or replaces a schema definition. Callers check that a change is additive.
+    async fn put_graph_schema(&self, def: &SchemaDef) -> anyhow::Result<()>;
+
+    /// Every registered graph space.
+    async fn graph_spaces(&self) -> anyhow::Result<Vec<SpaceDef>>;
+
+    /// Registers a new space. Fails if the name is taken.
+    async fn add_graph_space(&self, def: &SpaceDef) -> anyhow::Result<()>;
 }

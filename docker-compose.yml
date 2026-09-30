@@ -1,0 +1,15 @@
+# Neo4j for development and the M3 graph tests: `NEO4J_PASSWORD=... docker compose up -d neo4j`.
+# The kb service itself joins this file in M7. Ports are bound to 127.0.0.1 only.
+services:
+  neo4j:
+    # Pinned: the version the neo4rs driver (0.9.0-rc.10) is tested against here.
+    image: neo4j:5.26.28
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes: ["neo4j-data:/data"]
+
+volumes:
+  neo4j-data:

@@ -1,6 +1,8 @@
 //! HTTP handlers. Every tenant route takes a `Scope`; admin routes take `Admin`.
 
 mod admin;
+mod graph;
+mod ingest;
 mod pages;
 mod read;
 mod search;
@@ -17,6 +19,15 @@ pub fn router(state: AppState) -> Router {
         .route("/pages/{*path}", get(pages::get))
         .route("/search", post(search::search))
         .route("/read", post(read::read))
+        .route("/graph", post(graph::graph))
+        .route("/graph/path", post(graph::path))
+        .route("/ingest/graph/schema", post(ingest::schema))
+        .route("/ingest/graph/space", post(ingest::space))
+        // A full batch (`graph::def::MAX_BATCH` nodes and edges) is well over axum's 2 MB default.
+        .route(
+            "/ingest/graph/data",
+            post(ingest::data).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/admin/tenants", post(admin::create_tenant))
         .with_state(state)
 }

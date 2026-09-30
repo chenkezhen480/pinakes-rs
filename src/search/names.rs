@@ -1,6 +1,7 @@
-//! The name matcher: every title and alias of the tenant's pages, and every node type name of
-//! its schemas, in one Aho-Corasick automaton. It finds all known names in a query in one pass.
-//! Graph instance names join it in M3.
+//! The name matcher: known names in one Aho-Corasick automaton, found in a query in one pass.
+//! The wiki's matcher holds every page title and alias and every node and relation type name of
+//! its schemas; the graph's holds node names and aliases and graph space names. A search runs
+//! both and merges their hits with [`find_in`].
 
 use std::collections::HashMap;
 
@@ -16,6 +17,12 @@ pub enum Target {
     Page(usize),
     /// A node type, as `schema:type`.
     NodeType(String),
+    /// A relation type, as `schema:relation`.
+    RelationType(String),
+    /// A graph node, by its index in the graph snapshot.
+    Node(u32),
+    /// A graph space, by its index in the graph snapshot.
+    Space(usize),
 }
 
 /// One name found in a text.
@@ -35,33 +42,24 @@ pub struct NameMatcher {
 
 /// Names too short to route on: under two Chinese characters or three other characters. A
 /// single character such as 券 would pin its page on almost any question.
-fn long_enough(name: &str) -> bool {
+pub fn long_enough(name: &str) -> bool {
     let n = name.chars().count();
     if has_cjk(name) { n >= 2 } else { n >= 3 }
 }
 
 impl NameMatcher {
-    pub fn build(catalog: &Catalog) -> Self {
+    /// A matcher over `(name, target)` pairs. Names are normalized; names too short to route
+    /// on are left out.
+    pub fn new(entries: impl IntoIterator<Item = (String, Target)>) -> Self {
         let mut by_name: HashMap<String, Vec<Target>> = HashMap::new();
-        let mut add = |name: &str, target: Target| {
+        for (name, target) in entries {
             let norm = normalize(name.trim());
             if !long_enough(&norm) {
-                return;
+                continue;
             }
             let list = by_name.entry(norm).or_default();
             if !list.contains(&target) {
                 list.push(target);
-            }
-        };
-        for (i, page) in catalog.pages.iter().enumerate() {
-            add(&page.title, Target::Page(i));
-            for alias in &page.aliases {
-                add(alias, Target::Page(i));
-            }
-            for nt in &page.node_types {
-                for name in &nt.names {
-                    add(name, Target::NodeType(nt.entity.clone()));
-                }
             }
         }
         let mut entries: Vec<(String, Vec<Target>)> = by_name.into_iter().collect();
@@ -76,16 +74,44 @@ impl NameMatcher {
         Self { ac, names, targets }
     }
 
-    /// Every known name in a normalized text, on word boundaries, that points at something the
-    /// caller may see (`visible`). Names of hidden pages are dropped first, so they can neither
-    /// be reported nor shadow a visible name. A name inside a longer name that also matched is
-    /// dropped, so "partial refund" doesn't also report "refund".
+    /// The wiki's names: page titles and aliases, and the node and relation types of its
+    /// schema pages.
+    pub fn build(catalog: &Catalog) -> Self {
+        let mut entries = Vec::new();
+        for (i, page) in catalog.pages.iter().enumerate() {
+            entries.push((page.title.clone(), Target::Page(i)));
+            for alias in &page.aliases {
+                entries.push((alias.clone(), Target::Page(i)));
+            }
+            for nt in &page.node_types {
+                for name in &nt.names {
+                    entries.push((name.clone(), Target::NodeType(nt.entity.clone())));
+                }
+            }
+            for rt in &page.relation_types {
+                for name in &rt.names {
+                    entries.push((name.clone(), Target::RelationType(rt.entity.clone())));
+                }
+            }
+        }
+        Self::new(entries)
+    }
+
+    /// Every known name in a normalized text; see [`find_in`].
     pub fn find(&self, text: &str, visible: impl Fn(&Target) -> bool) -> Vec<NameHit<'_>> {
+        find_in(&[self], text, visible)
+    }
+
+    /// Names on word boundaries with at least one visible target, and where they are.
+    fn spans<'a>(
+        &'a self,
+        text: &str,
+        visible: &impl Fn(&Target) -> bool,
+    ) -> Vec<(usize, usize, NameHit<'a>)> {
         let Some(ac) = &self.ac else {
             return Vec::new();
         };
-        let found: Vec<(usize, usize, NameHit<'_>)> = ac
-            .find_overlapping_iter(text)
+        ac.find_overlapping_iter(text)
             .filter(|m| on_word_boundary(text, m.start(), m.end()))
             .filter_map(|m| {
                 let p = m.pattern().as_usize();
@@ -98,19 +124,46 @@ impl NameMatcher {
                     (m.start(), m.end(), hit)
                 })
             })
-            .collect();
-        let mut out: Vec<NameHit<'_>> = Vec::new();
-        for (s, e, hit) in &found {
-            let inside_longer = found
-                .iter()
-                .any(|(s2, e2, _)| s2 <= s && e <= e2 && (e2 - s2) > (e - s));
-            if inside_longer || out.iter().any(|h| h.name == hit.name) {
-                continue;
-            }
-            out.push(hit.clone());
-        }
-        out
+            .collect()
     }
+}
+
+/// Every known name of several matchers in a normalized text, on word boundaries, that points
+/// at something the caller may see (`visible`). Names of hidden things are dropped first, so
+/// they can neither be reported nor shadow a visible name. A name inside a longer name that
+/// also matched is dropped, so "partial refund" doesn't also report "refund", and a name found
+/// by two matchers is one hit with the targets of both.
+pub fn find_in<'a>(
+    matchers: &[&'a NameMatcher],
+    text: &str,
+    visible: impl Fn(&Target) -> bool,
+) -> Vec<NameHit<'a>> {
+    let found: Vec<(usize, usize, NameHit<'a>)> = matchers
+        .iter()
+        .flat_map(|m| m.spans(text, &visible))
+        .collect();
+    let mut order: Vec<(usize, &(usize, usize, NameHit<'a>))> = found.iter().enumerate().collect();
+    order.sort_by_key(|(i, (s, e, _))| (*s, std::cmp::Reverse(*e), *i));
+    let mut out: Vec<NameHit<'a>> = Vec::new();
+    for (_, (s, e, hit)) in order {
+        let inside_longer = found
+            .iter()
+            .any(|(s2, e2, _)| s2 <= s && e <= e2 && (e2 - s2) > (e - s));
+        if inside_longer {
+            continue;
+        }
+        match out.iter_mut().find(|h| h.name == hit.name) {
+            Some(h) => {
+                for t in &hit.targets {
+                    if !h.targets.contains(t) {
+                        h.targets.push(t);
+                    }
+                }
+            }
+            None => out.push(hit.clone()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -150,6 +203,24 @@ mod tests {
         assert_eq!(
             hits[0].targets,
             vec![&Target::NodeType("commerce:order".into())]
+        );
+    }
+
+    #[test]
+    fn two_matchers_merge() {
+        let wiki = NameMatcher::build(&catalog());
+        let graph = NameMatcher::new([
+            ("订单1042".to_string(), Target::Node(0)),
+            ("SSO".to_string(), Target::Node(1)),
+        ]);
+        let hits = find_in(&[&wiki, &graph], &normalize("订单1042 的 SSO"), |_| true);
+        let names: Vec<&str> = hits.iter().map(|h| h.name).collect();
+        // 订单 is inside the longer node name, so only the node is reported.
+        assert_eq!(names, vec!["订单1042", "sso"]);
+        assert_eq!(
+            hits[1].targets,
+            vec![&Target::Page(1), &Target::Node(1)],
+            "one name, targets of both matchers"
         );
     }
 

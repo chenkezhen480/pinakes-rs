@@ -22,6 +22,70 @@ pub struct Config {
     pub search: SearchConfig,
     #[serde(default)]
     pub trace: TraceConfig,
+    #[serde(default)]
+    pub graph: GraphConfig,
+    #[serde(default)]
+    pub neo4j: Neo4jConfig,
+}
+
+/// Where graph data lives, and the caps on walks (design, "The business graph").
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphConfig {
+    #[serde(default)]
+    pub backend: GraphBackendKind,
+    /// Deepest `/graph` walk a caller may ask for.
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+    /// Most nodes a `/graph` walk may return.
+    #[serde(default = "default_max_nodes")]
+    pub max_nodes: usize,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            backend: GraphBackendKind::default(),
+            max_depth: default_max_depth(),
+            max_nodes: default_max_nodes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphBackendKind {
+    /// `graph.sqlite` in each tenant's folder: for tests and trying the service out.
+    #[default]
+    Sqlite,
+    /// One Neo4j database shared by every tenant, filtered on the tenant id.
+    Neo4j,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Neo4jConfig {
+    #[serde(default = "default_neo4j_uri")]
+    pub uri: String,
+    #[serde(default = "default_neo4j_user")]
+    pub user: String,
+    /// Environment variable holding the password; never in the file.
+    #[serde(default = "default_neo4j_password_env")]
+    pub password_env: String,
+    /// Database name; the server's default database when unset.
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+impl Default for Neo4jConfig {
+    fn default() -> Self {
+        Self {
+            uri: default_neo4j_uri(),
+            user: default_neo4j_user(),
+            password_env: default_neo4j_password_env(),
+            database: None,
+        }
+    }
 }
 
 /// Search traces (design, "Search traces and replay").
@@ -224,6 +288,21 @@ fn default_session_idle_minutes() -> u64 {
 fn default_store_file() -> String {
     "kb.sqlite".into()
 }
+fn default_max_depth() -> usize {
+    3
+}
+fn default_max_nodes() -> usize {
+    100
+}
+fn default_neo4j_uri() -> String {
+    "bolt://localhost:7687".into()
+}
+fn default_neo4j_user() -> String {
+    "neo4j".into()
+}
+fn default_neo4j_password_env() -> String {
+    "NEO4J_PASSWORD".into()
+}
 
 impl Config {
     pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
@@ -256,6 +335,16 @@ impl Config {
         if s.memories > max || s.knowledge > max || s.relations > max {
             anyhow::bail!("search.slots values must be at most {max}");
         }
+        let g = &self.graph;
+        if !(1..=crate::graph::MAX_WALK_DEPTH).contains(&g.max_depth)
+            || !(1..=crate::graph::MAX_WALK_NODES).contains(&g.max_nodes)
+        {
+            anyhow::bail!(
+                "graph.max_depth must be 1 to {} and graph.max_nodes 1 to {}",
+                crate::graph::MAX_WALK_DEPTH,
+                crate::graph::MAX_WALK_NODES
+            );
+        }
         let a = &self.search.ablation;
         if !a.words && !a.bigrams {
             anyhow::bail!("search.ablation must keep words or bigrams on");
@@ -284,6 +373,9 @@ mod tests {
         assert_eq!(cfg.search.session_idle_minutes, 30);
         assert!(cfg.trace.enabled);
         assert_eq!(cfg.trace.retention_days, 30);
+        assert_eq!(cfg.graph.backend, GraphBackendKind::Sqlite);
+        assert_eq!(cfg.graph.max_depth, 3);
+        assert_eq!(cfg.neo4j.password_env, "NEO4J_PASSWORD");
     }
 
     #[test]

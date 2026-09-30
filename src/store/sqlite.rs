@@ -10,9 +10,11 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::{AuditEntry, Store};
+use crate::graph::{SchemaDef, SpaceDef};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
     CREATE TABLE meta (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -29,7 +31,22 @@ const MIGRATIONS: &[&str] = &[r#"
         action TEXT NOT NULL,
         detail TEXT NOT NULL
     );
-"#];
+"#,
+    r#"
+    CREATE TABLE graph_schemas (
+        name       TEXT PRIMARY KEY,
+        definition TEXT NOT NULL,   -- JSON of graph::SchemaDef
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE TABLE graph_spaces (
+        name       TEXT PRIMARY KEY,
+        schema     TEXT NOT NULL,
+        definition TEXT NOT NULL,   -- JSON of graph::SpaceDef
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+"#,
+];
 
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
@@ -193,6 +210,60 @@ impl Store for SqliteStore {
         })
         .await
     }
+
+    async fn graph_schemas(&self) -> anyhow::Result<Vec<SchemaDef>> {
+        let rows: Vec<String> = self
+            .with_conn(|c| {
+                let mut stmt = c.prepare("SELECT definition FROM graph_schemas ORDER BY name")?;
+                stmt.query_map([], |r| r.get(0))?.collect()
+            })
+            .await?;
+        rows.iter()
+            .map(|r| serde_json::from_str(r).context("a stored schema definition"))
+            .collect()
+    }
+
+    async fn put_graph_schema(&self, def: &SchemaDef) -> anyhow::Result<()> {
+        let (name, json) = (def.schema.clone(), serde_json::to_string(def)?);
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO graph_schemas (name, definition) VALUES (?1, ?2)
+                 ON CONFLICT (name) DO UPDATE SET definition = excluded.definition,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                params![name, json],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    async fn graph_spaces(&self) -> anyhow::Result<Vec<SpaceDef>> {
+        let rows: Vec<String> = self
+            .with_conn(|c| {
+                let mut stmt = c.prepare("SELECT definition FROM graph_spaces ORDER BY name")?;
+                stmt.query_map([], |r| r.get(0))?.collect()
+            })
+            .await?;
+        rows.iter()
+            .map(|r| serde_json::from_str(r).context("a stored space definition"))
+            .collect()
+    }
+
+    async fn add_graph_space(&self, def: &SpaceDef) -> anyhow::Result<()> {
+        let (name, schema, json) = (
+            def.space.clone(),
+            def.schema.clone(),
+            serde_json::to_string(def)?,
+        );
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO graph_spaces (name, schema, definition) VALUES (?1, ?2, ?3)",
+                params![name, schema, json],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +286,39 @@ mod tests {
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].action, "key.create");
         assert_eq!(log[1].action, "tenant.create");
+    }
+
+    #[tokio::test]
+    async fn graph_schemas_and_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb.sqlite");
+        SqliteStore::create_for_tenant(&path, "acme", "abc", "initial").unwrap();
+        let store = SqliteStore::open_existing(&path).unwrap();
+        let mut def: SchemaDef = serde_json::from_value(serde_json::json!({
+            "schema": "commerce", "nodes": { "order": { "key": "order_id" } }
+        }))
+        .unwrap();
+        store.put_graph_schema(&def).await.unwrap();
+        def.summary = Some("Orders.".into());
+        store.put_graph_schema(&def).await.unwrap();
+        assert_eq!(store.graph_schemas().await.unwrap(), vec![def]);
+
+        let space = crate::graph::def::SpaceRequest {
+            space: "mainland".into(),
+            schema: "commerce".into(),
+            name: None,
+            aliases: vec![],
+            visibility: crate::graph::Visibility::Shared,
+            members: Default::default(),
+        }
+        .into_def(None)
+        .unwrap();
+        store.add_graph_space(&space).await.unwrap();
+        assert!(
+            store.add_graph_space(&space).await.is_err(),
+            "names are unique"
+        );
+        assert_eq!(store.graph_spaces().await.unwrap(), vec![space]);
     }
 
     #[test]

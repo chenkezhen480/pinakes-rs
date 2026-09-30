@@ -81,6 +81,19 @@ pub struct NodeType {
     pub names: Vec<String>,
 }
 
+/// A relation type described by a schema page, one entry of the relation-type index.
+#[derive(Debug, Clone)]
+pub struct RelationTypeEntry {
+    /// `schema:relation`.
+    pub entity: String,
+    pub schema: String,
+    pub name: String,
+    /// The relation's name (with `_` as spaces) and aliases, for the name matcher.
+    pub names: Vec<String>,
+    /// Names and aliases as matchable text, for keywords.
+    pub text: FieldText,
+}
+
 #[derive(Debug, Clone)]
 pub struct PageEntry {
     pub path: PagePath,
@@ -98,6 +111,8 @@ pub struct PageEntry {
     pub links: Vec<String>,
     /// For schema pages: the node types it defines.
     pub node_types: Vec<NodeType>,
+    /// For schema pages: the relation types it defines.
+    pub relation_types: Vec<RelationTypeEntry>,
     /// Descriptions of the schema's node and relation types (schema pages only).
     pub schema_text: String,
     /// Title, aliases, keywords and summary.
@@ -110,6 +125,12 @@ pub struct PageEntry {
 pub struct Catalog {
     pub pages: Vec<PageEntry>,
     by_path: HashMap<String, usize>,
+    /// Entity anchors (`schema:type`, `space:type/key`) to the pages anchored to them.
+    anchored: HashMap<String, Vec<usize>>,
+    /// Every `schema:type` the schema pages define.
+    node_types: HashSet<String>,
+    /// Every relation type of every schema page: the relation-type index.
+    relations: Vec<RelationTypeEntry>,
 }
 
 impl Catalog {
@@ -121,11 +142,35 @@ impl Catalog {
                 continue;
             };
             let entry = entry_for(page, kind, analyzer);
-            out.by_path
-                .insert(entry.path.as_str().to_owned(), out.pages.len());
+            let ord = out.pages.len();
+            out.by_path.insert(entry.path.as_str().to_owned(), ord);
+            for anchor in entry.about.iter().filter(|a| a.contains(':')) {
+                let list = out.anchored.entry(anchor.clone()).or_default();
+                if !list.contains(&ord) {
+                    list.push(ord);
+                }
+            }
+            out.node_types
+                .extend(entry.node_types.iter().map(|nt| nt.entity.clone()));
+            out.relations.extend(entry.relation_types.iter().cloned());
             out.pages.push(entry);
         }
         out
+    }
+
+    /// Whether a schema page defines this `schema:type`.
+    pub fn has_node_type(&self, entity: &str) -> bool {
+        self.node_types.contains(entity)
+    }
+
+    /// Every relation type of every schema page: the relation-type index.
+    pub fn relation_types(&self) -> impl Iterator<Item = &RelationTypeEntry> {
+        self.relations.iter()
+    }
+
+    /// The pages anchored to an entity, in path order. Callers filter them by audience.
+    pub fn anchored_to(&self, entity: &str) -> &[usize] {
+        self.anchored.get(entity).map_or(&[], Vec::as_slice)
     }
 
     pub fn get(&self, path: &str) -> Option<(usize, &PageEntry)> {
@@ -170,6 +215,11 @@ fn entry_for(page: Page, kind: Kind, analyzer: &Analyzer) -> PageEntry {
     } else {
         String::new()
     };
+    let relation_types = if kind == Kind::Graph {
+        relation_types(&f.extra, analyzer)
+    } else {
+        Vec::new()
+    };
     let sections = sections(&page.body, analyzer);
     let links = links(&page.body);
 
@@ -194,6 +244,7 @@ fn entry_for(page: Page, kind: Kind, analyzer: &Analyzer) -> PageEntry {
         sections,
         links,
         node_types,
+        relation_types,
         schema_text,
         head,
         body,
@@ -337,6 +388,38 @@ fn node_types(extra: &std::collections::BTreeMap<String, Value>) -> Vec<NodeType
     out
 }
 
+fn relation_types(
+    extra: &std::collections::BTreeMap<String, Value>,
+    analyzer: &Analyzer,
+) -> Vec<RelationTypeEntry> {
+    let Some(schema) = extra.get("schema").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(relations) = extra.get("relations").and_then(Value::as_mapping) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (name, def) in relations {
+        let Some(name) = name.as_str() else {
+            continue;
+        };
+        let mut names = vec![name.replace('_', " ")];
+        if name.contains('_') {
+            names.push(name.to_owned());
+        }
+        names.extend(str_list(def, "aliases"));
+        let parts: Vec<&str> = names.iter().map(String::as_str).collect();
+        out.push(RelationTypeEntry {
+            entity: format!("{schema}:{name}"),
+            schema: schema.to_owned(),
+            name: name.to_owned(),
+            text: FieldText::new(analyzer, &parts),
+            names,
+        });
+    }
+    out
+}
+
 /// The schema's type descriptions as searchable text: names, English and Chinese meanings and
 /// aliases of every node and relation type.
 fn schema_text(extra: &std::collections::BTreeMap<String, Value>) -> String {
@@ -403,6 +486,11 @@ mod tests {
         assert_eq!(e.node_types[0].entity, "commerce:order");
         assert_eq!(e.node_types[0].names, vec!["order", "orders", "订单"]);
         assert!(e.schema_text.contains("placed by"));
+        assert_eq!(e.relation_types[0].entity, "commerce:placed_by");
+        assert_eq!(
+            e.relation_types[0].names,
+            vec!["placed by", "placed_by", "下单人"]
+        );
         assert!(e.head.norm.contains("下单人"));
     }
 }

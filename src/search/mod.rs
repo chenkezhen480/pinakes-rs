@@ -1,35 +1,42 @@
 //! The one search entry (design, "One way in: the wiki as the only search entry"), keyword mode.
 //!
-//! A search reads only the tenant's in-memory [`SearchSnapshot`]: the page catalog, the name
-//! matcher and the tantivy index. It never touches SQLite, Neo4j or an LLM. Steps:
+//! A search reads only the tenant's in-memory copies: the [`SearchSnapshot`] of the wiki (page
+//! catalog, name matcher, tantivy index) and the [`GraphSnapshot`]. It never touches SQLite,
+//! Neo4j or an LLM. Steps:
 //!
 //! 1. prepare: normalize the query and keywords, infer the intent;
-//! 2. name match: known titles and aliases pin their pages, node type names become entities;
+//! 2. name match: known titles and aliases pin their pages; node and relation type names,
+//!    node names, identifier keys and space names become the starting entities, only those the
+//!    caller may see;
 //! 3. keyword search: BM25 per channel (memories, knowledge), filtered to the caller's audiences;
 //! 4. rank: pinned pages first, then by score; pages that match too little are dropped;
-//! 5. assemble: summaries, matching lines, routes, coverage and unmatched keywords.
-//!
-//! The relations slot stays empty until the graph arrives in M3.
+//! 5. relations: edges around the starting entities and the entities the hits are anchored to
+//!    (see [`relations`]);
+//! 6. assemble: summaries, matching lines, routes, coverage and unmatched keywords.
 
 pub mod catalog;
 pub mod index;
 pub mod names;
+pub mod relations;
 pub mod text;
 pub mod tokenize;
 pub mod tracker;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use petgraph::graph::NodeIndex;
 
 use serde::{Deserialize, Serialize};
 
 use catalog::{Catalog, FieldText, PageEntry, Slot};
 use index::PageIndex;
-use names::{NameMatcher, Target};
+use names::{NameMatcher, Target, find_in};
 use text::{RunKind, all_cjk, is_stopword, normalize, on_word_boundary, runs, word_parts};
 use tokenize::{Analyzer, Tok, stem};
 use tracker::ReadState;
 
 use crate::config::SearchConfig;
+use crate::graph::{EntityRef, GraphSnapshot, Visible};
 use crate::identity::Scope;
 use crate::kinds::Kind;
 use crate::wiki::{Page, PagePath};
@@ -287,8 +294,26 @@ pub struct PageSlot {
 #[derive(Debug, Clone, Serialize)]
 pub struct RelationSlot {
     pub coverage: Coverage,
+    /// Relation types the request names, as `schema:relation`.
     pub relation_types: Vec<String>,
-    pub edges: Vec<serde_json::Value>,
+    pub edges: Vec<relations::Edge>,
+    /// Where to go next: a walk from the first named node, and the path between the first two
+    /// named nodes of one space.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<GraphRoute>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphRoute {
+    pub graph: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathRoute>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathRoute {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -300,13 +325,18 @@ pub struct SearchResponse {
     pub knowledge: PageSlot,
     pub relations: RelationSlot,
     pub unmatched_keywords: Vec<String>,
+    /// Keywords that named nodes only as part of a node's name, with those nodes. For traces,
+    /// so lint (M8) can ask the host for the missing aliases; not part of the response body.
+    #[serde(skip)]
+    pub partial_names: Vec<(String, Vec<String>)>,
     /// Microseconds per step, for traces; not part of the response body.
     #[serde(skip)]
     pub timings_us: Vec<(&'static str, u64)>,
 }
 
 impl SearchResponse {
-    /// What a trace keeps of a response: per slot, the pages, how each matched, and coverage.
+    /// What a trace keeps of a response: per slot, the pages, how each matched, and coverage;
+    /// and the keywords that named nodes only by part of their names.
     pub fn trace_summary(&self) -> serde_json::Value {
         let slot = |s: &PageSlot| {
             serde_json::json!({
@@ -317,18 +347,26 @@ impl SearchResponse {
                 })).collect::<Vec<_>>(),
             })
         };
-        serde_json::json!({
+        let mut out = serde_json::json!({
             "entities": self.entities,
-            "intent": self.intent,
             "memories": slot(&self.memories),
             "knowledge": slot(&self.knowledge),
             "relations": {
                 "coverage": self.relations.coverage,
                 "relation_types": self.relations.relation_types,
-                "edges": self.relations.edges.len(),
+                "edges": self.relations.edges.iter()
+                    .map(|e| serde_json::json!({ "from": e.from, "type": e.ty, "to": e.to }))
+                    .collect::<Vec<_>>(),
             },
             "unmatched_keywords": self.unmatched_keywords,
-        })
+            "partial_names": self.partial_names.iter()
+                .map(|(k, nodes)| serde_json::json!({ "keyword": k, "nodes": nodes }))
+                .collect::<Vec<_>>(),
+        });
+        if let Some(intent) = self.intent {
+            out["intent"] = serde_json::json!(intent);
+        }
+        out
     }
 }
 
@@ -442,12 +480,11 @@ impl Keyword {
 /// remaining content words.
 fn keywords_from_query(
     snap: &SearchSnapshot,
+    graph: &GraphSnapshot,
     norm_query: &str,
     visible: impl Fn(&Target) -> bool,
 ) -> Vec<String> {
-    let mut out: Vec<String> = snap
-        .names
-        .find(norm_query, visible)
+    let mut out: Vec<String> = find_in(&[&snap.names, &graph.names], norm_query, visible)
         .into_iter()
         .map(|h| h.name.to_owned())
         .collect();
@@ -599,9 +636,11 @@ impl Default for Ablation {
     }
 }
 
-/// Runs one search for a caller. `reads` is what the caller's session has read so far.
+/// Runs one search for a caller over the wiki and graph snapshots. `reads` is what the caller's
+/// session has read so far.
 pub fn search(
     snap: &SearchSnapshot,
+    graph: &GraphSnapshot,
     scope: &Scope,
     req: &SearchRequest,
     cfg: &SearchConfig,
@@ -627,17 +666,25 @@ pub fn search(
             .min(MAX_SLOT),
     };
 
+    // Which graph spaces the caller may see, once per request.
+    let vis = graph.visible(scope);
     // Names count only when they point at something the caller may see.
     let visible = |t: &Target| match t {
         Target::Page(i) => scope.can_see(&snap.catalog.pages[*i].path),
-        Target::NodeType(_) => true,
+        Target::NodeType(_) | Target::RelationType(_) => true,
+        Target::Node(n) => vis.node(graph, NodeIndex::new(*n as usize)),
+        Target::Space(i) => vis.space(*i),
     };
+    // Relation type names only steer the relations channel; they don't become keywords.
+    let keyword_names = |t: &Target| !matches!(t, Target::RelationType(_)) && visible(t);
 
     let mut timings_us = Vec::new();
     let mut step = std::time::Instant::now();
 
     // 1. Prepare.
-    let (norm_query, keywords, intent) = tracing::info_span!("prepare").in_scope(|| {
+    // Ids in the query are looked up whole, once; their pieces are not keywords.
+    let (query_ids, query_words) = resolve_ids(&req.query, snap, graph, &vis);
+    let (keywords, intent) = tracing::info_span!("prepare").in_scope(|| {
         let norm_query = normalize(&req.query);
         let given: Vec<&String> = req.keywords.iter().chain(&req.entities).collect();
         let mut keywords: Vec<Keyword> = Vec::new();
@@ -654,57 +701,160 @@ pub fn search(
             for k in &given {
                 push(k, 1.0, true, &mut keywords);
             }
-            for w in keywords_from_query(snap, &norm_query, visible) {
+            for w in keywords_from_query(snap, graph, &query_words, keyword_names) {
                 push(&w, QUERY_WEIGHT, false, &mut keywords);
             }
         } else {
-            for w in keywords_from_query(snap, &norm_query, visible) {
+            for w in keywords_from_query(snap, graph, &query_words, keyword_names) {
                 push(&w, 1.0, true, &mut keywords);
             }
         }
         let intent = req.intent.or_else(|| infer_intent(&norm_query));
-        (norm_query, keywords, intent)
+        (keywords, intent)
     });
 
     timings_us.push(("prepare", micros(step)));
     step = std::time::Instant::now();
+    let counted: Vec<&Keyword> = keywords.iter().filter(|k| k.counted).collect();
 
     // 2. Name match over the query, keywords and entities.
-    let (pins, entities) = tracing::info_span!("name_match").in_scope(|| {
-        let mut pins: HashMap<usize, BTreeSet<&str>> = HashMap::new();
-        let mut entities: BTreeSet<String> = BTreeSet::new();
-        let texts = std::iter::once(norm_query.clone()).chain(
-            req.keywords
-                .iter()
-                .chain(&req.entities)
-                .map(|k| normalize(k)),
-        );
-        for text in texts {
-            for hit in snap.names.find(&text, visible) {
-                for target in hit.targets {
-                    match target {
-                        Target::Page(i) => {
-                            if ablation.pin_names {
-                                pins.entry(*i).or_default().insert(hit.name);
-                            }
-                        }
-                        Target::NodeType(e) => {
-                            entities.insert(e.clone());
-                        }
+    let found = tracing::info_span!("name_match").in_scope(|| {
+        let mut f = Found::default();
+        // Entity ids the agent already holds are looked up exactly and taken out of the text
+        // before names are matched (see `resolve_ids`).
+        let mut take_ids = |raw: &str, (ids, rest): (Vec<IdHit>, String)| -> String {
+            let mut resolved = false;
+            for hit in ids {
+                match hit {
+                    IdHit::Node(Some(n)) => {
+                        push_unique(&mut f.nodes, n);
+                        push_unique(&mut f.explicit, n);
+                        resolved = true;
+                    }
+                    IdHit::Node(None) => {}
+                    IdHit::Type(t) => {
+                        push_unique(&mut f.node_types, t);
+                        resolved = true;
                     }
                 }
             }
+            if resolved {
+                f.id_texts.insert(normalize(raw.trim()));
+            }
+            rest
+        };
+        let query_text = take_ids(&req.query, (query_ids, query_words.clone()));
+        let agent_texts: Vec<String> = req
+            .keywords
+            .iter()
+            .chain(&req.entities)
+            .map(|k| take_ids(k, resolve_ids(k, snap, graph, &vis)))
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        // Each distinct text is matched once: whether it named something, and what.
+        let mut seen: HashMap<String, (bool, bool)> = HashMap::new();
+        let mut match_text = |f: &mut Found, text: &str| -> (bool, bool) {
+            if let Some(&flags) = seen.get(text) {
+                return flags;
+            }
+            let hits = find_in(&[&snap.names, &graph.names], text, visible);
+            let numeric = graph.numeric_key_hits(text, &vis);
+            let graph_hit = !numeric.is_empty()
+                || hits
+                    .iter()
+                    .any(|h| h.targets.iter().any(|t| !matches!(t, Target::Page(_))));
+            let any_hit = !hits.is_empty() || !numeric.is_empty();
+            for hit in &hits {
+                for target in &hit.targets {
+                    f.target(target, hit.name, ablation.pin_names);
+                }
+            }
+            for n in numeric {
+                push_unique(&mut f.nodes, n);
+            }
+            seen.insert(text.to_owned(), (graph_hit, any_hit));
+            (graph_hit, any_hit)
+        };
+        let (query_hit, _) = match_text(&mut f, &query_text);
+        f.named.insert(query_text.clone(), query_hit);
+        for text in &agent_texts {
+            let (graph_hit, any_hit) = match_text(&mut f, text);
+            // An agent keyword that names nothing whole may be part of a node's name.
+            let mut partial = f.partial.contains_key(text);
+            if !any_hit && !partial {
+                let nodes = graph.partial_name_hits(text, &vis);
+                for &n in &nodes {
+                    push_unique(&mut f.nodes, n);
+                }
+                if !nodes.is_empty() {
+                    partial = true;
+                    f.partial.insert(text.clone(), nodes);
+                }
+            }
+            f.named.insert(text.clone(), graph_hit || partial);
         }
-        let pins: HashMap<usize, usize> = pins.into_iter().map(|(i, n)| (i, n.len())).collect();
-        (pins, entities)
+        // Relation types: their names found above anywhere in the request, plus those whose
+        // names or aliases a counted keyword matches word by word (stems, split identifiers),
+        // which exact names on word boundaries miss.
+        for (i, k) in counted.iter().enumerate() {
+            for rt in snap.catalog.relation_types() {
+                if k.matches(&rt.text) {
+                    push_unique(&mut f.relation_types, rt.entity.clone());
+                    f.relation_keywords.insert(i);
+                }
+            }
+        }
+        // Words taken from the query only need to know whether they named a graph entity;
+        // their targets were already found in the query as a whole.
+        for k in &counted {
+            let text = normalize(&k.text);
+            if f.named.contains_key(&text) {
+                continue;
+            }
+            let hit = !graph.numeric_key_hits(&text, &vis).is_empty()
+                || find_in(&[&snap.names, &graph.names], &text, visible)
+                    .iter()
+                    .any(|h| h.targets.iter().any(|t| !matches!(t, Target::Page(_))));
+            f.named.insert(text, hit);
+        }
+        // A space named in the request narrows the named nodes to it, when some are in it; ids
+        // the agent passed are always kept.
+        let keep =
+            |n: &NodeIndex| f.spaces.contains(&graph.graph[*n].space) || f.explicit.contains(n);
+        if f.nodes
+            .iter()
+            .any(|n| f.spaces.contains(&graph.graph[*n].space))
+        {
+            let kept: Vec<NodeIndex> = f.nodes.iter().copied().filter(keep).collect();
+            f.nodes = kept;
+        }
+        f
     });
+    let pins = &found.pins;
+    // A keyword that names a graph entity or a relation type matched something, even when no
+    // page shows it. An id matched only if it was found (and is visible).
+    let mut matched_any: Vec<bool> = counted
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let text = normalize(&k.text);
+            // A keyword holding an id matched when the id was found (and is visible); a keyword
+            // that is only an id and wasn't found matched nothing.
+            if found.id_texts.contains(&text) {
+                return true;
+            }
+            if let Some(EntityRef::Node { .. }) = EntityRef::parse(k.text.trim()) {
+                return false;
+            }
+            found.relation_keywords.contains(&i) || found.named.get(&text).copied().unwrap_or(false)
+        })
+        .collect();
 
     timings_us.push(("name_match", micros(step)));
 
     // 3 and 4. Keyword search and ranking, per channel.
     let audiences = scope.audience_keys();
-    let counted: Vec<&Keyword> = keywords.iter().filter(|k| k.counted).collect();
-    let mut matched_any = vec![false; counted.len()];
     let mut run_channel = |slot: Slot, size: usize| -> anyhow::Result<(Vec<Candidate>, Coverage)> {
         let span = tracing::info_span!("keyword_search", slot = slot.as_str());
         let _enter = span.enter();
@@ -766,14 +916,71 @@ pub fn search(
     timings_us.push(("keyword_search_knowledge", micros(step)));
     step = std::time::Instant::now();
 
-    // 5. Assemble.
+    // 5. Relations: edges around the named entities, then the entities the hits are anchored
+    // to. A relationship question, or two named nodes, gets more room.
+    let relation_slot = tracing::info_span!("relations").in_scope(|| {
+        let mut lifted: Vec<NodeIndex> = Vec::new();
+        for anchor in mem
+            .iter()
+            .chain(&kno)
+            .flat_map(|c| &snap.catalog.pages[c.ord].about)
+        {
+            if let Some(n) = graph.node(anchor)
+                && vis.node(graph, n)
+                && !found.nodes.contains(&n)
+            {
+                push_unique(&mut lifted, n);
+            }
+        }
+        let wide = intent == Some(Intent::Relation) || found.nodes.len() >= 2;
+        let size = if wide && req.slots.relations.is_none() {
+            (sizes.relations * 2).min(MAX_SLOT)
+        } else {
+            sizes.relations
+        };
+        let start = relations::Start {
+            named: &found.nodes,
+            lifted: &lifted,
+            node_types: &found.node_types,
+            relation_types: &found.relation_types,
+        };
+        let got = relations::find(graph, &vis, &start, size);
+        let route = found.nodes.first().map(|&first| {
+            let second = found
+                .nodes
+                .iter()
+                .skip(1)
+                .find(|&&n| graph.graph[n].space == graph.graph[first].space);
+            GraphRoute {
+                graph: graph.graph[first].id.clone(),
+                path: second.map(|&n| PathRoute {
+                    from: graph.graph[first].id.clone(),
+                    to: graph.graph[n].id.clone(),
+                }),
+            }
+        });
+        RelationSlot {
+            coverage: if got.strong {
+                Coverage::Strong
+            } else {
+                Coverage::Weak
+            },
+            relation_types: found.relation_types.clone(),
+            edges: got.edges,
+            route,
+        }
+    });
+    timings_us.push(("relations", micros(step)));
+    step = std::time::Instant::now();
+
+    // 6. Assemble.
     let span = tracing::info_span!("assemble");
     let _enter = span.enter();
     let make_slot = |cands: Vec<Candidate>, coverage: Coverage| PageSlot {
         coverage,
         hits: cands
             .into_iter()
-            .map(|c| hit(snap, scope, &c, &counted, reads))
+            .map(|c| hit(snap, graph, &vis, scope, &c, &counted, reads))
             .collect(),
     };
     let unmatched_keywords = counted
@@ -785,23 +992,226 @@ pub fn search(
     let memories = make_slot(mem, mem_cov);
     let knowledge = make_slot(kno, kno_cov);
     timings_us.push(("assemble", micros(step)));
+    let mut entities: Vec<String> = found
+        .nodes
+        .iter()
+        .map(|&n| graph.graph[n].id.clone())
+        .collect();
+    let types: BTreeSet<&String> = found.node_types.iter().collect();
+    entities.extend(types.into_iter().cloned());
+    let partial_names = found
+        .partial
+        .iter()
+        .map(|(k, nodes)| {
+            let ids = nodes.iter().map(|&n| graph.graph[n].id.clone()).collect();
+            (k.clone(), ids)
+        })
+        .collect();
     Ok(SearchResponse {
-        entities: entities.into_iter().collect(),
+        entities,
         intent,
         memories,
         knowledge,
-        relations: RelationSlot {
-            coverage: Coverage::Weak,
-            relation_types: Vec::new(),
-            edges: Vec::new(),
-        },
+        relations: relation_slot,
         unmatched_keywords,
+        partial_names,
         timings_us,
     })
 }
 
+/// What the name match found: pinned pages, and the graph entities a search starts from.
+#[derive(Default)]
+struct Found {
+    /// Per pinned page, the distinct names of it that were found.
+    pin_names: HashMap<usize, BTreeSet<String>>,
+    /// Per pinned page, how many of its names were found.
+    pins: HashMap<usize, usize>,
+    nodes: Vec<NodeIndex>,
+    spaces: Vec<usize>,
+    node_types: Vec<String>,
+    relation_types: Vec<String>,
+    /// Keywords (normalized) that named nodes only as part of their names, with those nodes.
+    partial: BTreeMap<String, Vec<NodeIndex>>,
+    /// Nodes the agent passed by id; a space named in the query never drops them.
+    explicit: Vec<NodeIndex>,
+    /// Texts (normalized, as the agent wrote them) holding an id that resolved to a visible
+    /// node or an existing node type.
+    id_texts: HashSet<String>,
+    /// Per matched text (normalized, ids taken out): whether it named a graph entity.
+    named: HashMap<String, bool>,
+    /// Counted keywords (by index) that matched a relation type.
+    relation_keywords: HashSet<usize>,
+}
+
+impl Found {
+    fn target(&mut self, target: &Target, name: &str, pin_names: bool) {
+        match target {
+            Target::Page(i) => {
+                if pin_names {
+                    let names = self.pin_names.entry(*i).or_default();
+                    names.insert(name.to_owned());
+                    self.pins.insert(*i, names.len());
+                }
+            }
+            Target::NodeType(e) => push_unique(&mut self.node_types, e.clone()),
+            Target::RelationType(e) => push_unique(&mut self.relation_types, e.clone()),
+            Target::Node(n) => push_unique(&mut self.nodes, NodeIndex::new(*n as usize)),
+            Target::Space(i) => push_unique(&mut self.spaces, *i),
+        }
+    }
+}
+
+/// An entity id found in a text.
+enum IdHit {
+    /// A node id: the node, when it exists and the caller may see it.
+    Node(Option<NodeIndex>),
+    /// An existing node type, `schema:type`.
+    Type(String),
+}
+
+/// The entity ids in a text, and the text without them (normalized). A node id is taken out
+/// whether or not it is found, so a hidden id and an unknown one behave the same; a
+/// `schema:type` is an id only when that node type exists, so words such as "status:active"
+/// stay text. Chinese text right after an id ("mainland:order/1042的客户") runs into the key:
+/// unless the whole span names a visible node, the id ends before the first Chinese character
+/// of its key, a rule that never depends on hidden nodes.
+fn resolve_ids(
+    raw: &str,
+    snap: &SearchSnapshot,
+    graph: &GraphSnapshot,
+    vis: &Visible,
+) -> (Vec<IdHit>, String) {
+    let mut ids = Vec::new();
+    let mut rest = String::new();
+    let mut at = 0;
+    for (start, mut end) in id_spans(raw) {
+        let whole = graph
+            .node(&raw[start..end])
+            .is_some_and(|n| vis.node(graph, n));
+        if !whole
+            && let Some(slash) = raw[start..end].find('/')
+            && let Some((i, _)) = raw[start + slash..end]
+                .char_indices()
+                .find(|&(_, c)| text::is_cjk(c))
+        {
+            end = start + slash + i;
+        }
+        let id = &raw[start..end];
+        let hit = match EntityRef::parse(id) {
+            Some(EntityRef::Node { .. }) => {
+                Some(IdHit::Node(graph.node(id).filter(|&n| vis.node(graph, n))))
+            }
+            Some(EntityRef::Type { schema, ty })
+                if graph.has_node_type(schema, ty) || snap.catalog.has_node_type(id) =>
+            {
+                Some(IdHit::Type(id.to_owned()))
+            }
+            _ => None,
+        };
+        if let Some(hit) = hit {
+            ids.push(hit);
+            rest.push_str(&raw[at..start]);
+            rest.push(' ');
+            at = end;
+        }
+    }
+    rest.push_str(&raw[at..]);
+    (ids, normalize(rest.trim()))
+}
+
+/// Where entity ids might be in a text: `name:name` or `name:name/key`, where a name is a
+/// lowercase letter then lowercase letters, digits and `_`, not preceded by a letter, digit or
+/// `_`. A key runs to whitespace or punctuation that closes a phrase (`,;!?)` and their
+/// Chinese forms, quotes, brackets); a trailing `.` is left out. Chinese text needs no spaces
+/// around an id: 谁下的（mainland:order/1042）？
+fn id_spans(text: &str) -> Vec<(usize, usize)> {
+    let is_name = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
+    let ends_key = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | ';'
+                    | '!'
+                    | '?'
+                    | ')'
+                    | ']'
+                    | '}'
+                    | '"'
+                    | '\''
+                    | '，'
+                    | '；'
+                    | '！'
+                    | '？'
+                    | '）'
+                    | '】'
+                    | '」'
+                    | '』'
+                    | '。'
+                    | '、'
+                    | '“'
+                    | '”'
+            )
+    };
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let byte_at = |i: usize| chars.get(i).map_or(text.len(), |&(b, _)| b);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let starts = chars[i].1.is_ascii_lowercase()
+            && (i == 0 || !(chars[i - 1].1.is_ascii_alphanumeric() || chars[i - 1].1 == '_'));
+        if !starts {
+            i += 1;
+            continue;
+        }
+        // name ':' name
+        let mut j = i;
+        while j < chars.len() && is_name(chars[j].1) {
+            j += 1;
+        }
+        let second = j + 1;
+        if chars.get(j).map(|c| c.1) != Some(':')
+            || !chars.get(second).is_some_and(|c| c.1.is_ascii_lowercase())
+        {
+            i = j.max(i + 1);
+            continue;
+        }
+        let mut k = second;
+        while k < chars.len() && is_name(chars[k].1) {
+            k += 1;
+        }
+        let mut end = k;
+        if chars.get(k).map(|c| c.1) == Some('/') {
+            let mut m = k + 1;
+            while m < chars.len() && !ends_key(chars[m].1) {
+                m += 1;
+            }
+            while m > k + 1 && chars[m - 1].1 == '.' {
+                m -= 1;
+            }
+            if m > k + 1 {
+                end = m;
+            }
+        } else if chars.get(k).is_some_and(|c| c.1.is_ascii_alphanumeric()) {
+            // An uppercase letter continues the word: not an id.
+            i = k;
+            continue;
+        }
+        out.push((byte_at(i), byte_at(end)));
+        i = end;
+    }
+    out
+}
+
+fn push_unique<T: PartialEq>(list: &mut Vec<T>, item: T) {
+    if !list.contains(&item) {
+        list.push(item);
+    }
+}
+
 fn hit(
     snap: &SearchSnapshot,
+    graph: &GraphSnapshot,
+    vis: &Visible,
     scope: &Scope,
     c: &Candidate,
     counted: &[&Keyword],
@@ -833,19 +1243,33 @@ fn hit(
         matched_keywords: matched.iter().map(|k| k.text.clone()).collect(),
         summary: page.summary.clone(),
         lines,
-        about: visible_anchors(scope, &page.about),
+        about: visible_anchors(scope, &snap.catalog, graph, vis, &page.about),
         sources: page.sources.clone(),
     }
 }
 
-/// Anchors that name pages the caller can't see are dropped; entities pass (graph spaces are
-/// filtered in M3).
-pub fn visible_anchors(scope: &Scope, about: &[String]) -> Vec<String> {
+/// The anchors a caller may see: pages they can see; node types that exist (in a stored
+/// schema or a schema page) unless the prefix is really a space's name; and nodes of spaces
+/// they can see. Anything else, including nodes of unknown spaces, is dropped.
+pub fn visible_anchors(
+    scope: &Scope,
+    catalog: &Catalog,
+    graph: &GraphSnapshot,
+    vis: &Visible,
+    about: &[String],
+) -> Vec<String> {
     about
         .iter()
         .filter(|a| match PagePath::parse(a) {
             Ok(p) => scope.can_see(&p),
-            Err(_) => a.contains(':'),
+            Err(_) => match EntityRef::parse(a) {
+                Some(EntityRef::Type { schema, ty }) => {
+                    graph.space_index(schema).is_none()
+                        && (graph.has_node_type(schema, ty) || catalog.has_node_type(a))
+                }
+                Some(EntityRef::Node { .. }) => vis.node_anchor(graph, a),
+                None => false,
+            },
         })
         .cloned()
         .collect()
@@ -930,6 +1354,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ids_are_found_in_running_text() {
+        let ids = |t: &str| -> Vec<String> {
+            id_spans(t)
+                .into_iter()
+                .map(|(s, e)| t[s..e].to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids("who placed mainland:order/1042."),
+            vec!["mainland:order/1042"]
+        );
+        assert_eq!(
+            ids("谁下的（mainland:order/1042）？"),
+            vec!["mainland:order/1042"]
+        );
+        assert_eq!(
+            ids("see commerce:order, then a:b/c/d and x:y/v2.1!"),
+            vec!["commerce:order", "a:b/c/d", "x:y/v2.1"]
+        );
+        for none in [
+            "Mainland:order/1",
+            "re:Refunds",
+            "10:30",
+            "http://x",
+            "a: b",
+            "Xa:b",
+        ] {
+            assert!(
+                ids(none).iter().all(|i| *i != none),
+                "{none}: {:?}",
+                ids(none)
+            );
+        }
+        assert!(
+            ids("status:active").len() == 1,
+            "shaped like a type; kept as text unless it is one"
+        );
+    }
+
+    #[test]
     fn intent_from_cue_words() {
         assert_eq!(
             infer_intent("which supplier does this part depend on? 依赖"),
@@ -943,14 +1407,16 @@ mod tests {
     #[test]
     fn query_keywords_skip_stopwords() {
         let snap = SearchSnapshot::empty().unwrap();
+        let graph = GraphSnapshot::empty();
         let kws = keywords_from_query(
             &snap,
+            &graph,
             &normalize("What's the weather in Hangzhou tomorrow?"),
             |_| true,
         );
         assert_eq!(kws, vec!["weather", "hangzhou"]);
         // A word inside another word is still its own keyword.
-        let kws = keywords_from_query(&snap, &normalize("rapid api setup"), |_| true);
+        let kws = keywords_from_query(&snap, &graph, &normalize("rapid api setup"), |_| true);
         assert_eq!(kws, vec!["rapid", "api", "setup"]);
     }
 

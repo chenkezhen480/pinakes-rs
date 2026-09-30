@@ -53,6 +53,9 @@ pub struct ReplayDiff {
     /// The search ran on another wiki than the recorded one, so a difference may come from the
     /// pages rather than from the search.
     pub wiki_changed: bool,
+    /// The graph differs from the recorded one (graph data has no history, so replays always
+    /// use today's graph).
+    pub graph_changed: bool,
     /// The code and search settings that answered at the time.
     pub service_before: String,
     pub search_config_before: String,
@@ -82,6 +85,8 @@ pub struct ReplayReport {
     /// With `WikiSource::Recorded`: searches whose recorded version is no longer kept, which
     /// ran on today's wiki instead.
     pub wiki_missing: usize,
+    /// Searches whose graph differs from the recorded one.
+    pub graph_changed: usize,
     pub diffs: Vec<ReplayDiff>,
 }
 
@@ -172,7 +177,30 @@ impl Iterator for TraceReader {
     }
 }
 
+/// What a slot of a trace summary returned: page ids, or for relations `from type to` edges.
 fn pages_of(summary: &Value, slot: &str) -> Vec<String> {
+    if slot == "relations" {
+        return summary[slot]["edges"]
+            .as_array()
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter_map(|e| {
+                        // `{from, type, to}`; traces written before 2026-10 hold arrays.
+                        let parts = if e.is_object() {
+                            ["from", "type", "to"]
+                                .iter()
+                                .filter_map(|k| e[*k].as_str().map(str::to_owned))
+                                .collect()
+                        } else {
+                            strings(e)
+                        };
+                        (parts.len() == 3).then(|| parts.join(" "))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
     summary[slot]["hits"]
         .as_array()
         .map(|hits| {
@@ -215,9 +243,11 @@ pub async fn replay(
         failed: Vec::new(),
         wiki_changed: 0,
         wiki_missing: 0,
+        graph_changed: 0,
         diffs: Vec::new(),
     };
     let mut recorded: HashMap<(String, String), Arc<SearchSnapshot>> = HashMap::new();
+    let empty_graph = crate::graph::GraphSnapshot::empty().version;
     for record in records {
         if record.endpoint != Endpoint::Search {
             report.skipped += 1;
@@ -263,11 +293,16 @@ pub async fn replay(
                 Some(s) => s,
                 None => tenant.snapshot().await?,
             };
+            let graph = tenant.graph().await?;
             let scope = Scope::offline(tenant, record.user.clone(), record.groups.clone());
-            let now = search(&snapshot, &scope, &req, cfg, &ReadState::default())?;
-            anyhow::Ok(Some((now.trace_summary(), snapshot.version.clone())))
+            let now = search(&snapshot, &graph, &scope, &req, cfg, &ReadState::default())?;
+            anyhow::Ok(Some((
+                now.trace_summary(),
+                snapshot.version.clone(),
+                graph.version.clone(),
+            )))
         };
-        let (now, version) = match run.await {
+        let (now, version, graph_version) = match run.await {
             Ok(Some(done)) => done,
             Ok(None) => {
                 report.skipped += 1;
@@ -296,6 +331,12 @@ pub async fn replay(
         let wiki_changed = record.snapshot.as_deref() != Some(version.as_str());
         if wiki_changed {
             report.wiki_changed += 1;
+        }
+        // Traces from before the graph have no version: they ran on no graph at all, the same
+        // as an empty one.
+        let graph_changed = record.graph.as_deref().unwrap_or(&empty_graph) != graph_version;
+        if graph_changed {
+            report.graph_changed += 1;
         }
         let mut slots = Vec::new();
         for slot in ["memories", "knowledge", "relations"] {
@@ -329,6 +370,7 @@ pub async fn replay(
             tenant: record.tenant.clone(),
             query: req.query.clone(),
             wiki_changed,
+            graph_changed,
             service_before: record.service.clone(),
             search_config_before: record.search_config.clone(),
             slots,
@@ -337,4 +379,26 @@ pub async fn replay(
         });
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Relations edges are compared the same whether a trace holds them as objects or, as
+    /// traces written before the format was settled do, as `[from, type, to]` arrays.
+    #[test]
+    fn edges_of_both_trace_forms() {
+        let new = serde_json::json!({ "relations": { "edges": [
+            { "from": "m:order/1", "type": "placed_by", "to": "m:customer/2" }
+        ] } });
+        let old = serde_json::json!({ "relations": { "edges": [
+            ["m:order/1", "placed_by", "m:customer/2"]
+        ] } });
+        assert_eq!(
+            pages_of(&new, "relations"),
+            vec!["m:order/1 placed_by m:customer/2"]
+        );
+        assert_eq!(pages_of(&new, "relations"), pages_of(&old, "relations"));
+    }
 }

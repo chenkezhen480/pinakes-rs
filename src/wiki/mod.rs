@@ -30,6 +30,8 @@ pub enum WikiError {
 /// What `/pages` lists for each page: enough to pick one, not its body.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PageSummary {
+    /// The page id, as search hits and `/read` name it.
+    #[serde(rename = "page")]
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,

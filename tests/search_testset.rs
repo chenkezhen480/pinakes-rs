@@ -12,87 +12,8 @@ use std::collections::HashMap;
 
 use axum::http::StatusCode;
 use common::app::{Caller, TestApp};
-use common::testset::{self, Question, Tally};
-use serde_json::{Value, json};
-
-fn slot_pages(resp: &Value, slot: &str) -> Vec<String> {
-    resp[slot]["hits"]
-        .as_array()
-        .map(|hits| {
-            hits.iter()
-                .map(|h| h["page"].as_str().unwrap().to_owned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn slot_is_empty_or_weak(resp: &Value, slot: &str) -> bool {
-    let s = &resp[slot];
-    let empty = match slot {
-        "relations" => s["edges"].as_array().is_none_or(|e| e.is_empty()),
-        _ => s["hits"].as_array().is_none_or(|h| h.is_empty()),
-    };
-    empty || s["coverage"] == "weak"
-}
-
-/// Why a question failed, or `None` when it passed.
-fn judge(q: &Question, resp: &Value) -> Option<String> {
-    let mut problems = Vec::new();
-    for (slot, expected) in [
-        ("memories", &q.expect.memories),
-        ("knowledge", &q.expect.knowledge),
-    ] {
-        let got = slot_pages(resp, slot);
-        for page in expected {
-            if !got.contains(&testset::page_path(page)) {
-                problems.push(format!("{slot} lacks {page}"));
-            }
-        }
-    }
-    let text = resp.to_string();
-    for page in &q.must_not {
-        if text.contains(&testset::page_path(page)) {
-            problems.push(format!("must_not {page} appears"));
-        }
-    }
-    for slot in &q.expect_empty {
-        if !slot_is_empty_or_weak(resp, slot) {
-            problems.push(format!("{slot} should be empty or weak"));
-        }
-    }
-    (!problems.is_empty()).then(|| problems.join("; "))
-}
-
-fn describe(resp: &Value) -> String {
-    let mut out = String::new();
-    for slot in ["memories", "knowledge"] {
-        let hits: Vec<String> = resp[slot]["hits"]
-            .as_array()
-            .map(|hs| {
-                hs.iter()
-                    .map(|h| {
-                        format!(
-                            "{} [{}; {}]",
-                            h["page"].as_str().unwrap_or(""),
-                            h["match"].as_str().unwrap_or(""),
-                            h["matched_keywords"]
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "\n      {slot} ({}): {}",
-            resp[slot]["coverage"].as_str().unwrap_or("?"),
-            hits.join(" | ")
-        ));
-    }
-    out.push_str(&format!(
-        "\n      unmatched: {}",
-        resp["unmatched_keywords"]
-    ));
-    out
-}
+use common::testset::{self, Tally, describe, judge, slot_pages};
+use serde_json::json;
 
 struct Outcome {
     passed: usize,

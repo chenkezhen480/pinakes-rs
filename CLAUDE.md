@@ -13,6 +13,9 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   with `export PATH="$HOME/.cargo/bin:$PATH";` if `cargo` is not found.
 - The shell has `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` pointing at a local proxy (127.0.0.1:7897).
   When curling the local server, first `unset HTTP_PROXY HTTPS_PROXY ALL_PROXY; export NO_PROXY=127.0.0.1,localhost`.
+- Graph tests against Neo4j (M3 on): `NEO4J_PASSWORD=... docker compose up -d neo4j`, then
+  `KB_TEST_NEO4J_URI=bolt://127.0.0.1:7687 KB_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset`.
+  Without `KB_TEST_NEO4J_URI` that test is skipped; the SQLite backend always runs.
 - Run the server bound to `127.0.0.1` locally; binding `0.0.0.0` pops a Windows Firewall dialog.
   Start it with `run_in_background`, never with `&` inside a foreground command (that hangs the tool).
 
@@ -20,6 +23,8 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 
 - Every read and write path takes a `Scope` (tenant + user + groups); never take tenant, user or
   group ids from request bodies. Groups arrive in the `X-User-Groups` header (API key mode).
+- Until the librarian exists (M4), schema descriptions are written by code
+  (`src/graph/describe.rs`); M4 puts the librarian behind the same endpoint.
 - Every page has one audience — tenant, group or user — given by its folder (`groups/g_…`,
   `users/u_…`). `Kind::audiences()` and the path layout must agree. A page may anchor only to
   pages and nodes everyone who can read it can see.

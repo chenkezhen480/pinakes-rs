@@ -45,6 +45,10 @@ pub struct TraceRecord {
     /// Version of the search snapshot the request ran on, when it used one; the wiki history
     /// keeps that version for replays.
     pub snapshot: Option<String>,
+    /// Version of the graph snapshot a search ran on. Graph data has no history, so replays
+    /// always use today's graph and report when it changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
     /// The code that answered (`kb::SERVICE`).
     #[serde(default)]
     pub service: String,
@@ -69,6 +73,7 @@ impl TraceRecord {
             user: None,
             groups: Vec::new(),
             snapshot: None,
+            graph: None,
             service: crate::SERVICE.to_owned(),
             search_config: String::new(),
             request: serde_json::Value::Null,

@@ -92,6 +92,12 @@ impl TestApp {
         (self.router, self.state) = Self::make_router(&self.data, &self.extra_config);
     }
 
+    /// Restarts over the same data folder with other extra config TOML.
+    pub fn restart_with_config(&mut self, extra: &str) {
+        self.extra_config = extra.to_owned();
+        self.restart();
+    }
+
     pub fn wiki_dir(&self, tenant_id: &str) -> PathBuf {
         self.data
             .path()
@@ -101,14 +107,21 @@ impl TestApp {
     }
 
     pub async fn create_tenant(&self, id: &str) -> String {
-        let req = Request::post("/admin/tenants")
-            .header("Authorization", format!("Bearer {ADMIN}"))
-            .header("Content-Type", "application/json")
-            .body(Body::from(json!({ "tenant_id": id }).to_string()))
-            .unwrap();
-        let (status, body) = self.send(req).await;
+        let (status, body) = self
+            .post_admin("/admin/tenants", json!({ "tenant_id": id }))
+            .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         body["api_key"].as_str().unwrap().to_owned()
+    }
+
+    /// A POST with the admin key.
+    pub async fn post_admin(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        let req = Request::post(uri)
+            .header("Authorization", format!("Bearer {ADMIN}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        self.send(req).await
     }
 
     pub async fn post(&self, caller: Caller<'_>, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -123,6 +136,17 @@ impl TestApp {
         }
         self.send(req.body(Body::from(body.to_string())).unwrap())
             .await
+    }
+
+    pub async fn get(&self, caller: Caller<'_>, uri: &str) -> (StatusCode, Value) {
+        let mut req = Request::get(uri).header("Authorization", format!("Bearer {}", caller.key));
+        if let Some(u) = caller.user {
+            req = req.header("X-User-Id", u);
+        }
+        if !caller.groups.is_empty() {
+            req = req.header("X-User-Groups", caller.groups.join(","));
+        }
+        self.send(req.body(Body::empty()).unwrap()).await
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {

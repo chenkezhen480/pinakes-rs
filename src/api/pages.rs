@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ApiError;
 use crate::identity::Scope;
 use crate::kinds::Kind;
+use crate::search::visible_anchors;
 use crate::wiki::{FrontMatter, PagePath, PageSummary};
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +42,7 @@ pub async fn list(
 
 #[derive(Debug, Serialize)]
 pub struct PageResponse {
+    #[serde(rename = "page")]
     pub path: PagePath,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,
@@ -61,9 +63,18 @@ pub async fn get(
         return Err(ApiError::NotFound);
     }
     let wiki = scope.tenant().wiki();
-    let page = tokio::task::spawn_blocking(move || wiki.read(&path))
+    let mut page = tokio::task::spawn_blocking(move || wiki.read(&path))
         .await
         .map_err(anyhow::Error::from)??;
+    // Anchors into pages or graph spaces the caller can't see are dropped, as in search hits.
+    // Without the graph, every node anchor is dropped.
+    if !page.front.about.is_empty() {
+        let graph = scope.tenant().graph_or_empty().await;
+        let vis = graph.visible(&scope);
+        let snapshot = scope.tenant().snapshot().await?;
+        page.front.about =
+            visible_anchors(&scope, &snapshot.catalog, &graph, &vis, &page.front.about);
+    }
     Ok(Json(PageResponse {
         kind: page.path.kind(),
         path: page.path,

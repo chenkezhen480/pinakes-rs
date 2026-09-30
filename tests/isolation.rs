@@ -144,7 +144,7 @@ fn paths(list: &Value) -> Vec<String> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| p["path"].as_str().unwrap().to_owned())
+        .map(|p| p["page"].as_str().unwrap().to_owned())
         .collect()
 }
 

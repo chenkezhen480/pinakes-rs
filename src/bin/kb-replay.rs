@@ -89,11 +89,14 @@ async fn main() -> anyhow::Result<()> {
         println!("reading {} trace files", files.len());
     }
     let mut records = TraceReader::new(files);
+    // Replays read today's graph: graph data has no history (design, "Search traces and
+    // replay").
     let tenants = Tenants::new(
         config.tenants_dir(),
         config.store.file_name.clone(),
         Duration::from_secs(60),
-    );
+    )
+    .graph_backend(kb::graph::GraphBackend::from_config(&config));
     let report = replay(&tenants, &config.search, wiki, records.by_ref()).await?;
     for e in &records.errors {
         eprintln!("could not read {e}");
@@ -116,12 +119,17 @@ async fn main() -> anyhow::Result<()> {
     }
     for d in &report.diffs {
         println!(
-            "{} {} [{}]{} {:?}",
+            "{} {} [{}]{}{} {:?}",
             d.at,
             d.request_id,
             d.tenant,
             if d.wiki_changed {
                 " (wiki changed)"
+            } else {
+                ""
+            },
+            if d.graph_changed {
+                " (graph changed)"
             } else {
                 ""
             },
@@ -144,12 +152,13 @@ async fn main() -> anyhow::Result<()> {
         println!("failed {id}: {why}");
     }
     println!(
-        "replayed {} searches: {} same, {} changed; {} on another wiki than recorded ({} recorded versions no longer kept); skipped {}, failed {}, unreadable lines {}",
+        "replayed {} searches: {} same, {} changed; {} on another wiki than recorded ({} recorded versions no longer kept), {} on another graph; skipped {}, failed {}, unreadable lines {}",
         report.searches,
         report.same,
         report.changed,
         report.wiki_changed,
         report.wiki_missing,
+        report.graph_changed,
         report.skipped,
         report.failed.len(),
         records.bad_lines

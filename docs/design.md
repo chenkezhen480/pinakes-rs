@@ -116,7 +116,7 @@ Space names are unique within a tenant and never equal a schema name, so an enti
 |---|---|---|
 | `shared` (default) | Everyone in the tenant | A product catalog, an org chart, a plant's equipment |
 | `private` | Only its owner, the user who created it | A salesperson's own map of prospects |
-| `restricted` | The users and groups on its member list | A fraud investigation only the risk team may see |
+| `restricted` | Its owner, plus the users and groups on its member list | A fraud investigation only the risk team may see |
 
 - The owner of a private space comes from the credentials of the call that creates it, never from the body. A restricted space lists member user ids and group ids. Groups come from the caller's credentials like the user id (see "Tenants, users and identity"), because the service manages neither accounts nor groups.
 - Every request works out once, from its `Scope`, which spaces the caller can see. Name-matcher hits, relation edges, walks, paths and anchors in any other space are dropped before anything is returned, so a hidden space's node names never appear, not even among the matched entities or in `unmatched_keywords` feedback. `/graph` and `/graph/path` on a node in a hidden space return 404.
@@ -155,6 +155,18 @@ updated: 2026-09-29
 **Anchors join the wiki to the graph.** Memory and knowledge pages list the entities they're about in their front matter. The lift and the memory-to-knowledge hop follow these anchors, so the librarian must anchor every memory, and lint flags any memory without one.
 
 **In memory.** When a tenant opens, its nodes and edges are read from Neo4j and its page anchors from the wiki, into adjacency lists in both directions built with petgraph. Searches walk that copy and never query Neo4j, so a walk takes microseconds. Walks are breadth-first, with caps on depth (3) and nodes (100).
+
+**As built in M3 (2026-09-30).**
+
+- **Descriptions before the librarian.** Until M4, `/ingest/graph/schema` answers synchronously (200, not a job id), stores the definition first and then has code write `graph/<schema>.md` (if the page write fails, sending the same schema again rewrites it): structural fields from the stored definition, descriptive fields (title, summary, aliases, `en`/`zh`, type aliases) from the request, or else from the page as it stands, so hand-written prose survives a schema change. M4 puts the librarian's description step behind the same endpoint.
+- **Stores.** Definitions and the space registry live in the tenant's `kb.sqlite`. Each tenant gets its own `GraphStore` with its tenant id built in. The SQLite backend is `graph.sqlite` in the tenant folder (the default when `[graph]` is absent; the shipped `config.toml` selects Neo4j). Creating a tenant first clears any graph data a deleted tenant of the same id left in Neo4j; if that can't be done, the tenant isn't created. The graph loads on the tenant's first search, like its wiki index; if its stores can't be read (Neo4j down), that search answers from the wiki with an empty relations slot, and for the next 10 seconds requests don't wait on the store again before a new attempt. Startup with the Neo4j backend retries while Neo4j comes up, but a missing password fails at once.
+- **Two in-memory copies.** The graph snapshot (petgraph, the graph's own name matcher, the space registry) is separate from the wiki snapshot, so writing nodes never rebuilds the tantivy index; a write swaps in a new graph snapshot and searches finish on the old one. A search merges the hits of both name matchers.
+- **How nodes are named.** Node names and aliases always, except a name that is only the key (the default when a node is sent without one), which follows the key rules; keys that look like identifiers (with a digit, `_`, `-` or `.`, such as `SKU-AIR-01`), never plain-word keys like `team`; numeric keys only right next to a name of their type ("order 1042", "order #1042", 订单1042, "1042 order"), which finds every such node in the visible spaces; and an agent keyword that names nothing whole may be part of a node name (冲压线 for "冲压线 L1") when it is specific (three or more Chinese characters, or four or more other characters on word boundaries) and fits at most three nodes. A space's display name and aliases narrow the named nodes to that space. Entity ids the agent passes (`space:type/key`, in `entities`, `keywords` or the query, also inside Chinese text without spaces) are looked up exactly and taken out of the text before names are matched; a `schema:type`-shaped word counts as an id only when that node type exists, so "status:active" stays text; so an id never also names the same key in another space; a named space never drops them; a hidden id behaves exactly like an unknown one. Partial matching applies to graph data only, never to wiki names: pages already get partial overlap from BM25, and a partial name pinning a page would push unrelated pages to the top. Graph nodes have no BM25, and the librarian never writes graph data, so no lint pass can add their aliases; the partial match is the fallback, and each search trace records its keywords and nodes (`partial_names`) so M8's lint can report them to the host as missing aliases (decided with the user 2026-09-30).
+- **Ranking in the relations slot.** Edges come in tiers: the shortest path between two named nodes; edges of a named relation type at a named node, and one-hop edges to a node of a named type; two- and three-hop chains to a named type ("which plan is Lumen on": workspace → subscription → plan); other edges of named nodes; and last, edges of lifted nodes, only when they have a named relation type or lead to a named type. The slot is strong when an edge touches a named node, and stays empty rather than padded when nothing is named. A relation intent or two named nodes doubles the slot, unless the caller set its size. `relation_types` lists the relation types the request names; each edge carries its space, both ends' names, the schema's `via` and how it was found.
+- **Follow-ups.** `/graph` returns the walked nodes, their edges and the visible pages anchored to them or to the start node's type; `/graph/path` looks for at most 6 hops and never joins two spaces. Unknown and hidden nodes are both 404.
+- **Visibility details.** A restricted space is visible to its owner (the user who created it) as well as its members (decided with the user 2026-09-30). `GET /pages/{path}` filters a page's `about` anchors by the same rules as search hits: node anchors only in visible spaces, type anchors only for node types that exist. Space names are unique across the tenant, hidden spaces included, so creating a taken name is a 409; this tells a caller that a name is taken, even by a space they can't see. It can't be avoided while names are unique in a tenant, which `space:type/key` references need. Visibility and members are fixed at creation until an update endpoint comes (not in M3).
+- **Neo4j model.** Each node is labelled `KbNode` plus its type, with `tenant`, `space`, `type`, `key`, `name` and `aliases`; each edge is a `KB_REL` relationship with `tenant`, `space` and `type`. Each deployment has its own Neo4j (confirmed with the user 2026-09-30), so `tenant` is the tenant id. Checked on Neo4j 5.26.28 Community: the composite uniqueness constraint on `(tenant, space, type, key)` works there (node key and existence constraints are Enterprise only), plus indexes on the tenant id of nodes and relationships.
+- **Traces.** Each search trace records the graph snapshot's version. Graph data has no history, so `kb-replay` always runs on today's graph and reports which replays saw a different one.
 
 **Why a graph still fits A-RAG.** A-RAG's critique of graph-based RAG, such as GraphRAG and HippoRAG2, is that those systems "rely on predefined retrieval algorithms rather than model-driven decisions." Here the graph is reached through the same agent-driven search, and the agent decides whether to follow a graph route.
 
@@ -428,7 +440,8 @@ data/
         │       └── u_7b21e0d4/        folder name derived from the user id
         │           ├── preferences.md
         │           └── decisions/     e.g. refund-policy.md
-        ├── kb.sqlite          jobs, proposals, API keys, audit log, embeddings
+        ├── kb.sqlite          jobs, proposals, API keys, audit log, graph schemas and spaces, embeddings
+        ├── graph.sqlite       nodes and edges, only with the SQLite graph backend
         ├── logs/              search traces, one JSONL file per day (search-2026-09-30.jsonl)
         ├── history/           past wiki versions for replays: objects/ and versions/
         └── index/             derived, safe to delete
@@ -466,7 +479,7 @@ CREATE TABLE embeddings (
 
 Vectors stay out of the Markdown files: they are derived data, like the search index. The hash catches hand edits, so a section whose text no longer matches is re-embedded, and changing the embedding model rebuilds this table without touching a single page.
 
-**What Neo4j holds.** The graph nodes and edges of every tenant, in one database, since the Community edition has only one. Each node is labelled with its type and carries the tenant id, its space and its key; an index on the tenant id keeps every query scoped, and a uniqueness constraint keeps a key unique within its type and space (which constraints Neo4j Community supports is checked in M3; code validates the rest). The service writes to Neo4j from `/ingest/graph/space` and `/ingest/graph/data` and reads a tenant's graph into memory when the tenant opens; searches never query it. A `GraphStore` trait keeps an SQLite backend beside Neo4j, for tests and for trying the service without it.
+**What Neo4j holds.** The graph nodes and edges of every tenant, in one database, since the Community edition has only one. Each node is labelled with its type and carries the tenant id, its space and its key; an index on the tenant id keeps every query scoped, and a uniqueness constraint keeps a key unique within its type and space (Neo4j Community supports this composite constraint, checked in M3; code validates the rest). The service writes to Neo4j from `/ingest/graph/space` and `/ingest/graph/data` and reads a tenant's graph into memory when the tenant opens; searches never query it. A `GraphStore` trait keeps an SQLite backend beside Neo4j, for tests and for trying the service without it.
 
 ## Interfaces
 
@@ -498,6 +511,17 @@ One axum server exposes three interfaces, and all of them call the same core fun
 | POST | `/admin/tenants` | Create a tenant and its first API key (admin key only) |
 | DELETE | `/admin/tenants/{id}` | Delete a tenant and all its data (admin key only) |
 | GET | `/health` | Liveness check |
+
+**Response formats.** Decided 2026-09-30, so every endpoint reads the same way:
+
+- A wiki page is named `page` everywhere: search hits, `/graph` pages, `/pages` and `/pages/{path}`. Only `/read` items use `id`, because from M4 they can also be raw sources.
+- Entities are named one way: `space:type/key` for a node, `schema:type` for a node type, `schema:relation` for a relation type. Inside something that already carries its `space` (a node, an edge, a graph data request), `type` is the bare name and a data request's edge ends are `type/key`; a reference standing on its own is always qualified (`entities`, `relation_types`, `about`, `anchored_to`).
+- A node is `{id, space, type, key, name, aliases, depth}`; an edge is `{space, from, from_name, type, to, to_name, via, match}`.
+- Lists are always present, possibly empty. A single value that doesn't apply is left out, never `null`. Counts never reuse a list's name (`nodes_written`, not `nodes`).
+- `match` says how something was found: `alias` or `keyword` for page hits; `path`, `relation`, `node_type`, `neighbor` or `anchor` for edges.
+- Keys are snake_case; errors are `{"error": {"code", "message"}}` everywhere.
+- Stored forms use the same field names as the API: a schema definition is the same in the request, in SQLite and in its description's front matter; a node or edge is the same in a data request, in SQLite and as Neo4j properties. The one exception is `front_matter` in `GET /pages/{path}`: it is the page file as stored, so empty lists are left out as in the file.
+- Search traces use the response's names, with edges as `{from, type, to}` objects (`kb-replay` also reads the `[from, type, to]` arrays of earlier traces).
 
 Here is an example insert, a decision record. The search example is in "Retrieval for agents":
 

@@ -85,6 +85,17 @@ impl Scope {
         r
     }
 
+    /// What this caller's agent session has read so far; nothing without a session.
+    pub fn read_state(&self, session: Option<&str>) -> crate::search::tracker::ReadState {
+        match session {
+            Some(s) => self
+                .tenant
+                .reads
+                .state(self.user.as_ref().map(|u| u.dir.as_str()), s),
+            None => Default::default(),
+        }
+    }
+
     /// The page audiences this caller may see, as the search index names them: `tenant`, the
     /// caller's group folders and the caller's user folder. Agrees with [`Scope::can_see`].
     pub fn audience_keys(&self) -> Vec<String> {

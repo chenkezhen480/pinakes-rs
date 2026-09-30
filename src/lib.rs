@@ -4,6 +4,7 @@
 pub mod api;
 pub mod config;
 pub mod error;
+pub mod graph;
 pub mod identity;
 pub mod kinds;
 pub mod search;
@@ -45,7 +46,8 @@ impl AppState {
             std::time::Duration::from_secs(config.search.session_idle_minutes.saturating_mul(60)),
         )
         // Wiki versions are kept only for replaying traces.
-        .keep_history(config.trace.enabled);
+        .keep_history(config.trace.enabled)
+        .graph_backend(graph::GraphBackend::from_config(&config));
         let traces = trace::TraceLog::start(
             config.tenants_dir(),
             config.trace.enabled,
@@ -65,10 +67,17 @@ impl AppState {
 pub const PERSONAL_KEY_FILE: &str = "personal-api-key.txt";
 
 impl AppState {
-    /// Startup work before serving. In a personal deployment, creates the default tenant on
-    /// first start and writes its API key to [`PERSONAL_KEY_FILE`] in the data folder. Returns
-    /// the key when it was just created, so it can be shown once.
+    /// Startup work before serving. With the Neo4j backend, connects to Neo4j (retrying while
+    /// it starts) and creates its constraints. In a personal deployment, creates the default
+    /// tenant on first start and writes its API key to [`PERSONAL_KEY_FILE`] in the data
+    /// folder. Returns the key when it was just created, so it can be shown once.
     pub async fn prepare(&self) -> anyhow::Result<Option<String>> {
+        if let graph::GraphBackend::Neo4j(client) = self.tenants.graph() {
+            client
+                .connect_with_retries(30, std::time::Duration::from_secs(2))
+                .await?;
+            tracing::info!(uri = %self.config.neo4j.uri, "Neo4j reachable");
+        }
         let id = &self.config.identity;
         if id.deployment != config::Deployment::Personal {
             return Ok(None);
