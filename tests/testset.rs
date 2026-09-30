@@ -23,7 +23,25 @@ struct TenantFile {
     #[allow(dead_code)]
     description: String,
     users: Vec<UserEntry>,
-    graph_spaces: Vec<String>,
+    graph: GraphConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphConfig {
+    schemas: Vec<String>,
+    spaces: Vec<SpaceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceEntry {
+    id: String,
+    schema: String,
+    name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    aliases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +83,7 @@ struct SchemaRelation {
 #[serde(deny_unknown_fields)]
 struct GraphData {
     space: String,
+    schema: String,
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
 }
@@ -149,9 +168,13 @@ struct FixturePage {
     page: Page,
 }
 
-struct Space {
+struct Schema {
     nodes: HashMap<String, SchemaNode>,
     relations: HashMap<String, SchemaRelation>,
+}
+
+struct Space {
+    schema: String,
     /// `type/key` of every node in the data.
     instances: HashSet<String>,
     /// `from|rel|to`, all as `type/key`.
@@ -161,6 +184,7 @@ struct Space {
 struct Tenant {
     file: TenantFile,
     pages: BTreeMap<String, FixturePage>,
+    schemas: HashMap<String, Schema>,
     spaces: HashMap<String, Space>,
 }
 
@@ -282,57 +306,93 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
         pages.insert(fixture, FixturePage { kind, owner, page });
     }
 
-    let mut spaces = HashMap::new();
-    for space in &file.graph_spaces {
-        let Some(schema) = pages.get(&format!("graph/{space}")) else {
-            report.err(format!("{name}: no schema page graph/{space}.md"));
+    let mut schemas = HashMap::new();
+    for schema_name in &file.graph.schemas {
+        let swhere = format!("{name}/wiki/graph/{schema_name}.md");
+        let Some(page) = pages.get(&format!("graph/{schema_name}")) else {
+            report.err(format!("{swhere}: missing schema description"));
             continue;
         };
-        let extra = &schema.page.front.extra;
+        let extra = &page.page.front.extra;
+        match extra.get("schema").and_then(|v| v.as_str()) {
+            Some(n) if n == schema_name => {}
+            other => report.err(format!("{swhere}: schema field is {other:?}")),
+        }
         let nodes: HashMap<String, SchemaNode> = extra
             .get("nodes")
             .cloned()
             .map(serde_norway::from_value)
             .transpose()
-            .unwrap_or_else(|e| panic!("{name}/graph/{space}.md nodes: {e}"))
+            .unwrap_or_else(|e| panic!("{swhere} nodes: {e}"))
             .unwrap_or_default();
         let relations: HashMap<String, SchemaRelation> = extra
             .get("relations")
             .cloned()
             .map(serde_norway::from_value)
             .transpose()
-            .unwrap_or_else(|e| panic!("{name}/graph/{space}.md relations: {e}"))
+            .unwrap_or_else(|e| panic!("{swhere} relations: {e}"))
             .unwrap_or_default();
         if nodes.is_empty() || relations.is_empty() {
-            report.err(format!("{name}/graph/{space}.md: no nodes or relations"));
+            report.err(format!("{swhere}: no nodes or relations"));
         }
         for (rel, r) in &relations {
             for end in [&r.from, &r.to] {
                 if !nodes.contains_key(end) {
-                    report.err(format!(
-                        "{name}/graph/{space}.md: {rel} uses unknown type {end}"
-                    ));
+                    report.err(format!("{swhere}: {rel} uses unknown type {end}"));
                 }
             }
             if r.aliases.is_empty() {
-                report.err(format!("{name}/graph/{space}.md: {rel} has no aliases"));
+                report.err(format!("{swhere}: {rel} has no aliases"));
             }
         }
+        schemas.insert(schema_name.clone(), Schema { nodes, relations });
+    }
+    // Only schemas get wiki pages; spaces and their data never do.
+    for fixture in pages.keys() {
+        if let Some(n) = fixture.strip_prefix("graph/")
+            && !file.graph.schemas.iter().any(|s| s == n)
+        {
+            report.err(format!(
+                "{name}/wiki/{fixture}.md: not a declared schema (spaces and data get no wiki pages)"
+            ));
+        }
+    }
 
-        let data_path = dir.join("graph").join(format!("{space}.json"));
+    let mut spaces = HashMap::new();
+    for sp in &file.graph.spaces {
+        let dwhere = format!("{name}/graph/{}.json", sp.id);
+        if file.graph.schemas.contains(&sp.id) {
+            report.err(format!(
+                "{name}: space {} has the same name as a schema",
+                sp.id
+            ));
+        }
+        if sp.name.trim().is_empty() {
+            report.err(format!("{name}: space {} has no display name", sp.id));
+        }
+        let Some(schema) = schemas.get(&sp.schema) else {
+            report.err(format!(
+                "{name}: space {} uses unknown schema {}",
+                sp.id, sp.schema
+            ));
+            continue;
+        };
+        let data_path = dir.join("graph").join(format!("{}.json", sp.id));
         let data: GraphData = serde_json::from_str(
             &fs::read_to_string(&data_path)
                 .unwrap_or_else(|_| panic!("missing {}", data_path.display())),
         )
         .unwrap_or_else(|e| panic!("{}: {e}", data_path.display()));
-        let dwhere = format!("{name}/graph/{space}.json");
-        if data.space != *space {
-            report.err(format!("{dwhere}: space is {:?}", data.space));
+        if data.space != sp.id || data.schema != sp.schema {
+            report.err(format!(
+                "{dwhere}: says space {:?} of schema {:?}",
+                data.space, data.schema
+            ));
         }
         let mut instances = HashSet::new();
         let mut types_of = HashMap::new();
         for n in &data.nodes {
-            if !nodes.contains_key(&n.node_type) {
+            if !schema.nodes.contains_key(&n.node_type) {
                 report.err(format!(
                     "{dwhere}: node {} has unknown type {}",
                     n.key, n.node_type
@@ -349,7 +409,7 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
         }
         let mut edges = HashSet::new();
         for e in &data.edges {
-            let Some(r) = relations.get(&e.rel) else {
+            let Some(r) = schema.relations.get(&e.rel) else {
                 report.err(format!("{dwhere}: edge uses unknown relation {}", e.rel));
                 continue;
             };
@@ -370,44 +430,60 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
                 ));
             }
         }
-        spaces.insert(
-            space.clone(),
-            Space {
-                nodes,
-                relations,
-                instances,
-                edges,
-            },
-        );
+        if spaces
+            .insert(
+                sp.id.clone(),
+                Space {
+                    schema: sp.schema.clone(),
+                    instances,
+                    edges,
+                },
+            )
+            .is_some()
+        {
+            report.err(format!("{name}: duplicate space {}", sp.id));
+        }
+    }
+    for path in read_dir_sorted(&dir.join("graph")) {
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        if !spaces.contains_key(stem) {
+            report.err(format!("{name}/graph/{stem}.json: not a declared space"));
+        }
     }
 
     Tenant {
         file,
         pages,
+        schemas,
         spaces,
     }
 }
 
-/// Resolves `space:type` or `space:type/key`; returns an error message if it doesn't resolve.
+/// Resolves `schema:type` (a node type) or `space:type/key` (one node).
 fn check_entity(t: &Tenant, entity: &str) -> Result<(), String> {
-    let (space, rest) = entity
+    let (scope, rest) = entity
         .split_once(':')
         .ok_or_else(|| format!("{entity:?} is not an entity"))?;
-    let s = t
-        .spaces
-        .get(space)
-        .ok_or_else(|| format!("{entity:?}: unknown graph space {space}"))?;
     match rest.split_once('/') {
-        None => s
-            .nodes
-            .contains_key(rest)
-            .then_some(())
-            .ok_or_else(|| format!("{entity:?}: unknown node type {rest}")),
+        None => {
+            let schema = t.schemas.get(scope).ok_or_else(|| {
+                format!("{entity:?}: {scope} is not a schema (node types are schema:type)")
+            })?;
+            schema
+                .nodes
+                .contains_key(rest)
+                .then_some(())
+                .ok_or_else(|| format!("{entity:?}: unknown node type {rest}"))
+        }
         Some((ty, _)) => {
-            if !s.nodes.contains_key(ty) {
+            let space = t.spaces.get(scope).ok_or_else(|| {
+                format!("{entity:?}: {scope} is not a graph space (nodes are space:type/key)")
+            })?;
+            if !t.schemas[&space.schema].nodes.contains_key(ty) {
                 return Err(format!("{entity:?}: unknown node type {ty}"));
             }
-            s.instances
+            space
+                .instances
                 .contains(rest)
                 .then_some(())
                 .ok_or_else(|| format!("{entity:?}: no such node in the graph data"))
@@ -591,6 +667,10 @@ fn check_questions(
                     report.err(format!("{w}: edge ends must be space:type/key"));
                     continue;
                 };
+                if !from.contains('/') || !to.contains('/') {
+                    report.err(format!("{w}: edge ends must be nodes, space:type/key"));
+                    continue;
+                }
                 if fs_ != ts {
                     report.err(format!("{w}: edge crosses graph spaces"));
                     continue;
@@ -599,7 +679,7 @@ fn check_questions(
                     report.err(format!("{w}: unknown graph space {fs_}"));
                     continue;
                 };
-                if !space.relations.contains_key(&e.rel) {
+                if !t.schemas[&space.schema].relations.contains_key(&e.rel) {
                     report.err(format!("{w}: unknown relation {}", e.rel));
                 }
                 if !space.edges.contains(&format!("{from}|{}|{to}", e.rel)) {

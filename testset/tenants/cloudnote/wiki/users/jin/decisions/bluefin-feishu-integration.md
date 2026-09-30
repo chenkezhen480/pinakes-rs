@@ -4,7 +4,7 @@ title: 优先为蓝鳍科技支持飞书集成
 aliases: [飞书集成, Feishu integration, 蓝鳍科技, Bluefin, Lark integration]
 keywords: [飞书, 集成优先级, 蓝鳍科技, 续约条件, Feishu]
 summary: 决定把飞书集成提到本季度路线图最前面，作为蓝鳍科技续约的条件；集成上线后蓝鳍科技续签了商业版。
-about: [accounts:workspace/ws_bluefin, accounts:integration/int_feishu]
+about: [customers:workspace/ws_bluefin, customers:integration/int_feishu]
 sources: [2026-09-18-decision-jin-01.json]
 updated: 2026-09-18
 ---

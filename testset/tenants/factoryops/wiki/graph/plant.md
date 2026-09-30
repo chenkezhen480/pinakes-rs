@@ -3,7 +3,7 @@ kind: graph
 title: Plant graph
 aliases: [plant, 工厂设备图谱, equipment graph, 设备关系]
 summary: Machines and the production lines they belong to, the spare parts they use, the suppliers of those parts, the work orders repairing them, and how lines feed each other.
-space: plant
+schema: plant
 nodes:
   machine:         { en: "A machine or robot", zh: "设备", aliases: [machines, equipment, asset, 设备, 机器, 机台], key: asset_no }
   production_line: { en: "A production line", zh: "产线", aliases: [lines, line, 产线, 生产线], key: line_id }

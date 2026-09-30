@@ -4,7 +4,7 @@ title: Dual-source the 400 W servo motors
 aliases: [dual sourcing, second supplier servo, 伺服电机双供应商, supplier risk]
 keywords: [servo motor, Yaskawa, second source, lead time, 伺服电机, 供应风险]
 summary: Decided to qualify a second supplier for the 400 W servo motors to reduce dependence on Yaskawa's 10-week lead time; the second source passed trials and now covers 40% of demand.
-about: [plant:part/P-SRV-400, plant:supplier/sup_yaskawa]
+about: [suzhou:part/P-SRV-400, suzhou:supplier/sup_yaskawa]
 sources: [2026-08-05-decision-sarah-02.json]
 updated: 2026-09-25
 ---

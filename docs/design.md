@@ -10,7 +10,7 @@ We're building an open-source, self-hosted knowledge service in Rust. It works l
 - **Five ways to add knowledge.** There is one insert entry point per kind of knowledge, each with its own rules. Searching stays in one place; adding is split by kind.
 - **The librarian keeps it current.** When new content arrives, the librarian finds the related pages and updates them, instead of just adding another document. An LLM verifies every change to the wiki.
 - **Five kinds of knowledge.** Agent experience, user decision history, vertical expertise, the business graph and user preferences. Each has its own scope and page shape.
-- **A graph described by its schema.** For each graph space, the wiki holds one description of its schema. The nodes and edges live in Neo4j as data, so relationship questions get real edges, not summaries.
+- **A graph described by its schema.** A schema defines node and relation types; any number of graph spaces are built from one schema. The wiki holds one description per schema. Spaces and their nodes and edges live in Neo4j as data, never in the wiki, so relationship questions get real edges, not summaries.
 - **The agent decides how to search.** Following A-RAG, the agent chooses keyword or meaning-based search, what to open and what to follow. The service returns signals, not decisions.
 - **Isolated by tenant and user.** A tenant can never see another tenant's knowledge, and user-level knowledge stays with that user.
 - **Identity comes from outside.** The service doesn't manage accounts. The system that embeds it passes tenant and user ids in, so developers can plug it into their own stack.
@@ -31,13 +31,13 @@ The pattern has three layers, and this service adds a fourth for graph data:
 | Layer | In this service | Who writes it |
 |---|---|---|
 | Raw sources | Task records, decision records, documents, schema definitions and preference notes; never modified | The systems that call the service, through the five insert entry points |
-| Wiki | Markdown pages for each tenant and user, including one schema description per graph space, plus `index.md` (a catalog) and `log.md` (a history) | The librarian |
-| Graph data | The nodes and edges of each graph space, checked against its schema | The host system; no LLM involved |
+| Wiki | Markdown pages for each tenant and user, including one description per graph schema, plus `index.md` (a catalog) and `log.md` (a history) | The librarian |
+| Graph data | Graph spaces and their nodes and edges, checked against the space's schema | The host system; no LLM involved |
 | Rules | One rules file per knowledge kind, covering page shape, what to merge and what to flag | Shipped with the project; tenants can override them |
 
 It also has three operations:
 
-- **Ingest.** The librarian folds new content into existing pages, or creates new pages. Graph data skips the librarian and is checked by code against its schema.
+- **Ingest.** The librarian folds new content into existing pages, or creates new pages. A new or changed graph schema is described by the librarian; graph spaces and graph data skip the librarian and are checked by code against their schema.
 - **Query.** Agents search through the wiki, the only entry, then open the pages, memories and graph edges it leads to, with no LLM involved.
 - **Lint.** The librarian periodically checks for contradictions, stale claims, duplicate pages, broken links and memories that aren't anchored to anything.
 
@@ -52,7 +52,7 @@ Each kind has its own insert entry point, scope and page shape. All five are sea
 | Agent experience | `/ingest/experience` | Tenant | Agent task outcomes, including problems agents hit while serving users | One playbook per task type: steps that work, pitfalls and their fixes, how often each was seen | Memories |
 | User decision history | `/ingest/decision` | Tenant + user | Records of what the user decided and what happened as a result | One page per decision topic: the decision, its context, the outcome, the date | Memories, filtered to the user |
 | Vertical expertise | `/ingest/expertise` | Tenant | Domain documents and manuals | Linked concept and entity pages, as in a classic wiki | Knowledge |
-| Business graph | `/ingest/graph` | Tenant, one graph space each | Schema definitions, plus nodes and edges as data | One schema description per graph space; nodes and edges are data, not pages | Knowledge (the description) and relations (the edges) |
+| Business graph | `/ingest/graph/schema`, `/space`, `/data` | Tenant; many graph spaces per schema | Schema definitions, plus spaces, nodes and edges as data | One description per schema; spaces, nodes and edges are data, not pages | Knowledge (the description) and relations (the edges) |
 | Preferences | `/ingest/preference` | Tenant + user | Explicit statements and observed habits | One short profile page per user | Memories, filtered to the user |
 
 Problems users run into are recorded as agent experience, because they are lessons about how agents should operate. User decision history records choices and their outcomes, not problems.
@@ -94,14 +94,26 @@ Names and text both lead into the three channels, so a relationship question rea
 
 ## The business graph: a schema description plus live data
 
-For each graph space, the wiki holds one description of the schema and nothing about individual changes. The nodes and edges are stored in Neo4j, checked against that schema, and copied into memory so searches can walk them.
+A **schema** defines a set of node types and relation types. A **graph space** is one body of data built from a schema: the same `commerce` schema can back a `mainland` space and a `crossborder` space, with the same structure and separate data. The wiki holds one description per schema and nothing about individual spaces, nodes or changes. Spaces, nodes and edges are stored in Neo4j, checked against their schema, and copied into memory so searches can walk them.
 
-**What the description holds.** The node types and relation types of the space, what each one means in English and Chinese, a few aliases, and the key fields. It changes only when the schema itself changes, and the librarian verifies that change like any other wiki edit.
+**Schemas and graph spaces.** Three separate operations, and only the first touches the wiki:
+
+| Operation | Endpoint | What happens | LLM | Wiki |
+|---|---|---|---|---|
+| Create or change a schema | `POST /ingest/graph/schema` | Code validates the definition and stores it in SQLite as the authoritative copy; the librarian writes the schema's wiki description, which is verified like any other edit | Yes (background job) | Writes `graph/<schema>.md` |
+| Create a graph space | `POST /ingest/graph/space` | Code registers the space under its schema in SQLite and creates the Neo4j constraints and indexes it needs | No | Nothing |
+| Write graph data | `POST /ingest/graph/data` | Code checks nodes and edges against the space's schema, writes them to Neo4j, and updates the in-memory graph and the name matcher | No | Nothing |
+
+Code, not the librarian, owns the structural fields of a description (node types, relation types, their ends and keys), copied from the stored definition; the librarian writes what each type means in both languages, the aliases and the summary. So an LLM edit can never change what data is accepted. In version 1 a schema change may only add types, relations and aliases: removing a type or relation that a space still uses, or changing a key, is rejected.
+
+Space names are unique within a tenant and never equal a schema name, so an entity reference is unambiguous: `schema:type` names a node type (`commerce:order`), and `space:type/key` names one node (`mainland:order/1042`). Two spaces of one schema can each hold an order 1042. A space is registered with a display name and aliases (`跨境站`, "cross-border store"), which go into the name matcher like node names, so "跨境站的订单1042" narrows the search to that space; without a space named, searches cover every space of the tenant and each edge says which space it came from.
+
+**What the description holds.** The node types and relation types of the schema, what each one means in English and Chinese, a few aliases, and the key fields. It changes only when the schema itself changes.
 
 ```yaml
 ---
 kind: graph
-space: commerce
+schema: commerce
 summary: Orders and the customers who place them.
 nodes:
   order:    { en: "A customer order", zh: "客户订单", aliases: [orders, 订单], key: order_id }
@@ -118,9 +130,9 @@ updated: 2026-09-29
 ---
 ```
 
-**Relation types are searchable; edges are not summarized.** Each relation type in a description becomes one entry in a small index of its own: its name, both descriptions, its aliases and the node types it connects. A space with 40 relation types has 40 entries, and they rarely change. For a question like "which customer placed order 1042" (订单1042的下单客户), "placed" or 下单 matches `placed_by`, the name matcher finds the order, and the graph returns the real edge. The answer always comes from the graph itself.
+**Relation types are searchable; edges are not summarized.** Each relation type in a description becomes one entry in a small index of its own: its name, both descriptions, its aliases and the node types it connects. A schema with 40 relation types has 40 entries, shared by all its spaces, and they rarely change. A matched relation type is looked up in every space built from that schema, and each returned edge names its space. For a question like "which customer placed order 1042" (订单1042的下单客户), "placed" or 下单 matches `placed_by`, the name matcher finds the order, and the graph returns the real edge. The answer always comes from the graph itself.
 
-**Graph data skips the librarian.** Nodes and edges arrive through `/ingest/graph`. Code checks them against the schema (known types, required keys, both ends present) and writes them to Neo4j. No LLM is involved, and no page is written: the wiki holds only the schema, never individual nodes. Each node's name and aliases are added to the name matcher as they are written.
+**Graph spaces and data skip the librarian.** Spaces are created through `/ingest/graph/space`, and nodes and edges arrive through `/ingest/graph/data`. Code checks them against the space's schema (known types, required keys, both ends present in the same space) and writes them to Neo4j. No LLM is involved, and no page is written: the wiki holds only schema descriptions, never spaces or individual nodes. Each node's name and aliases are added to the name matcher as they are written; the same name in two spaces gives two entities.
 
 **Anchors join the wiki to the graph.** Memory and knowledge pages list the entities they're about in their front matter. The lift and the memory-to-knowledge hop follow these anchors, so the librarian must anchor every memory, and lint flags any memory without one.
 
@@ -305,7 +317,7 @@ Only step 3 of the write path calls an LLM, and graph data skips it entirely. Th
 
 ## The librarian: how new content is filed
 
-Content arrives through five insert entry points, one per kind. Every write is a background job: the API returns a job id right away, and the librarian updates the wiki shortly after. Graph data is the exception; code checks it and applies it without the librarian.
+Content arrives through five insert entry points, one per kind. Every write is a background job: the API returns a job id right away, and the librarian updates the wiki shortly after. Graph spaces and graph data are the exception; code checks them and applies them without the librarian. Graph schemas do go through the librarian, which writes their descriptions.
 
 1. **Receive.** Content arrives at the insert entry point for its kind, and its scope comes from the credentials. The raw record is saved unchanged.
 2. **Find related pages.** Without an LLM, the service finds pages in the same scope that share names, identifiers, aliases or keywords with the new content, and keeps the best 5–10. A cheap first LLM call can extract keywords to sharpen this.
@@ -323,7 +335,7 @@ Each kind has its own merge rule:
 | Agent experience | Into the playbook for that task type; repeats are counted instead of duplicated. Anchored to the entities and concepts the task touched |
 | User decision history | Appended to the topic page as a new decision and outcome; past entries are never overwritten. Anchored to what the decision was about |
 | Vertical expertise | Integrated into concept pages; contradictions are flagged, not silently resolved |
-| Business graph | A schema change replaces the space's description, and the librarian verifies it. Nodes and edges are checked by code against the schema and applied without the librarian; no change summary is written |
+| Business graph | A schema change (additive only) updates the stored definition, and the librarian rewrites the schema's description, which is verified. Spaces, nodes and edges are checked by code against their schema and applied without the librarian; no change summary is written |
 | Preferences | The latest statement wins; the profile stays short |
 
 **Volume and cost.** Agents can produce many task records. The service batches them per tenant, and can be configured to file only notable ones, such as failures and new approaches. Superseded claims are marked, not deleted, so the history stays readable.
@@ -368,7 +380,7 @@ data/
         │   ├── log.md         one line per ingest, edit and lint run
         │   ├── experience/    e.g. refund-handling.md
         │   ├── expertise/     e.g. refund-regulations.md
-        │   ├── graph/         one schema description per space, e.g. commerce.md
+        │   ├── graph/         one description per schema, e.g. commerce.md
         │   └── users/
         │       └── u_7b21e0d4/        folder name derived from the user id
         │           ├── preferences.md
@@ -392,9 +404,9 @@ updated: 2026-09-28
 ---
 ```
 
-Pages link to each other as `[[page-name]]`. Entities are named `space:type` for a node type and `space:type/key` for a single node, such as `commerce:order/1042`. On load, page anchors and graph data go into one in-memory graph per tenant. In version 1, job status lives in memory, and finished jobs are dropped after a configurable time.
+Pages link to each other as `[[page-name]]`. Entities are named `schema:type` for a node type, such as `commerce:order`, and `space:type/key` for a single node, such as `mainland:order/1042`. On load, page anchors and graph data go into one in-memory graph per tenant. In version 1, job status lives in memory, and finished jobs are dropped after a configurable time.
 
-**What SQLite holds.** One file per tenant, opened in WAL mode so reads carry on while the tenant's single writer works. It holds the job queue, proposals, API keys, the audit log and the embeddings:
+**What SQLite holds.** One file per tenant, opened in WAL mode so reads carry on while the tenant's single writer works. It holds the job queue, proposals, API keys, the audit log, the graph schema definitions, the registry of graph spaces, and the embeddings:
 
 ```sql
 CREATE TABLE embeddings (
@@ -409,7 +421,7 @@ CREATE TABLE embeddings (
 
 Vectors stay out of the Markdown files: they are derived data, like the search index. The hash catches hand edits, so a section whose text no longer matches is re-embedded, and changing the embedding model rebuilds this table without touching a single page.
 
-**What Neo4j holds.** The graph nodes and edges of every tenant, in one database, since the Community edition has only one. Each node is labelled with its type and carries the tenant id and its key, and an index on the tenant id keeps every query scoped. The service writes to Neo4j from `/ingest/graph` and reads a tenant's graph into memory when the tenant opens; searches never query it. A `GraphStore` trait keeps an SQLite backend beside Neo4j, for tests and for trying the service without it.
+**What Neo4j holds.** The graph nodes and edges of every tenant, in one database, since the Community edition has only one. Each node is labelled with its type and carries the tenant id, its space and its key; an index on the tenant id keeps every query scoped, and a uniqueness constraint keeps a key unique within its type and space (which constraints Neo4j Community supports is checked in M3; code validates the rest). The service writes to Neo4j from `/ingest/graph/space` and `/ingest/graph/data` and reads a tenant's graph into memory when the tenant opens; searches never query it. A `GraphStore` trait keeps an SQLite backend beside Neo4j, for tests and for trying the service without it.
 
 ## Interfaces
 
@@ -422,7 +434,9 @@ One axum server exposes three interfaces, and all of them call the same core fun
 | POST | `/ingest/experience` | Add an agent task outcome; returns a job id |
 | POST | `/ingest/decision` | Add a user's decision and its outcome; returns a job id |
 | POST | `/ingest/expertise` | Add a domain document or manual; returns a job id |
-| POST | `/ingest/graph` | Add or change a space's schema description, which the librarian verifies, or add nodes and edges, which code checks |
+| POST | `/ingest/graph/schema` | Create or change a graph schema (additive only); the librarian writes its description; returns a job id |
+| POST | `/ingest/graph/space` | Create a graph space under a schema; no LLM, no wiki page |
+| POST | `/ingest/graph/data` | Add nodes and edges to a space, checked by code against its schema; no LLM, no wiki page |
 | POST | `/ingest/preference` | Add a user's stated preference or observed habit; returns a job id |
 | GET | `/jobs/{id}` | Status and result of an ingest or lint job |
 | POST | `/search` | The only search entry: memories, knowledge and relations in slots, with a route per hit |
@@ -743,7 +757,7 @@ There are nine milestones, and each ends with a check you can run yourself. Isol
 |---|---|---|
 | M1 | Skeleton: config, identity in API key mode, tenant folders and id mapping, the `Store` trait with one SQLite file per tenant, pages as files, `/pages`, a tracing span per step | Two tenants' pages and SQLite files are completely invisible to each other over HTTP |
 | M2 | One entry, keyword mode: name matcher, English and Chinese tokenizers with the jieba dictionary, per-tenant tantivy index, the three channels and their slots, routes, `/read` with the read tracker | The test set's questions come back in the right slot, in both languages |
-| M3 | Graph: `/ingest/graph`, schema descriptions, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, instance names in the name matcher, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords, and the tests pass against the Neo4j container |
+| M3 | Graph: `/ingest/graph/schema`, `/space` and `/data`, schema definitions and descriptions, spaces under schemas, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, instance names in the name matcher, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords, and the tests pass against the Neo4j container |
 | M4 | Librarian and inserts: `LlmClient` with both backends, plan and verify steps, the other four insert entry points, anchoring, per-tenant write queue, `/jobs`, proposals, rules for all five kinds | New content updates the related pages instead of duplicating them, every memory is anchored, and unsupported edits are held for review |
 | M5 | Hop and meaning: the memory-to-knowledge hop, embeddings computed at write time with the e5 prefixes and stored in SQLite, `mode` with `semantic`, `both` and `auto` | Questions that need a memory plus the knowledge it leads to are answered, and semantic mode recovers cross-language misses |
 | M6 | Speed: caches, loading tenants on demand, a benchmark at 1k, 10k and 100k pages | Per-step timings meet the targets in "How it stays fast", in both modes |
@@ -758,7 +772,8 @@ The thesis experiments run on M2 to M6. Other search entry points are opened onl
 - ☐ **Default identity mode.** Should the first release default to API keys, or to JWTs signed by the host system?
 - ☐ **How much agent history to file.** Every task, or only failures and new approaches?
 - ☐ **Retention.** How long should raw records be kept, especially task records and user decisions?
-- ☑ **Instance data in graph spaces.** Decided 2026-09-30: graph spaces hold individual nodes (specific orders, customers, machines) in Neo4j; the wiki holds only the schema description. Instance names and aliases are loaded from the graph data into the name matcher. Watch the matcher's memory for tenants with millions of nodes.
+- ☑ **Instance data in graph spaces.** Decided 2026-09-30: a schema can back many graph spaces; spaces hold individual nodes (specific orders, customers, machines) in Neo4j. Only creating or changing a schema writes the wiki (through the librarian); creating a space or writing data never does. Instance names and aliases are loaded from the graph data into the name matcher. Watch the matcher's memory for tenants with millions of nodes.
+- ☐ **Deleting a graph space and breaking schema changes.** Version 1 only allows additive schema changes. How should a space be deleted, and how should a schema be migrated when a type must be removed or a key changed?
 - ☐ **Neo4j at scale.** The Community edition keeps every tenant in one database. Is that enough, or do large deployments need the Enterprise edition, or one Neo4j per group of tenants?
 - ☐ **Which entry point to open first.** After the wiki-only experiment: direct graph queries, search over raw chunks, or per-kind search tools?
 - ☐ **Embedding model.** Is multilingual-e5-small accurate enough for Chinese, or is a larger model worth the extra latency?

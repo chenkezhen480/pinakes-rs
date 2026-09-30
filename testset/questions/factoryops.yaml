@@ -184,8 +184,8 @@ questions:
     keywords: [ROB-11, 备件]
     expect:
       relations:
-        - { from: "plant:machine/ROB-11", type: uses_part, to: "plant:part/P-SRV-400" }
-        - { from: "plant:machine/ROB-11", type: uses_part, to: "plant:part/P-NOZ-12" }
+        - { from: "suzhou:machine/ROB-11", type: uses_part, to: "suzhou:part/P-SRV-400" }
+        - { from: "suzhou:machine/ROB-11", type: uses_part, to: "suzhou:part/P-NOZ-12" }
     trap: [experience/weld-spatter-defects]
   - id: factoryops-gra-02
     category: graph
@@ -195,7 +195,7 @@ questions:
     keywords: [bearing 6205, supplier]
     expect:
       relations:
-        - { from: "plant:part/P-BRG-6205", type: supplied_by, to: "plant:supplier/sup_skf" }
+        - { from: "suzhou:part/P-BRG-6205", type: supplied_by, to: "suzhou:supplier/sup_skf" }
     trap: [expertise/preventive-maintenance]
   - id: factoryops-gra-03
     category: graph
@@ -205,9 +205,20 @@ questions:
     keywords: [WO-5512, 设备, 产线]
     expect:
       relations:
-        - { from: "plant:work_order/WO-5512", type: repairs, to: "plant:machine/CNV-03" }
-        - { from: "plant:machine/CNV-03", type: part_of, to: "plant:production_line/L2" }
+        - { from: "suzhou:work_order/WO-5512", type: repairs, to: "suzhou:machine/CNV-03" }
+        - { from: "suzhou:machine/CNV-03", type: part_of, to: "suzhou:production_line/L2" }
     notes: Two hops, work order to machine to line.
+  - id: factoryops-gra-06
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "武汉工厂的CNC-07用的是什么轴承？"
+    keywords: [武汉工厂, CNC-07, 轴承]
+    expect:
+      relations:
+        - { from: "wuhan:machine/CNC-07", type: uses_part, to: "wuhan:part/P-BRG-6206" }
+    trap: [expertise/preventive-maintenance]
+    notes: Both plants have a CNC-07 (Suzhou's uses a 6205 bearing); the space name picks Wuhan's.
   - id: factoryops-gra-04
     category: graph
     milestone: M3
@@ -216,8 +227,8 @@ questions:
     keywords: [bearing 6205, machines]
     expect:
       relations:
-        - { from: "plant:machine/CNC-07", type: uses_part, to: "plant:part/P-BRG-6205" }
-        - { from: "plant:machine/CNV-03", type: uses_part, to: "plant:part/P-BRG-6205" }
+        - { from: "suzhou:machine/CNC-07", type: uses_part, to: "suzhou:part/P-BRG-6205" }
+        - { from: "suzhou:machine/CNV-03", type: uses_part, to: "suzhou:part/P-BRG-6205" }
     trap: [expertise/preventive-maintenance]
     notes: Asked from the part's side; two edges walked backwards.
   - id: factoryops-gra-05
@@ -228,7 +239,7 @@ questions:
     keywords: [冲压线, 下游]
     expect:
       relations:
-        - { from: "plant:production_line/L1", type: feeds, to: "plant:production_line/L2" }
+        - { from: "suzhou:production_line/L1", type: feeds, to: "suzhou:production_line/L2" }
 
   # --- hop ----------------------------------------------------------------------------------
   - id: factoryops-hop-01

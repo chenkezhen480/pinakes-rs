@@ -1,0 +1,56 @@
+{
+  "space": "wuhan",
+  "schema": "plant",
+  "nodes": [
+    {
+      "type": "machine",
+      "key": "CNC-07",
+      "name": "五轴加工中心 CNC-07（武汉）",
+      "aliases": [
+        "Wuhan 5-axis CNC"
+      ]
+    },
+    {
+      "type": "production_line",
+      "key": "L3",
+      "name": "机加线 L3（武汉）",
+      "aliases": [
+        "Wuhan machining line"
+      ]
+    },
+    {
+      "type": "part",
+      "key": "P-BRG-6206",
+      "name": "6206 深沟球轴承",
+      "aliases": [
+        "bearing 6206",
+        "6206轴承"
+      ]
+    },
+    {
+      "type": "supplier",
+      "key": "sup_nsk",
+      "name": "NSK",
+      "aliases": [
+        "恩斯克"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "machine/CNC-07",
+      "type": "part_of",
+      "to": "production_line/L3"
+    },
+    {
+      "from": "machine/CNC-07",
+      "type": "uses_part",
+      "to": "part/P-BRG-6206"
+    },
+    {
+      "from": "part/P-BRG-6206",
+      "type": "supplied_by",
+      "to": "supplier/sup_nsk"
+    }
+  ]
+}

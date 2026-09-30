@@ -184,7 +184,7 @@ questions:
     keywords: [A-8802, 接诊医生]
     expect:
       relations:
-        - { from: "care:appointment/A-8802", type: with_doctor, to: "care:doctor/d_22" }
+        - { from: "clinics:appointment/A-8802", type: with_doctor, to: "clinics:doctor/d_22" }
     trap: [expertise/scheduling-rules]
   - id: mediclinic-gra-02
     category: graph
@@ -194,7 +194,7 @@ questions:
     keywords: [Dr. Liu, department]
     expect:
       relations:
-        - { from: "care:doctor/d_21", type: works_in, to: "care:department/CARD" }
+        - { from: "clinics:doctor/d_21", type: works_in, to: "clinics:department/CARD" }
   - id: mediclinic-gra-03
     category: graph
     milestone: M3
@@ -203,7 +203,7 @@ questions:
     keywords: [张伟, 保险]
     expect:
       relations:
-        - { from: "care:patient/p_1001", type: covered_by, to: "care:insurance_plan/INS-PA" }
+        - { from: "clinics:patient/p_1001", type: covered_by, to: "clinics:insurance_plan/INS-PA" }
     trap: [expertise/direct-billing]
   - id: mediclinic-gra-04
     category: graph
@@ -213,8 +213,8 @@ questions:
     keywords: [A-8802, referral, booked]
     expect:
       relations:
-        - { from: "care:appointment/A-8802", type: referred_to, to: "care:department/CARD" }
-        - { from: "care:appointment/A-8802", type: booked_by, to: "care:patient/p_1002" }
+        - { from: "clinics:appointment/A-8802", type: referred_to, to: "clinics:department/CARD" }
+        - { from: "clinics:appointment/A-8802", type: booked_by, to: "clinics:patient/p_1002" }
   - id: mediclinic-gra-05
     category: graph
     milestone: M3
@@ -223,8 +223,8 @@ questions:
     keywords: [平安健康, 患者]
     expect:
       relations:
-        - { from: "care:patient/p_1001", type: covered_by, to: "care:insurance_plan/INS-PA" }
-        - { from: "care:patient/p_1003", type: covered_by, to: "care:insurance_plan/INS-PA" }
+        - { from: "clinics:patient/p_1001", type: covered_by, to: "clinics:insurance_plan/INS-PA" }
+        - { from: "clinics:patient/p_1003", type: covered_by, to: "clinics:insurance_plan/INS-PA" }
     trap: [expertise/direct-billing]
     notes: Asked from the insurer's side; two edges walked backwards.
 

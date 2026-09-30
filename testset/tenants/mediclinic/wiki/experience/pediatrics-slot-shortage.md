@@ -4,7 +4,7 @@ title: 儿科号源紧张时的安排
 aliases: [儿科挂不上号, 号源紧张, 儿科约满, pediatric slots full, 加号]
 keywords: [儿科号源, 候补, 加号, 周末门诊, 流感季, waiting list]
 summary: 儿科约满时先登记候补，再按规则申请加号；流感季提前一周增开周末号源，不要让前台口头承诺加号。
-about: [care:department/PED, expertise/scheduling-rules]
+about: [clinics:department/PED, expertise/scheduling-rules]
 sources: [2026-09-17-task-8350.json]
 updated: 2026-09-17
 ---

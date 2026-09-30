@@ -4,7 +4,7 @@ title: 周末儿科增加20个号
 aliases: [周末儿科加号, 儿科周末门诊, weekend pediatric slots, 增加号源]
 keywords: [周末, 儿科, 20个号, 流感季, 家长, weekend clinic]
 summary: 决定从9月起周末儿科每天增加20个号源，由两位医生轮班；周末号源首月约满率达到95%，工作日儿科候补人数减少一半。
-about: [care:department/PED, expertise/scheduling-rules]
+about: [clinics:department/PED, expertise/scheduling-rules]
 sources: [2026-09-01-decision-hu-02.json]
 updated: 2026-09-01
 ---

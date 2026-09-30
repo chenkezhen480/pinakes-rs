@@ -3,7 +3,7 @@ kind: graph
 title: Accounts graph
 aliases: [accounts, 账户图谱, customer accounts, 客户账户关系]
 summary: Customer workspaces, their subscriptions and plans, invoices, members and connected integrations.
-space: accounts
+schema: accounts
 nodes:
   workspace:    { en: "A customer workspace (one company)", zh: "客户工作区（一家公司）", aliases: [workspaces, customer, company, 工作区, 客户], key: ws_id }
   subscription: { en: "A paid subscription", zh: "付费订阅", aliases: [subscriptions, contract, 订阅, 合同], key: sub_id }

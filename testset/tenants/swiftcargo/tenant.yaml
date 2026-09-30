@@ -7,4 +7,7 @@ description: >
 users:
   - { id: emma, role: operations planner, lang: en }
   - { id: zhao, role: customs broker, lang: zh }
-graph_spaces: [network]
+graph:
+  schemas: [network]
+  spaces:
+    - { id: forwarding, schema: network, name: 货代业务, aliases: [forwarding, freight forwarding] }

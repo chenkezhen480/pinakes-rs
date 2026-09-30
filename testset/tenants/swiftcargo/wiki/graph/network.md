@@ -3,7 +3,7 @@ kind: graph
 title: Logistics network graph
 aliases: [network, 物流网络, shipment network, 运输网络]
 summary: Shipments and where they are stored, who carries them, which route they follow and which customs declaration covers them; routes link origin and destination warehouses.
-space: network
+schema: network
 nodes:
   shipment:            { en: "A shipment under one air waybill or bill of lading", zh: "一票货（运单）", aliases: [shipments, AWB, waybill, 货物, 运单, 一票货], key: awb }
   warehouse:           { en: "A warehouse or hub", zh: "仓库或枢纽", aliases: [warehouses, hub, depot, 仓库, 仓, 枢纽], key: wh_code }

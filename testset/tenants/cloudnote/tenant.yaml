@@ -7,4 +7,7 @@ description: >
 users:
   - { id: ana, role: customer success lead, lang: en }
   - { id: jin, role: sales engineer, lang: zh }
-graph_spaces: [accounts]
+graph:
+  schemas: [accounts]
+  spaces:
+    - { id: customers, schema: accounts, name: 客户账户, aliases: [customer accounts, customers] }

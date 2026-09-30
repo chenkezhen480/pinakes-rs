@@ -4,7 +4,7 @@ title: 焊接飞溅过多的处理
 aliases: [焊接飞溅, 飞溅大, weld spatter, 焊渣多, 焊点质量差]
 keywords: [飞溅, 焊接电流, 电压匹配, 喷嘴堵塞, 保护气, spatter defects]
 summary: 焊接飞溅突然变多时，先查喷嘴是否堵塞和保护气流量，再查电流电压匹配；机器人工位喷嘴堵塞是最常见原因。
-about: [plant:machine/ROB-11, expertise/welding-parameters]
+about: [suzhou:machine/ROB-11, expertise/welding-parameters]
 sources: [2026-09-09-task-9177.json]
 updated: 2026-09-09
 ---

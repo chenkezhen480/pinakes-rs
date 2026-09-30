@@ -3,7 +3,7 @@ kind: graph
 title: Commerce graph
 aliases: [commerce, 交易图谱, orders graph, 订单关系]
 summary: Orders, the customers who place them, the products they contain, the sellers behind those products, shipments and coupons.
-space: commerce
+schema: commerce
 nodes:
   order:    { en: "A customer order", zh: "客户订单", aliases: [orders, 订单], key: order_id }
   customer: { en: "A buyer account", zh: "买家账户", aliases: [customers, buyer, 客户, 买家], key: customer_id }

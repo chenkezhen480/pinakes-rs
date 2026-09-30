@@ -184,9 +184,23 @@ questions:
     keywords: [order 1042, placed by]
     expect:
       relations:
-        - { from: "commerce:order/1042", type: placed_by, to: "commerce:customer/c_5521" }
+        - { from: "mainland:order/1042", type: placed_by, to: "mainland:customer/c_5521" }
+        - { from: "crossborder:order/1042", type: placed_by, to: "crossborder:customer/c_9001" }
     trap: [expertise/refund-regulations]
-    notes: The design doc's own example. "order" and "customer" are everywhere in refund prose.
+    notes: >
+      The design doc's own example. "order" and "customer" are everywhere in refund prose. Both
+      spaces of the commerce schema have an order 1042 and no space is named, so both edges are
+      the right answer, each marked with its space.
+  - id: shopline-gra-06
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "跨境站的订单1042是谁下的？"
+    keywords: [跨境站, 订单1042]
+    expect:
+      relations:
+        - { from: "crossborder:order/1042", type: placed_by, to: "crossborder:customer/c_9001" }
+    notes: The space's name (跨境站) narrows the search to one of the two spaces with an order 1042.
   - id: shopline-gra-02
     category: graph
     milestone: M3
@@ -195,7 +209,7 @@ questions:
     keywords: [订单3101, 优惠券]
     expect:
       relations:
-        - { from: "commerce:order/3101", type: used_coupon, to: "commerce:coupon/NEWUSER-20" }
+        - { from: "mainland:order/3101", type: used_coupon, to: "mainland:coupon/NEWUSER-20" }
     trap: [expertise/promotion-rules, experience/coupon-stacking-errors]
   - id: shopline-gra-03
     category: graph
@@ -205,7 +219,7 @@ questions:
     keywords: [悦音数码, 商品]
     expect:
       relations:
-        - { from: "commerce:product/SKU-AIR-01", type: sold_by, to: "commerce:seller/s_101" }
+        - { from: "mainland:product/SKU-AIR-01", type: sold_by, to: "mainland:seller/s_101" }
     notes: Asked from the seller's side, so the edge is walked backwards.
   - id: shopline-gra-04
     category: graph
@@ -215,7 +229,7 @@ questions:
     keywords: [order 2077, tracking number]
     expect:
       relations:
-        - { from: "commerce:order/2077", type: shipped_via, to: "commerce:shipment/YT9876543210" }
+        - { from: "mainland:order/2077", type: shipped_via, to: "mainland:shipment/YT9876543210" }
     trap: [experience/logistics-delay-complaints, expertise/shipping-sla]
   - id: shopline-gra-05
     category: graph
@@ -225,8 +239,8 @@ questions:
     keywords: [林晓, 订单]
     expect:
       relations:
-        - { from: "commerce:order/1042", type: placed_by, to: "commerce:customer/c_5521" }
-        - { from: "commerce:order/2077", type: placed_by, to: "commerce:customer/c_5521" }
+        - { from: "mainland:order/1042", type: placed_by, to: "mainland:customer/c_5521" }
+        - { from: "mainland:order/2077", type: placed_by, to: "mainland:customer/c_5521" }
     notes: Two edges into one customer, found by the customer's name.
 
   # --- hop: a memory plus the knowledge it is anchored to -----------------------------------

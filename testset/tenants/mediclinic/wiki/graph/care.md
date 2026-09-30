@@ -3,7 +3,7 @@ kind: graph
 title: Care graph
 aliases: [care, 诊疗关系图谱, clinic graph, 预约关系]
 summary: Patients and their appointments, the doctors who see them, the departments doctors work in, referrals, and the insurance plans that cover patients.
-space: care
+schema: care
 nodes:
   patient:        { en: "A registered patient", zh: "就诊患者", aliases: [patients, 患者, 病人], key: patient_id }
   doctor:         { en: "A doctor", zh: "医生", aliases: [doctors, physician, 医生, 大夫], key: doctor_id }

@@ -7,4 +7,8 @@ description: >
 users:
   - { id: ligong, role: maintenance lead, lang: zh }
   - { id: sarah, role: plant manager, lang: en }
-graph_spaces: [plant]
+graph:
+  schemas: [plant]
+  spaces:
+    - { id: suzhou, schema: plant, name: 苏州工厂, aliases: [Suzhou plant, 苏州] }
+    - { id: wuhan, schema: plant, name: 武汉工厂, aliases: [Wuhan plant, 武汉] }

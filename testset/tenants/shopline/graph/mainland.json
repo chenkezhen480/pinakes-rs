@@ -1,0 +1,229 @@
+{
+  "space": "mainland",
+  "schema": "commerce",
+  "nodes": [
+    {
+      "type": "order",
+      "key": "1042",
+      "name": "Order 1042",
+      "aliases": [
+        "订单1042"
+      ]
+    },
+    {
+      "type": "order",
+      "key": "1043",
+      "name": "Order 1043",
+      "aliases": [
+        "订单1043"
+      ]
+    },
+    {
+      "type": "order",
+      "key": "2077",
+      "name": "Order 2077",
+      "aliases": [
+        "订单2077"
+      ]
+    },
+    {
+      "type": "order",
+      "key": "3101",
+      "name": "Order 3101",
+      "aliases": [
+        "订单3101"
+      ]
+    },
+    {
+      "type": "customer",
+      "key": "c_5521",
+      "name": "林晓",
+      "aliases": [
+        "Lin Xiao"
+      ]
+    },
+    {
+      "type": "customer",
+      "key": "c_6630",
+      "name": "Mark Chen",
+      "aliases": [
+        "陈马克"
+      ]
+    },
+    {
+      "type": "customer",
+      "key": "c_7104",
+      "name": "王芳",
+      "aliases": [
+        "Wang Fang"
+      ]
+    },
+    {
+      "type": "product",
+      "key": "SKU-AIR-01",
+      "name": "AirBeat Pro 无线耳机",
+      "aliases": [
+        "AirBeat Pro",
+        "wireless earbuds",
+        "无线耳机"
+      ]
+    },
+    {
+      "type": "product",
+      "key": "SKU-KET-07",
+      "name": "家好 1.7L 电水壶",
+      "aliases": [
+        "electric kettle",
+        "电水壶"
+      ]
+    },
+    {
+      "type": "product",
+      "key": "SKU-TEE-22",
+      "name": "棉语纯棉T恤",
+      "aliases": [
+        "cotton T-shirt",
+        "纯棉T恤"
+      ]
+    },
+    {
+      "type": "seller",
+      "key": "s_101",
+      "name": "悦音数码",
+      "aliases": [
+        "Yueyin Digital"
+      ]
+    },
+    {
+      "type": "seller",
+      "key": "s_202",
+      "name": "家好电器",
+      "aliases": [
+        "Jiahao Appliances"
+      ]
+    },
+    {
+      "type": "seller",
+      "key": "s_303",
+      "name": "棉语服饰",
+      "aliases": [
+        "Mianyu Apparel"
+      ]
+    },
+    {
+      "type": "shipment",
+      "key": "SF1234567890",
+      "name": "顺丰 SF1234567890",
+      "aliases": [
+        "SF Express SF1234567890"
+      ]
+    },
+    {
+      "type": "shipment",
+      "key": "YT9876543210",
+      "name": "圆通 YT9876543210",
+      "aliases": [
+        "YTO YT9876543210"
+      ]
+    },
+    {
+      "type": "coupon",
+      "key": "DOUBLE11-50",
+      "name": "双11满300减50",
+      "aliases": [
+        "Double 11 coupon"
+      ]
+    },
+    {
+      "type": "coupon",
+      "key": "NEWUSER-20",
+      "name": "新人立减20元",
+      "aliases": [
+        "new user coupon",
+        "新人券"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "order/1042",
+      "type": "placed_by",
+      "to": "customer/c_5521"
+    },
+    {
+      "from": "order/1042",
+      "type": "contains",
+      "to": "product/SKU-AIR-01"
+    },
+    {
+      "from": "order/1042",
+      "type": "shipped_via",
+      "to": "shipment/SF1234567890"
+    },
+    {
+      "from": "order/1042",
+      "type": "used_coupon",
+      "to": "coupon/DOUBLE11-50"
+    },
+    {
+      "from": "order/1043",
+      "type": "placed_by",
+      "to": "customer/c_6630"
+    },
+    {
+      "from": "order/1043",
+      "type": "contains",
+      "to": "product/SKU-KET-07"
+    },
+    {
+      "from": "order/2077",
+      "type": "placed_by",
+      "to": "customer/c_5521"
+    },
+    {
+      "from": "order/2077",
+      "type": "contains",
+      "to": "product/SKU-TEE-22"
+    },
+    {
+      "from": "order/2077",
+      "type": "shipped_via",
+      "to": "shipment/YT9876543210"
+    },
+    {
+      "from": "order/3101",
+      "type": "placed_by",
+      "to": "customer/c_7104"
+    },
+    {
+      "from": "order/3101",
+      "type": "contains",
+      "to": "product/SKU-KET-07"
+    },
+    {
+      "from": "order/3101",
+      "type": "contains",
+      "to": "product/SKU-TEE-22"
+    },
+    {
+      "from": "order/3101",
+      "type": "used_coupon",
+      "to": "coupon/NEWUSER-20"
+    },
+    {
+      "from": "product/SKU-AIR-01",
+      "type": "sold_by",
+      "to": "seller/s_101"
+    },
+    {
+      "from": "product/SKU-KET-07",
+      "type": "sold_by",
+      "to": "seller/s_202"
+    },
+    {
+      "from": "product/SKU-TEE-22",
+      "type": "sold_by",
+      "to": "seller/s_303"
+    }
+  ]
+}

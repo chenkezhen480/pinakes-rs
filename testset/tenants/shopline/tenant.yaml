@@ -7,4 +7,8 @@ description: >
 users:
   - { id: lily, role: operations manager, lang: zh }
   - { id: wang, role: customer service lead, lang: en }
-graph_spaces: [commerce]
+graph:
+  schemas: [commerce]
+  spaces:
+    - { id: mainland, schema: commerce, name: 国内站, aliases: [mainland store, domestic site, 国内] }
+    - { id: crossborder, schema: commerce, name: 跨境站, aliases: [cross-border store, 跨境, global store] }

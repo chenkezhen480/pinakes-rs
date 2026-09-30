@@ -27,8 +27,12 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Every search stage gets a tracing span with its timing.
 - Embeddings use the e5 prefixes: `"query: "` for queries, `"passage: "` for stored text.
 - The librarian never writes graph data, and every memory page has at least one anchor.
-- The wiki holds only graph schemas, never individual nodes; node names and aliases reach the name
+- A graph schema backs many graph spaces. Only creating or changing a schema writes the wiki (via
+  the librarian); creating a space or writing nodes and edges never does. Structural schema fields
+  come from the stored definition, never from the LLM. Node names and aliases reach the name
   matcher from the graph data.
+- Entity references: `schema:type` for a node type, `space:type/key` for a node. Space names are
+  unique in a tenant and never equal a schema name.
 - Tenant and user folder names come from the id-mapping function (`tenants::tenant_dir_name`,
   `tenants::user_dir_name`), never from raw ids.
 - A page another user owns, or another tenant's anything, is reported as not found (404), never

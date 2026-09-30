@@ -11,18 +11,19 @@ replace or extend it over time; the thesis experiments need them.
 
 Each scenario is one tenant, so the set also exercises tenant isolation.
 
-| Tenant | Business | Main language | Graph space |
-|---|---|---|---|
-| `shopline` | E-commerce marketplace | Chinese | `commerce` |
-| `cloudnote` | B2B note-taking SaaS | English | `accounts` |
-| `swiftcargo` | Cross-border logistics | Mixed | `network` |
-| `paybridge` | Payments and risk | English | `payments` |
-| `mediclinic` | Clinic network, bookings and billing | Chinese | `care` |
-| `factoryops` | Factory equipment maintenance | Chinese | `plant` |
+| Tenant | Business | Main language | Graph schema | Graph spaces |
+|---|---|---|---|---|
+| `shopline` | E-commerce marketplace | Chinese | `commerce` | `mainland` (国内站), `crossborder` (跨境站) |
+| `cloudnote` | B2B note-taking SaaS | English | `accounts` | `customers` |
+| `swiftcargo` | Cross-border logistics | Mixed | `network` | `forwarding` |
+| `paybridge` | Payments and risk | English | `payments` | `acquiring` |
+| `mediclinic` | Clinic network, bookings and billing | Chinese | `care` | `clinics` |
+| `factoryops` | Factory equipment maintenance | Chinese | `plant` | `suzhou` (苏州工厂), `wuhan` (武汉工厂) |
 
 Every tenant has all five knowledge kinds: agent experience playbooks, vertical expertise pages,
-one graph schema description with instance data, and two users with preferences and decision
-history.
+one graph schema description with one or more graph spaces of instance data, and two users with
+preferences and decision history. `shopline` and `factoryops` have two spaces on one schema, with
+a key that exists in both (order 1042, machine CNC-07), to test that spaces keep data apart.
 
 ## Layout
 
@@ -30,15 +31,15 @@ history.
 testset/
 ├── README.md
 ├── tenants/<tenant>/
-│   ├── tenant.yaml               id, business, users, graph spaces
+│   ├── tenant.yaml               id, business, users, graph schemas and spaces
 │   ├── wiki/                     same layout as a tenant's data/…/wiki folder
 │   │   ├── experience/*.md
 │   │   ├── expertise/*.md
-│   │   ├── graph/<space>.md      schema description (nodes, relations)
+│   │   ├── graph/<schema>.md     schema description (nodes, relations); spaces get no page
 │   │   └── users/<user-id>/      raw user id here; the loader maps it with user_dir_name()
 │   │       ├── preferences.md
 │   │       └── decisions/*.md
-│   └── graph/<space>.json        nodes and edges, what /ingest/graph will receive (M3)
+│   └── graph/<space>.json        one space's nodes and edges, for /ingest/graph/data (M3)
 └── questions/<tenant>.yaml
 ```
 
@@ -47,7 +48,8 @@ bilingual `aliases` and `keywords`, a 1–3 sentence `summary`, `about` anchors,
 `updated`. Every memory page (experience, decision, preference) has at least one anchor.
 
 Anchors (`about`) are either page paths (`expertise/refund-regulations`) or entities:
-`space:type` for a node type, `space:type/key` for one node (`commerce:order/1042`).
+`schema:type` for a node type (`commerce:order`), `space:type/key` for one node
+(`mainland:order/1042`). Space names never equal schema names, so the two can't be confused.
 
 ## Questions
 
@@ -65,7 +67,7 @@ questions:
       memories: [experience/partial-refund-after-shipment]
       knowledge: [expertise/refund-regulations]
       relations:
-        - { from: "commerce:order/1042", type: placed_by, to: "commerce:customer/c_5521" }
+        - { from: "mainland:order/1042", type: placed_by, to: "mainland:customer/c_5521" }
     expect_empty: [relations]    # optional; slots that must come back empty or weak
     must_not: [users/lily/decisions/double11-coupon-budget]   # optional; must appear nowhere
     trap: [expertise/refund-regulations]   # optional; prose pages sharing the query's keywords
@@ -108,8 +110,10 @@ slot in `expect_empty` is empty or marked weak. Other hits in a slot don't fail 
 
 ## Graph data and the wiki
 
-As decided for open question 4 (2026-09-30): the wiki holds only each graph space's schema
-description (`wiki/graph/<space>.md`); individual nodes and edges live in `graph/<space>.json`,
-which M3 sends to `/ingest/graph` and which ends up in Neo4j, never in the wiki. Node names and
-aliases in that file feed the name matcher, which is how questions such as "林晓下过哪些订单？"
-find their starting entity.
+As decided for open question 4 (2026-09-30): a graph schema backs any number of graph spaces.
+Only a schema has a wiki page (`wiki/graph/<schema>.md`, written by the librarian when the schema
+is created or changed). Spaces are declared in `tenant.yaml` with a display name and aliases, and
+each space's nodes and edges live in `graph/<space>.json`, which M3 sends to
+`/ingest/graph/space` and `/ingest/graph/data` and which ends up in Neo4j, never in the wiki.
+Node names and aliases, and space names and aliases, feed the name matcher: that is how
+"林晓下过哪些订单？" finds its starting node and "跨境站的订单1042" picks one space.

@@ -4,7 +4,7 @@ title: 老客户部分退款退还运费
 aliases: [退运费, refund shipping cost, 部分退款运费, repeat customer refund, 老客户]
 keywords: [部分退款, 运费, 老客户, 复购, shipping fee refund]
 summary: 决定对老客户的部分退款同时退还运费；在订单1042上试行后，客户保留了其余商品并继续复购。
-about: [commerce:order/1042, commerce:customer/c_5521, expertise/refund-regulations]
+about: [mainland:order/1042, mainland:customer/c_5521, expertise/refund-regulations]
 sources: [2026-09-28-decision-lily-01.json]
 updated: 2026-09-28
 ---

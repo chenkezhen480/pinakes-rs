@@ -4,7 +4,7 @@ title: ROB-11喷嘴改为每班更换
 aliases: [喷嘴每班更换, ROB-11喷嘴, nozzle replacement, 喷嘴更换周期]
 keywords: [ROB-11, 喷嘴, 每班更换, 飞溅, 焊点不良]
 summary: 决定ROB-11焊接机器人的喷嘴从"粘渣时更换"改为每班固定更换；焊点不良率从2.1%降到0.6%。
-about: [plant:machine/ROB-11, plant:part/P-NOZ-12, expertise/welding-parameters]
+about: [suzhou:machine/ROB-11, suzhou:part/P-NOZ-12, expertise/welding-parameters]
 sources: [2026-09-12-decision-ligong-02.json]
 updated: 2026-09-12
 ---

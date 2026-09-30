@@ -182,8 +182,8 @@ questions:
     keywords: [Lumen Studio, plan]
     expect:
       relations:
-        - { from: "accounts:workspace/ws_lumen", type: has_subscription, to: "accounts:subscription/sub_882" }
-        - { from: "accounts:subscription/sub_882", type: on_plan, to: "accounts:plan/team" }
+        - { from: "customers:workspace/ws_lumen", type: has_subscription, to: "customers:subscription/sub_882" }
+        - { from: "customers:subscription/sub_882", type: on_plan, to: "customers:plan/team" }
     trap: [expertise/plan-limits]
     notes: Two hops, workspace to subscription to plan; the plans table shares every keyword.
   - id: cloudnote-gra-02
@@ -194,7 +194,7 @@ questions:
     keywords: [蓝鳍科技, 集成]
     expect:
       relations:
-        - { from: "accounts:workspace/ws_bluefin", type: connected_to, to: "accounts:integration/int_feishu" }
+        - { from: "customers:workspace/ws_bluefin", type: connected_to, to: "customers:integration/int_feishu" }
   - id: cloudnote-gra-03
     category: graph
     milestone: M3
@@ -203,7 +203,7 @@ questions:
     keywords: [INV-2026-0915, billed to]
     expect:
       relations:
-        - { from: "accounts:invoice/INV-2026-0915", type: billed_to, to: "accounts:workspace/ws_lumen" }
+        - { from: "customers:invoice/INV-2026-0915", type: billed_to, to: "customers:workspace/ws_lumen" }
     trap: [expertise/billing-dunning]
   - id: cloudnote-gra-04
     category: graph
@@ -213,8 +213,8 @@ questions:
     keywords: [Priya, workspaces]
     expect:
       relations:
-        - { from: "accounts:member/m_priya", type: member_of, to: "accounts:workspace/ws_lumen" }
-        - { from: "accounts:member/m_priya", type: member_of, to: "accounts:workspace/ws_acme" }
+        - { from: "customers:member/m_priya", type: member_of, to: "customers:workspace/ws_lumen" }
+        - { from: "customers:member/m_priya", type: member_of, to: "customers:workspace/ws_acme" }
   - id: cloudnote-gra-05
     category: graph
     milestone: M3
@@ -223,8 +223,8 @@ questions:
     keywords: [Acme, 套餐]
     expect:
       relations:
-        - { from: "accounts:workspace/ws_acme", type: has_subscription, to: "accounts:subscription/sub_881" }
-        - { from: "accounts:subscription/sub_881", type: on_plan, to: "accounts:plan/enterprise" }
+        - { from: "customers:workspace/ws_acme", type: has_subscription, to: "customers:subscription/sub_881" }
+        - { from: "customers:subscription/sub_881", type: on_plan, to: "customers:plan/enterprise" }
     trap: [expertise/plan-limits, expertise/sso-setup]
 
   # --- hop ----------------------------------------------------------------------------------

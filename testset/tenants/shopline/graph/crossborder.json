@@ -1,0 +1,67 @@
+{
+  "space": "crossborder",
+  "schema": "commerce",
+  "nodes": [
+    {
+      "type": "order",
+      "key": "1042",
+      "name": "Cross-border order 1042",
+      "aliases": [
+        "跨境订单1042"
+      ]
+    },
+    {
+      "type": "customer",
+      "key": "c_9001",
+      "name": "Olivia Tan",
+      "aliases": [
+        "陈奥莉"
+      ]
+    },
+    {
+      "type": "product",
+      "key": "SKU-WAT-03",
+      "name": "Pulse 3 智能手表",
+      "aliases": [
+        "Pulse 3 smartwatch",
+        "智能手表"
+      ]
+    },
+    {
+      "type": "seller",
+      "key": "s_701",
+      "name": "港仔数码",
+      "aliases": [
+        "HK Gadgets"
+      ]
+    },
+    {
+      "type": "shipment",
+      "key": "DHL5566778899",
+      "name": "DHL 5566778899",
+      "aliases": []
+    }
+  ],
+  "edges": [
+    {
+      "from": "order/1042",
+      "type": "placed_by",
+      "to": "customer/c_9001"
+    },
+    {
+      "from": "order/1042",
+      "type": "contains",
+      "to": "product/SKU-WAT-03"
+    },
+    {
+      "from": "order/1042",
+      "type": "shipped_via",
+      "to": "shipment/DHL5566778899"
+    },
+    {
+      "from": "product/SKU-WAT-03",
+      "type": "sold_by",
+      "to": "seller/s_701"
+    }
+  ]
+}

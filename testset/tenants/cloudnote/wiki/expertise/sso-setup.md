@@ -4,7 +4,7 @@ title: SSO setup (SAML and OIDC)
 aliases: [SSO setup, single sign-on, 单点登录配置, SAML, OIDC, SCIM]
 keywords: [Okta, Azure AD, Google Workspace, ACS URL, entity ID, SCIM provisioning, enforce SSO, 强制单点登录]
 summary: SSO is included in Enterprise; admins configure SAML 2.0 or OIDC with the ACS URL and entity ID from the workspace settings, and can enforce SSO and provision members with SCIM.
-about: [accounts:plan/enterprise]
+about: [customers:plan/enterprise]
 sources: [admin-guide-v12.pdf]
 updated: 2026-07-20
 ---

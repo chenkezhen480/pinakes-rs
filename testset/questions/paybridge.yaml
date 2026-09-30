@@ -182,8 +182,8 @@ questions:
     keywords: [cb_301, chargeback, merchant]
     expect:
       relations:
-        - { from: "payments:chargeback/cb_301", type: disputes, to: "payments:transaction/txn_55002" }
-        - { from: "payments:transaction/txn_55002", type: charged_by, to: "payments:merchant/mch_902" }
+        - { from: "acquiring:chargeback/cb_301", type: disputes, to: "acquiring:transaction/txn_55002" }
+        - { from: "acquiring:transaction/txn_55002", type: charged_by, to: "acquiring:merchant/mch_902" }
     trap: [expertise/chargeback-reason-codes, experience/chargeback-evidence]
     notes: Two hops, chargeback to transaction to merchant.
   - id: paybridge-gra-02
@@ -194,7 +194,7 @@ questions:
     keywords: [茶语, 上级商户]
     expect:
       relations:
-        - { from: "payments:merchant/mch_901", type: sub_merchant_of, to: "payments:merchant/mch_900" }
+        - { from: "acquiring:merchant/mch_901", type: sub_merchant_of, to: "acquiring:merchant/mch_900" }
   - id: paybridge-gra-03
     category: graph
     milestone: M3
@@ -203,7 +203,7 @@ questions:
     keywords: [txn_55004, risk rule]
     expect:
       relations:
-        - { from: "payments:transaction/txn_55004", type: flagged_by, to: "payments:risk_rule/rr_velocity_5" }
+        - { from: "acquiring:transaction/txn_55004", type: flagged_by, to: "acquiring:risk_rule/rr_velocity_5" }
     trap: [expertise/risk-scoring, experience/false-positive-fraud-blocks]
   - id: paybridge-gra-04
     category: graph
@@ -213,7 +213,7 @@ questions:
     keywords: [txn_55001, 结算批次]
     expect:
       relations:
-        - { from: "payments:transaction/txn_55001", type: settled_in, to: "payments:settlement/stl_0927" }
+        - { from: "acquiring:transaction/txn_55001", type: settled_in, to: "acquiring:settlement/stl_0927" }
     trap: [expertise/settlement-cycles]
   - id: paybridge-gra-05
     category: graph
@@ -223,8 +223,8 @@ questions:
     keywords: [Voltride, transactions]
     expect:
       relations:
-        - { from: "payments:transaction/txn_55002", type: charged_by, to: "payments:merchant/mch_902" }
-        - { from: "payments:transaction/txn_55004", type: charged_by, to: "payments:merchant/mch_902" }
+        - { from: "acquiring:transaction/txn_55002", type: charged_by, to: "acquiring:merchant/mch_902" }
+        - { from: "acquiring:transaction/txn_55004", type: charged_by, to: "acquiring:merchant/mch_902" }
 
   # --- hop ----------------------------------------------------------------------------------
   - id: paybridge-hop-01

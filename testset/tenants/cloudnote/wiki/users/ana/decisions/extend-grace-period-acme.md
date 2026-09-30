@@ -4,7 +4,7 @@ title: Extended Acme's grace period to 30 days
 aliases: [Acme grace period, grace extension, 宽限期延长, Acme renewal]
 keywords: [grace period, 30 days, procurement, Acme Robotics, renewal, 延长]
 summary: Extended Acme Robotics' grace period from 14 to 30 days while their procurement approved the renewal; they paid on day 22 and renewed for two years.
-about: [accounts:workspace/ws_acme, accounts:invoice/INV-2026-0912, expertise/billing-dunning]
+about: [customers:workspace/ws_acme, customers:invoice/INV-2026-0912, expertise/billing-dunning]
 sources: [2026-09-14-decision-ana-01.json]
 updated: 2026-09-14
 ---

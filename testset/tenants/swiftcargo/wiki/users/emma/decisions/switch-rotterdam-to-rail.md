@@ -4,7 +4,7 @@ title: Move 30% of Rotterdam volume to China-Europe rail
 aliases: [rail shift, China-Europe rail, 中欧班列, 改走铁路, Rotterdam volume]
 keywords: [30 percent, sea to rail, transit time, Rotterdam, Chongqing, 海改铁]
 summary: Decided to move 30% of Rotterdam-bound volume from the Shenzhen sea lane to the Chongqing rail lane during port congestion; transit dropped from 38 to 18 days at about 1.6 times the cost.
-about: [network:route/R-CKG-RTM, network:route/R-SZX-RTM, expertise/demurrage-detention]
+about: [forwarding:route/R-CKG-RTM, forwarding:route/R-SZX-RTM, expertise/demurrage-detention]
 sources: [2026-09-09-decision-emma-01.json]
 updated: 2026-09-09
 ---

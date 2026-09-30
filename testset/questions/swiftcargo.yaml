@@ -183,7 +183,7 @@ questions:
     keywords: [AWB-7781, where is]
     expect:
       relations:
-        - { from: "network:shipment/AWB-7781", type: stored_at, to: "network:warehouse/RTM-02" }
+        - { from: "forwarding:shipment/AWB-7781", type: stored_at, to: "forwarding:warehouse/RTM-02" }
     trap: [expertise/demurrage-detention]
   - id: swiftcargo-gra-02
     category: graph
@@ -193,7 +193,7 @@ questions:
     keywords: [AWB-7790, 承运商]
     expect:
       relations:
-        - { from: "network:shipment/AWB-7790", type: carried_by, to: "network:carrier/CRE" }
+        - { from: "forwarding:shipment/AWB-7790", type: carried_by, to: "forwarding:carrier/CRE" }
   - id: swiftcargo-gra-03
     category: graph
     milestone: M3
@@ -202,7 +202,7 @@ questions:
     keywords: [AWB-7781, customs declaration]
     expect:
       relations:
-        - { from: "network:shipment/AWB-7781", type: declared_under, to: "network:customs_declaration/D2026-5501" }
+        - { from: "forwarding:shipment/AWB-7781", type: declared_under, to: "forwarding:customs_declaration/D2026-5501" }
     trap: [expertise/hs-codes, experience/customs-hold-release]
   - id: swiftcargo-gra-04
     category: graph
@@ -212,8 +212,8 @@ questions:
     keywords: [中欧班列, 起点, 终点]
     expect:
       relations:
-        - { from: "network:route/R-CKG-RTM", type: departs_from, to: "network:warehouse/CKG-01" }
-        - { from: "network:route/R-CKG-RTM", type: arrives_at, to: "network:warehouse/RTM-02" }
+        - { from: "forwarding:route/R-CKG-RTM", type: departs_from, to: "forwarding:warehouse/CKG-01" }
+        - { from: "forwarding:route/R-CKG-RTM", type: arrives_at, to: "forwarding:warehouse/RTM-02" }
   - id: swiftcargo-gra-05
     category: graph
     milestone: M3
@@ -222,7 +222,7 @@ questions:
     keywords: [DHL, carrier]
     expect:
       relations:
-        - { from: "network:shipment/AWB-7782", type: carried_by, to: "network:carrier/DHL" }
+        - { from: "forwarding:shipment/AWB-7782", type: carried_by, to: "forwarding:carrier/DHL" }
     notes: Asked from the carrier's side, so the edge is walked backwards.
 
   # --- hop ----------------------------------------------------------------------------------

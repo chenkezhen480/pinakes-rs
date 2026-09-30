@@ -4,7 +4,7 @@ title: Written warning for 棉语服饰 instead of a penalty
 aliases: [棉语服饰 warning, seller warning, 商家警告, 假货投诉处理结果, Mianyu Apparel]
 keywords: [counterfeit claim, written warning, first offence, 棉语服饰, 警告]
 summary: Decided to give seller 棉语服饰 a written warning rather than violation points for a disputed counterfeit T-shirt claim; the brand check later came back inconclusive and no repeat complaints followed.
-about: [commerce:seller/s_303, expertise/seller-penalties]
+about: [mainland:seller/s_303, expertise/seller-penalties]
 sources: [2026-09-16-decision-wang-01.json]
 updated: 2026-09-16
 ---

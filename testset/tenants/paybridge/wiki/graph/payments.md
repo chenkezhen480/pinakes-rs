@@ -3,7 +3,7 @@ kind: graph
 title: Payments graph
 aliases: [payments, 支付图谱, transaction graph, 交易关系]
 summary: Merchants and their sub-merchants, the transactions charged for them, the chargebacks disputing those transactions, the settlement batches they are paid out in, and the risk rules that flagged them.
-space: payments
+schema: payments
 nodes:
   merchant:    { en: "A merchant account", zh: "商户", aliases: [merchants, seller account, 商户, 商家], key: merchant_id }
   transaction: { en: "A card payment", zh: "一笔交易", aliases: [transactions, payment, charge, 交易, 支付], key: txn_id }
