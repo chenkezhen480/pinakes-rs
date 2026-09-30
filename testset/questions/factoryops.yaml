@@ -311,11 +311,34 @@ questions:
     category: graph
     milestone: M3
     lang: zh
-    user: ligong
-    groups: [wuhan-maintenance]
+    user: zhou
     query: "武汉工厂的CNC-07用的是什么轴承？"
     keywords: [武汉工厂, CNC-07, 轴承]
     expect:
       relations:
         - { from: "wuhan:machine/CNC-07", type: uses_part, to: "wuhan:part/P-BRG-6206" }
-    notes: The same caller as factoryops-spi-01, now sent with the wuhan-maintenance group.
+    notes: >
+      The same question as factoryops-spi-01, from Zhou, who isn't on the member list by name
+      but is in the wuhan-maintenance group.
+
+  # --- group-scoped memories: the wuhan-maintenance group -----------------------------------
+  - id: factoryops-exp-07
+    category: experience
+    milestone: M2
+    lang: zh
+    user: zhou
+    query: "武汉CNC-07换主轴轴承有什么要注意的？"
+    keywords: [武汉CNC-07换轴承, 主轴轴承更换]
+    expect: { memories: [groups/wuhan-maintenance/experience/wuhan-cnc-bearing-swap] }
+  - id: factoryops-iso-02
+    category: isolation
+    milestone: M2
+    lang: en
+    user: sarah
+    query: "Any tips for swapping the spindle bearing on the Wuhan CNC-07?"
+    keywords: [Wuhan CNC-07 bearing swap]
+    must_not: [groups/wuhan-maintenance/experience/wuhan-cnc-bearing-swap]
+    notes: >
+      Sarah may see the restricted wuhan graph space (she is listed by name) but is not in the
+      wuhan-maintenance group, so the group's playbook stays hidden. Space access and group
+      membership are separate.

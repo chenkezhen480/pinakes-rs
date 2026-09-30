@@ -28,9 +28,11 @@ pub async fn list(
     let Query(q) = query?;
     let wiki = scope.tenant().wiki();
     let user_dir = scope.user().map(|u| u.dir.clone());
-    let mut pages = tokio::task::spawn_blocking(move || wiki.list(user_dir.as_deref()))
-        .await
-        .map_err(anyhow::Error::from)??;
+    let group_dirs: Vec<String> = scope.groups().iter().map(|g| g.dir.clone()).collect();
+    let mut pages =
+        tokio::task::spawn_blocking(move || wiki.list(user_dir.as_deref(), &group_dirs))
+            .await
+            .map_err(anyhow::Error::from)??;
     if let Some(kind) = q.kind {
         pages.retain(|p| p.kind == Some(kind));
     }
@@ -54,7 +56,7 @@ pub async fn get(
     let Path(raw) = raw?;
     tracing::Span::current().record("path", raw.as_str());
     let path = PagePath::parse(&raw)?;
-    // Another user's page is reported exactly like a missing one.
+    // Another user's or group's page is reported exactly like a missing one.
     if !scope.can_see(&path) {
         return Err(ApiError::NotFound);
     }

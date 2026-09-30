@@ -40,6 +40,8 @@ testset/
 │   │   ├── experience/*.md
 │   │   ├── expertise/*.md
 │   │   ├── graph/<schema>.md     schema description (nodes, relations); spaces get no page
+│   │   ├── groups/<group-id>/    raw group id here; the loader maps it with group_dir_name()
+│   │   │   └── experience/, expertise/, decisions/
 │   │   └── users/<user-id>/      raw user id here; the loader maps it with user_dir_name()
 │   │       ├── preferences.md
 │   │       └── decisions/*.md
@@ -65,7 +67,6 @@ questions:
     milestone: M2                # first milestone that can answer it
     lang: en                     # language of the query: en, zh or mixed
     user: lily                   # optional; the X-User-Id of the caller
-    groups: [risk-team]          # optional; the caller's X-User-Groups
     query: "..."                 # what the agent sends as `query`
     keywords: ["...", "..."]     # optional; what a good agent would pass as `keywords`
     expect:                      # what must show up, per slot
@@ -80,7 +81,10 @@ questions:
     notes: "why this question exists"
 ```
 
-User pages are referenced with the raw user id (`users/lily/...`), like the fixture folders.
+User and group pages are referenced with raw ids (`users/lily/...`, `groups/risk-team/...`),
+like the fixture folders. A question's caller brings the groups listed for its user in
+`tenant.yaml` (`users: - { id: marco, ..., groups: [risk-team] }`), exactly as a host would send
+them; a question without a user has no groups.
 
 ### Categories and milestones
 
@@ -94,7 +98,7 @@ User pages are referenced with the raw user id (`users/lily/...`), like the fixt
 | `hop` | A memory plus the knowledge page it is anchored to (`via: memory`) | M5 |
 | `cross_lang` | Query and page in different languages with no alias in common; needs `mode: semantic` | M5 |
 | `negative` | Out-of-scope question: every slot empty or weak | M2 |
-| `isolation` | Another user's memories never appear | M2 |
+| `isolation` | Another user's or another group's memories never appear | M2 |
 | `space_isolation` | Nothing from a graph space the caller can't see appears: no edges, no node or space names | M3 |
 
 A question counts as passed when every expected item is in the top `k` of its slot (default slot
@@ -110,8 +114,10 @@ slot in `expect_empty` is empty or marked weak. Other hits in a slot don't fail 
   node of the same tenant;
 - graph data only uses node and relation types from the schema, with matching ends, and every
   edge's ends exist;
-- every question's expected pages exist, sit in the right slot for their kind, and belong to the
-  question's user when user-scoped; expected edges exist in the graph data;
+- every question's expected pages exist, sit in the right slot for their kind, and are visible to
+  the question's caller (user and groups); `must_not` pages are not; expected edges exist in the
+  graph data;
+- every anchor points only at pages and nodes that all readers of the page can see;
 - space visibility is well-formed; every expected edge is in a space the caller can see, every
   `must_not_spaces` entry is one the caller can't see, and tenant-level pages anchor only to
   shared spaces;

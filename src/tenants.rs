@@ -31,6 +31,11 @@ pub fn user_dir_name(user_id: &str) -> String {
     format!("u_{}", short_hash(b"user", user_id))
 }
 
+/// Folder name for a group id inside a tenant: `g_` plus 16 hex digits.
+pub fn group_dir_name(group_id: &str) -> String {
+    format!("g_{}", short_hash(b"group", group_id))
+}
+
 fn short_hash(domain: &[u8], id: &str) -> String {
     let mut h = Sha256::new();
     h.update(domain);
@@ -287,8 +292,10 @@ mod tests {
         assert!(a.starts_with("t_") && a.len() == 18);
         let evil = tenant_dir_name("../other");
         assert!(evil.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
-        // The same string as a tenant and as a user maps to different names.
+        // The same string as a tenant, a user and a group maps to different names.
         assert_ne!(&tenant_dir_name("x")[2..], &user_dir_name("x")[2..]);
+        assert_ne!(&user_dir_name("x")[2..], &group_dir_name("x")[2..]);
+        assert!(group_dir_name("risk-team").starts_with("g_"));
     }
 
     #[test]

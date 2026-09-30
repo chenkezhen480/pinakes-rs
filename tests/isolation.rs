@@ -7,7 +7,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use kb::config::Config;
 use kb::store::{SqliteStore, Store};
-use kb::tenants::{hash_api_key, tenant_dir_name, user_dir_name};
+use kb::tenants::{group_dir_name, hash_api_key, tenant_dir_name, user_dir_name};
 use kb::wiki::{Page, PagePath, WikiFs};
 use kb::{AppState, router};
 use serde_json::{Value, json};
@@ -26,6 +26,7 @@ struct Call<'a> {
     uri: &'a str,
     key: Option<&'a str>,
     user: Option<&'a str>,
+    groups: Option<&'a str>,
     body: Option<Value>,
 }
 
@@ -36,6 +37,7 @@ impl<'a> Call<'a> {
             uri,
             key: None,
             user: None,
+            groups: None,
             body: None,
         }
     }
@@ -45,11 +47,16 @@ impl<'a> Call<'a> {
             uri,
             key: None,
             user: None,
+            groups: None,
             body: Some(body),
         }
     }
     fn key(mut self, key: &'a str) -> Self {
         self.key = Some(key);
+        self
+    }
+    fn groups(mut self, groups: &'a str) -> Self {
+        self.groups = Some(groups);
         self
     }
     fn user(mut self, user: &'a str) -> Self {
@@ -79,6 +86,9 @@ impl TestApp {
         let mut req = Request::builder().method(c.method).uri(c.uri);
         if let Some(k) = c.key {
             req = req.header("Authorization", format!("Bearer {k}"));
+        }
+        if let Some(g) = c.groups {
+            req = req.header("X-User-Groups", g);
         }
         if let Some(u) = c.user {
             req = req.header("X-User-Id", u);
@@ -460,4 +470,92 @@ async fn bearer_scheme_is_case_insensitive() {
         .unwrap();
     let resp = app.router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn groups_see_only_their_own_pages() {
+    let app = TestApp::new();
+    let key = app.create_tenant("acme").await;
+    let (risk, ops) = (group_dir_name("risk-team"), group_dir_name("ops"));
+    let risk_page = format!("groups/{risk}/decisions/bin-blocks");
+    let ops_page = format!("groups/{ops}/experience/playbook");
+    app.seed("acme", &risk_page, "BIN blocks", "RISK-ONLY\n");
+    app.seed("acme", &ops_page, "Ops playbook", "OPS-ONLY\n");
+
+    // A member of risk-team sees its pages and nothing of ops.
+    let (_, list) = app
+        .call(
+            Call::get("/pages")
+                .key(&key)
+                .user("marco")
+                .groups("risk-team"),
+        )
+        .await;
+    let seen = paths(&list);
+    assert!(seen.contains(&risk_page), "{seen:?}");
+    assert!(!seen.contains(&ops_page), "{seen:?}");
+    let (s, page) = app
+        .call(
+            Call::get(&format!("/pages/{risk_page}"))
+                .key(&key)
+                .groups("risk-team"),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(page["kind"], "decision");
+    let (s, _) = app
+        .call(
+            Call::get(&format!("/pages/{ops_page}"))
+                .key(&key)
+                .groups("risk-team"),
+        )
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // No groups: no group pages at all. Both groups: both pages.
+    let (_, list) = app.call(Call::get("/pages").key(&key).user("marco")).await;
+    assert!(!paths(&list).iter().any(|p| p.starts_with("groups/")));
+    let (s, _) = app
+        .call(
+            Call::get(&format!("/pages/{risk_page}"))
+                .key(&key)
+                .user("marco"),
+        )
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (_, list) = app
+        .call(Call::get("/pages").key(&key).groups("ops, risk-team"))
+        .await;
+    let seen = paths(&list);
+    assert!(
+        seen.contains(&risk_page) && seen.contains(&ops_page),
+        "{seen:?}"
+    );
+
+    // Group folders are named by hash; a raw group name in a path is not a wiki location.
+    let (s, _) = app
+        .call(
+            Call::get("/pages/groups/risk-team/decisions/bin-blocks")
+                .key(&key)
+                .groups("risk-team"),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn malformed_group_header_is_rejected() {
+    let app = TestApp::new();
+    let key = app.create_tenant("acme").await;
+    let too_many = (0..65)
+        .map(|i| format!("g{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let (s, body) = app
+        .call(Call::get("/pages").key(&key).groups(&too_many))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    let long = "x".repeat(300);
+    let (s, _) = app.call(Call::get("/pages").key(&key).groups(&long)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }

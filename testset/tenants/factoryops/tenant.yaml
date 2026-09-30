@@ -7,6 +7,7 @@ description: >
 users:
   - { id: ligong, role: maintenance lead, lang: zh }
   - { id: sarah, role: plant manager, lang: en }
+  - { id: zhou, role: maintenance technician at the Wuhan plant, lang: zh, groups: [wuhan-maintenance] }
 graph:
   schemas: [plant]
   spaces:

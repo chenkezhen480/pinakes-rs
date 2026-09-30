@@ -4,7 +4,7 @@ mod page;
 mod path;
 
 pub use page::{FrontMatter, Page};
-pub use path::PagePath;
+pub use path::{Audience, PagePath};
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -86,15 +86,25 @@ impl WikiFs {
         Ok(())
     }
 
-    /// Lists pages visible to a caller: every tenant-level page, plus the user pages under
-    /// `users/<own_user_dir>/` when a user is given. Other users' folders are never opened.
-    pub fn list(&self, own_user_dir: Option<&str>) -> Result<Vec<PageSummary>, WikiError> {
+    /// Lists pages visible to a caller: every tenant-level page, the pages of the caller's own
+    /// groups, and the user pages under `users/<own_user_dir>/` when a user is given. Other
+    /// groups' and users' folders are never opened.
+    pub fn list(
+        &self,
+        own_user_dir: Option<&str>,
+        own_group_dirs: &[String],
+    ) -> Result<Vec<PageSummary>, WikiError> {
         let mut out = Vec::new();
         for root in ["index", "log"] {
             self.push_if_page(root, &mut out)?;
         }
         for dir in ["experience", "expertise", "graph"] {
             self.list_dir(dir, &mut out)?;
+        }
+        for group_dir in own_group_dirs {
+            for sub in ["experience", "expertise", "decisions"] {
+                self.list_dir(&format!("groups/{group_dir}/{sub}"), &mut out)?;
+            }
         }
         if let Some(user_dir) = own_user_dir {
             self.push_if_page(&format!("users/{user_dir}/preferences"), &mut out)?;
@@ -159,11 +169,20 @@ mod tests {
         let wiki = WikiFs::new(dir.path());
         let me = "u_0123456789abcdef";
         let other = "u_fedcba9876543210";
+        let team = "g_00112233445566aa".to_string();
+        let other_team = "g_aa66554433221100";
         wiki.write(&page("expertise/refunds", "Refunds")).unwrap();
         wiki.write(&page(&format!("users/{me}/preferences"), "Mine"))
             .unwrap();
         wiki.write(&page(&format!("users/{other}/decisions/x"), "Theirs"))
             .unwrap();
+        wiki.write(&page(&format!("groups/{team}/decisions/y"), "Team"))
+            .unwrap();
+        wiki.write(&page(
+            &format!("groups/{other_team}/experience/z"),
+            "Other team",
+        ))
+        .unwrap();
 
         let read = wiki
             .read(&PagePath::parse("expertise/refunds").unwrap())
@@ -171,7 +190,7 @@ mod tests {
         assert_eq!(read.front.title.as_deref(), Some("Refunds"));
 
         let paths: Vec<_> = wiki
-            .list(Some(me))
+            .list(Some(me), std::slice::from_ref(&team))
             .unwrap()
             .into_iter()
             .map(|s| s.path)
@@ -180,11 +199,12 @@ mod tests {
             paths,
             vec![
                 "expertise/refunds".to_string(),
+                format!("groups/{team}/decisions/y"),
                 format!("users/{me}/preferences")
             ]
         );
         let anon: Vec<_> = wiki
-            .list(None)
+            .list(None, &[])
             .unwrap()
             .into_iter()
             .map(|s| s.path)

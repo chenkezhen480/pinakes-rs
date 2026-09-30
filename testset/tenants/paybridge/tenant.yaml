@@ -5,7 +5,7 @@ description: >
   success managers with chargebacks, fraud rules, settlements, merchant onboarding (KYC) and
   compliance questions.
 users:
-  - { id: marco, role: risk analyst, lang: en }
+  - { id: marco, role: risk analyst, lang: en, groups: [risk-team] }
   - { id: chen, role: merchant success manager, lang: zh }
 graph:
   schemas: [payments]

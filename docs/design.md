@@ -12,8 +12,8 @@ We're building an open-source, self-hosted knowledge service in Rust. It works l
 - **Five kinds of knowledge.** Agent experience, user decision history, vertical expertise, the business graph and user preferences. Each has its own scope and page shape.
 - **A graph described by its schema.** A schema defines node and relation types; any number of graph spaces are built from one schema. The wiki holds one description per schema. Spaces and their nodes and edges live in Neo4j as data, never in the wiki, so relationship questions get real edges, not summaries.
 - **The agent decides how to search.** Following A-RAG, the agent chooses keyword or meaning-based search, what to open and what to follow. The service returns signals, not decisions.
-- **Isolated by tenant and user.** A tenant can never see another tenant's knowledge, and user-level knowledge stays with that user.
-- **Identity comes from outside.** The service doesn't manage accounts. The system that embeds it passes tenant and user ids in, so developers can plug it into their own stack.
+- **Isolated by tenant, group and user.** A tenant can never see another tenant's knowledge; group-level knowledge stays within the group, and user-level knowledge with that user. The same rule covers wiki pages and graph spaces.
+- **Identity comes from outside.** The service doesn't manage accounts. The system that embeds it passes tenant, user and group ids in, so developers can plug it into their own stack.
 - **Ultra-fast reads.** Reads are lookups, keyword search, graph walks and, when the agent asks, a vector search, all over data in memory, with no LLM. The target is a few milliseconds of service time and around 20 ms end to end.
 - **English and Chinese from day one.**
 - **Three interfaces.** There's an HTTP API to manage the knowledge, an MCP server for agents, and a streaming chat endpoint for testing.
@@ -49,15 +49,17 @@ Each kind has its own insert entry point, scope and page shape. All five are sea
 
 | Kind | Insert entry point | Scope | Written from | Page shape | Comes back in |
 |---|---|---|---|---|---|
-| Agent experience | `/ingest/experience` | Tenant | Agent task outcomes, including problems agents hit while serving users | One playbook per task type: steps that work, pitfalls and their fixes, how often each was seen | Memories |
-| User decision history | `/ingest/decision` | Tenant + user | Records of what the user decided and what happened as a result | One page per decision topic: the decision, its context, the outcome, the date | Memories, filtered to the user |
-| Vertical expertise | `/ingest/expertise` | Tenant | Domain documents and manuals | Linked concept and entity pages, as in a classic wiki | Knowledge |
+| Agent experience | `/ingest/experience` | Tenant or group | Agent task outcomes, including problems agents hit while serving users | One playbook per task type: steps that work, pitfalls and their fixes, how often each was seen | Memories |
+| User decision history | `/ingest/decision` | User or group | Records of what the user decided and what happened as a result | One page per decision topic: the decision, its context, the outcome, the date | Memories, filtered to the caller's user and groups |
+| Vertical expertise | `/ingest/expertise` | Tenant or group | Domain documents and manuals | Linked concept and entity pages, as in a classic wiki | Knowledge |
 | Business graph | `/ingest/graph/schema`, `/space`, `/data` | Tenant; many graph spaces per schema | Schema definitions, plus spaces, nodes and edges as data | One description per schema; spaces, nodes and edges are data, not pages | Knowledge (the description) and relations (the edges) |
-| Preferences | `/ingest/preference` | Tenant + user | Explicit statements and observed habits | One short profile page per user | Memories, filtered to the user |
+| Preferences | `/ingest/preference` | User | Explicit statements and observed habits | One short profile page per user | Memories, filtered to the user |
 
 Problems users run into are recorded as agent experience, because they are lessons about how agents should operate. User decision history records choices and their outcomes, not problems.
 
 Preferences are scoped per tenant, so the same person in two tenants has two separate profiles.
+
+**Audiences.** Every page is for one audience: the whole tenant, one group, or one user. A group page (a team's playbook, a decision the risk team made together) is visible to every caller the host sends with that group. Each kind allows only some audiences: experience and expertise are for the tenant or a group, decisions for a group or a user, preferences only for a user. The page's folder says its audience (`groups/g_…/`, `users/u_…/`), and the path layout enforces the rule. On insert, the caller picks the audience from what its own credentials allow: the tenant, one of its groups, or its user; it can never write for a group it isn't in.
 
 ## One way in: the wiki as the only search entry
 
@@ -158,7 +160,7 @@ updated: 2026-09-29
 
 ## Tenants, users and identity
 
-The service never creates or authenticates end users. The host system passes tenant and user ids in, and the service enforces isolation around them.
+The service never creates or authenticates end users, and never manages groups. The host system passes tenant, user and group ids in, and the service enforces isolation around them. Group membership changes take effect on the next request: when the host stops sending a group, that caller loses access to its pages and spaces at once.
 
 **Where the ids come from.** There are two modes, chosen in config:
 
@@ -173,12 +175,12 @@ Group ids are optional and only matter for restricted graph spaces: in API key m
 
 - **One folder per tenant.** Each tenant gets its own folder, holding its wiki files, its SQLite file and its search index.
 - **Safe folder names.** Folder names are derived from the ids (a hash), never the raw strings, so an id like `../other` can't escape its folder.
-- **Filters the caller can't remove.** The service adds the tenant and user filters to every search, graph walk and read, and request bodies can't widen them. Anchors that lead into another user's pages are dropped before a walk starts.
+- **Filters the caller can't remove.** The service adds the tenant, group and user filters to every search, graph walk and read, and request bodies can't widen them. Anchors that lead into another user's or group's pages are dropped before a walk starts.
 - **One graph database, filtered.** Neo4j Community edition runs a single database, so every node and edge carries the tenant id, with an index on it, and every Cypher query the service sends filters on it.
 - **Separate ranking statistics.** Separate indexes mean one tenant's content never shifts another tenant's search results.
 - **Graph spaces with a visibility.** Shared spaces are open to the whole tenant; private and restricted spaces are filtered out of every search, walk and anchor for callers who may not see them (see "Who can see a graph space").
-- **A scoped librarian.** The librarian only ever sees pages from the same scope, so another tenant's content never enters a prompt.
-- **Clean deletion.** Deleting a tenant deletes its folder and its nodes and edges in Neo4j. Deleting a user removes their decision history and preferences, with the anchors and vectors that came from them.
+- **A scoped librarian.** The librarian only ever sees pages the new content's audience may see: for a group page, the tenant's pages and that group's; for a user page, also that user's and their groups'. Another tenant's content never enters a prompt, and content is never merged into a page with a wider audience: a group decision can't end up on a tenant page. A page may anchor only to pages and nodes that everyone who can read it can also see.
+- **Clean deletion.** Deleting a tenant deletes its folder and its nodes and edges in Neo4j. Deleting a user removes their decision history and preferences, with the anchors and vectors that came from them. Groups live outside the service, so a group's pages stay until an admin deletes them.
 - **Loaded on demand.** A tenant's index, vectors and graph load on first use, from its files, its SQLite file and Neo4j. Busy tenants stay in memory, and idle ones cost only disk space.
 
 ## Search signals: names, keywords and meaning, in English and Chinese
@@ -336,7 +338,7 @@ Only step 3 of the write path calls an LLM, and graph data skips it entirely. Th
 
 Content arrives through five insert entry points, one per kind. Every write is a background job: the API returns a job id right away, and the librarian updates the wiki shortly after. Graph spaces and graph data are the exception; code checks them and applies them without the librarian. Graph schemas do go through the librarian, which writes their descriptions.
 
-1. **Receive.** Content arrives at the insert entry point for its kind, and its scope comes from the credentials. The raw record is saved unchanged.
+1. **Receive.** Content arrives at the insert entry point for its kind. Its tenant, user and groups come from the credentials, and the caller picks the audience among those the credentials and the kind allow. The raw record is saved unchanged.
 2. **Find related pages.** Without an LLM, the service finds pages in the same scope that share names, identifiers, aliases or keywords with the new content, and keeps the best 5–10. A cheap first LLM call can extract keywords to sharpen this.
 3. **Plan the edits (LLM).** The librarian's main LLM call gets the new content, those pages and the rules for this kind. It returns a structured edit plan: create a page, update part of a page, add an anchor, or mark a claim as superseded.
 4. **Verify the edits (LLM).** A second LLM call checks each edit against the new content and the cited sources. Every changed claim and every anchor must be supported, must not contradict another page, and must follow the rules for its kind. A failed edit goes back to step 3 once with the reasons; if it fails again, it's held as a proposal for review. This check can use a cheaper model.
@@ -398,6 +400,11 @@ data/
         │   ├── experience/    e.g. refund-handling.md
         │   ├── expertise/     e.g. refund-regulations.md
         │   ├── graph/         one description per schema, e.g. commerce.md
+        │   ├── groups/
+        │   │   └── g_5c0e91a7/        folder name derived from the group id
+        │   │       ├── experience/    a team's own playbooks
+        │   │       ├── expertise/     a team's internal notes
+        │   │       └── decisions/     decisions the team made together
         │   └── users/
         │       └── u_7b21e0d4/        folder name derived from the user id
         │           ├── preferences.md
@@ -754,7 +761,7 @@ Here are some example rules for `CLAUDE.md`:
 # Rules
 - The design is in docs/design.md. Build one milestone at a time.
 - Before calling a task done, run: cargo fmt, cargo clippy -- -D warnings, cargo test.
-- Every read and write path takes a Scope (tenant + user); never take tenant or user ids from request bodies.
+- Every read and write path takes a Scope (tenant + user + groups); never take tenant, user or group ids from request bodies.
 - /search is the only search entry. /graph, /graph/path and /read only take ids that /search returns.
 - No LLM calls on the read path (/search, /graph, /read, /pages).
 - Searches read only the in-memory copies; never query SQLite or Neo4j on the read path.
@@ -763,7 +770,7 @@ Here are some example rules for `CLAUDE.md`:
 - Every search stage gets a tracing span with its timing.
 - Embeddings use the e5 prefixes: "query: " for queries, "passage: " for stored text.
 - The librarian never writes graph data, and every memory page has at least one anchor.
-- Tenant and user folder names come from the id-mapping function, never from raw ids.
+- Tenant, group and user folder names come from the id-mapping functions, never from raw ids.
 ```
 
 To review the code comfortably, skim these parts of the Rust Book first: ch. 4 (ownership), ch. 9 (errors), ch. 10.2 (traits) and ch. 17 (async). The concepts table above links to each one.

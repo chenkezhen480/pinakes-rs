@@ -12,10 +12,11 @@ pub enum Kind {
     Preference,
 }
 
-/// Whether a kind's pages belong to the whole tenant or to one user inside it.
+/// Who a page can be for: the whole tenant, one group, or one user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeLevel {
+pub enum AudienceLevel {
     Tenant,
+    Group,
     User,
 }
 
@@ -28,10 +29,14 @@ impl Kind {
         Kind::Preference,
     ];
 
-    pub fn scope_level(self) -> ScopeLevel {
+    /// The audiences a kind's pages may have. The wiki path layout enforces the same rule.
+    pub fn audiences(self) -> &'static [AudienceLevel] {
+        use AudienceLevel::*;
         match self {
-            Kind::Experience | Kind::Expertise | Kind::Graph => ScopeLevel::Tenant,
-            Kind::Decision | Kind::Preference => ScopeLevel::User,
+            Kind::Experience | Kind::Expertise => &[Tenant, Group],
+            Kind::Decision => &[Group, User],
+            Kind::Preference => &[User],
+            Kind::Graph => &[Tenant],
         }
     }
 

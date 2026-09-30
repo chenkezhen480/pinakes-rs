@@ -1,19 +1,22 @@
-//! Who is calling: the `Scope` (tenant + optional user) every read and write path takes.
+//! Who is calling: the `Scope` (tenant, optional user, groups) every read and write path takes.
 //!
-//! In API key mode the tenant comes from the key and the user from a header set by the calling
-//! backend. A `Scope` can only be made here, from credentials, never from a request body.
+//! In API key mode the tenant comes from the key, and the user and groups from headers set by the
+//! calling backend. A `Scope` can only be made here, from credentials, never from a request body.
 
 use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
-use axum::http::HeaderMap;
 use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::tenants::{Tenant, user_dir_name, validate_id};
-use crate::wiki::PagePath;
+use crate::tenants::{Tenant, group_dir_name, user_dir_name, validate_id};
+use crate::wiki::{Audience, PagePath};
+
+/// More groups than this in one request is treated as a malformed header.
+const MAX_GROUPS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
@@ -22,10 +25,18 @@ pub struct User {
     pub dir: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    pub id: String,
+    /// Folder name inside the tenant, from `group_dir_name`.
+    pub dir: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Scope {
     tenant: Arc<Tenant>,
     user: Option<User>,
+    groups: Vec<Group>,
 }
 
 impl Scope {
@@ -37,14 +48,45 @@ impl Scope {
         self.user.as_ref()
     }
 
-    /// Whether this caller may see a page: tenant-level pages always, user pages only when they
-    /// belong to the caller's own user.
+    pub fn groups(&self) -> &[Group] {
+        &self.groups
+    }
+
+    /// Whether this caller may see a page: tenant-level pages always, group pages when the caller
+    /// is in the group, user pages only when they belong to the caller's own user.
     pub fn can_see(&self, path: &PagePath) -> bool {
-        match path.owner_user_dir() {
-            None => true,
-            Some(owner) => self.user.as_ref().is_some_and(|u| u.dir == owner),
+        match path.audience() {
+            Audience::Tenant => true,
+            Audience::Group(dir) => self.groups.iter().any(|g| g.dir == dir),
+            Audience::User(dir) => self.user.as_ref().is_some_and(|u| u.dir == dir),
         }
     }
+}
+
+/// Group ids from a comma-separated header. Ids are opaque, so they can't contain commas.
+fn parse_groups(value: Option<&HeaderValue>) -> Result<Vec<Group>, ApiError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let text = value
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("group header is not valid text".into()))?;
+    let mut groups: Vec<Group> = Vec::new();
+    for id in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        validate_id("group", id).map_err(ApiError::BadRequest)?;
+        if !groups.iter().any(|g| g.id == id) {
+            groups.push(Group {
+                id: id.to_owned(),
+                dir: group_dir_name(id),
+            });
+        }
+    }
+    if groups.len() > MAX_GROUPS {
+        return Err(ApiError::BadRequest(format!(
+            "more than {MAX_GROUPS} groups in one request"
+        )));
+    }
+    Ok(groups)
 }
 
 /// The API key from the configured header. For `Authorization`, the `Bearer` scheme is required
@@ -90,8 +132,18 @@ impl FromRequestParts<AppState> for Scope {
                 })
             }
         };
-        tracing::debug!(tenant = %tenant.dir_name, user = user.as_ref().map(|u| u.dir.as_str()), "identity resolved");
-        Ok(Scope { tenant, user })
+        let groups = parse_groups(parts.headers.get(cfg.group_header.as_str()))?;
+        tracing::debug!(
+            tenant = %tenant.dir_name,
+            user = user.as_ref().map(|u| u.dir.as_str()),
+            groups = groups.len(),
+            "identity resolved"
+        );
+        Ok(Scope {
+            tenant,
+            user,
+            groups,
+        })
     }
 }
 
@@ -154,6 +206,26 @@ mod tests {
         assert_eq!(api_key(&h, "Authorization"), None);
         h.insert("x-api-key", HeaderValue::from_static(" abc "));
         assert_eq!(api_key(&h, "X-Api-Key"), Some("abc"));
+    }
+
+    #[test]
+    fn groups_header_parsing() {
+        assert!(parse_groups(None).unwrap().is_empty());
+        let v = HeaderValue::from_static(" risk-team, ops ,,risk-team ");
+        let ids: Vec<_> = parse_groups(Some(&v))
+            .unwrap()
+            .into_iter()
+            .map(|g| g.id)
+            .collect();
+        assert_eq!(ids, vec!["risk-team", "ops"]);
+        let many = HeaderValue::from_str(
+            &(0..65)
+                .map(|i| format!("g{i}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+        .unwrap();
+        assert!(parse_groups(Some(&many)).is_err());
     }
 
     #[test]

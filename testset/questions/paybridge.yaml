@@ -311,3 +311,33 @@ questions:
     must_not_spaces: [investigations]
     expect_empty: [relations]
     notes: A caller with no user id only ever sees shared spaces.
+
+  # --- group-scoped memories: the risk-team group -------------------------------------------
+  - id: paybridge-dec-06
+    category: decision
+    milestone: M2
+    lang: en
+    user: marco
+    query: "What did the risk team decide about blocking card-testing BINs?"
+    keywords: [BIN block, card testing BINs]
+    expect: { memories: [groups/risk-team/decisions/block-card-testing-bins] }
+    notes: A team decision, visible to Marco through his risk-team group.
+  - id: paybridge-exp-07
+    category: experience
+    milestone: M2
+    lang: en
+    user: marco
+    query: "How do we investigate a card-testing attack?"
+    keywords: [card testing attack, card testing investigation]
+    expect: { memories: [groups/risk-team/experience/card-testing-investigations] }
+  - id: paybridge-iso-02
+    category: isolation
+    milestone: M2
+    lang: zh
+    user: chen
+    query: "风控组对盗卡测试的BIN段是怎么决定的？"
+    keywords: [盗卡测试BIN段, BIN block]
+    must_not:
+      - groups/risk-team/decisions/block-card-testing-bins
+      - groups/risk-team/experience/card-testing-investigations
+    notes: Chen is not in risk-team; the team's pages stay hidden even with exact keywords.

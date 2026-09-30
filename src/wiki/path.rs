@@ -1,4 +1,5 @@
-//! Page paths such as `expertise/refund-regulations` or `users/u_7b21e0d4a1b2c3d4/preferences`.
+//! Page paths such as `expertise/refund-regulations`, `groups/g_…/decisions/bin-blocks` or
+//! `users/u_7b21e0d4a1b2c3d4/preferences`.
 //!
 //! A path is validated once, when parsed, against the fixed wiki layout. Anything else — `..`,
 //! absolute paths, backslashes, unknown folders — is rejected, so a `PagePath` can always be
@@ -19,6 +20,15 @@ pub struct PagePath {
     raw: String,
 }
 
+/// Who a page is for: the whole tenant, one group, or one user. Groups and users are named by
+/// their folder (`g_…`, `u_…`), never by raw id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience<'a> {
+    Tenant,
+    Group(&'a str),
+    User(&'a str),
+}
+
 impl PagePath {
     /// Parses a page path. A trailing `.md` is accepted and dropped.
     pub fn parse(input: &str) -> Result<Self, WikiError> {
@@ -30,8 +40,14 @@ impl PagePath {
         let ok = match segs.as_slice() {
             ["index"] | ["log"] => true,
             ["experience" | "expertise" | "graph", _name] => true,
-            ["users", user, "preferences"] => is_user_dir(user),
-            ["users", user, "decisions", _topic] => is_user_dir(user),
+            [
+                "groups",
+                group,
+                "experience" | "expertise" | "decisions",
+                _name,
+            ] => is_hashed_dir(group, "g_"),
+            ["users", user, "preferences"] => is_hashed_dir(user, "u_"),
+            ["users", user, "decisions", _topic] => is_hashed_dir(user, "u_"),
             _ => false,
         };
         if !ok {
@@ -48,12 +64,12 @@ impl PagePath {
         self.raw.split('/')
     }
 
-    /// The user folder that owns this page (`u_…`), or `None` for tenant-level pages.
-    pub fn owner_user_dir(&self) -> Option<&str> {
+    pub fn audience(&self) -> Audience<'_> {
         let mut segs = self.segments();
         match (segs.next(), segs.next()) {
-            (Some("users"), Some(user)) => Some(user),
-            _ => None,
+            (Some("groups"), Some(group)) => Audience::Group(group),
+            (Some("users"), Some(user)) => Audience::User(user),
+            _ => Audience::Tenant,
         }
     }
 
@@ -61,11 +77,11 @@ impl PagePath {
     pub fn kind(&self) -> Option<Kind> {
         let segs: Vec<&str> = self.segments().collect();
         match segs.as_slice() {
-            ["experience", _] => Some(Kind::Experience),
-            ["expertise", _] => Some(Kind::Expertise),
+            ["experience", _] | ["groups", _, "experience", _] => Some(Kind::Experience),
+            ["expertise", _] | ["groups", _, "expertise", _] => Some(Kind::Expertise),
             ["graph", _] => Some(Kind::Graph),
             ["users", _, "preferences"] => Some(Kind::Preference),
-            ["users", _, "decisions", _] => Some(Kind::Decision),
+            ["users", _, "decisions", _] | ["groups", _, "decisions", _] => Some(Kind::Decision),
             _ => None,
         }
     }
@@ -110,9 +126,10 @@ fn check_segment(seg: &str) -> Result<(), WikiError> {
     Ok(())
 }
 
-/// Folder names produced by `tenants::user_dir_name`: `u_` plus 16 lowercase hex digits.
-fn is_user_dir(seg: &str) -> bool {
-    seg.strip_prefix("u_").is_some_and(|h| {
+/// Folder names produced by `tenants::user_dir_name` and `tenants::group_dir_name`: a prefix
+/// plus 16 lowercase hex digits.
+fn is_hashed_dir(seg: &str, prefix: &str) -> bool {
+    seg.strip_prefix(prefix).is_some_and(|h| {
         h.len() == 16
             && h.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -132,6 +149,7 @@ mod tests {
     use super::*;
 
     const U: &str = "u_0123456789abcdef";
+    const G: &str = "g_fedcba9876543210";
 
     #[test]
     fn accepts_the_wiki_layout() {
@@ -142,6 +160,9 @@ mod tests {
             "expertise/refund_regulations.md".to_string(),
             "graph/commerce".to_string(),
             "expertise/退款规则".to_string(),
+            format!("groups/{G}/experience/card-testing"),
+            format!("groups/{G}/expertise/internal-notes"),
+            format!("groups/{G}/decisions/bin-blocks"),
             format!("users/{U}/preferences"),
             format!("users/{U}/decisions/refund-policy"),
         ] {
@@ -166,6 +187,11 @@ mod tests {
             "users/alice/preferences",
             "users/u_0123/preferences",
             "users/u_0123456789ABCDEF/preferences",
+            "groups/risk-team/decisions/x",
+            "groups/g_fedcba9876543210/preferences",
+            "groups/g_fedcba9876543210/graph/x",
+            "groups/u_0123456789abcdef/decisions/x",
+            "users/g_fedcba9876543210/decisions/x",
             "expertise/CON",
             "expertise/lpt1",
             "expertise/",
@@ -176,13 +202,58 @@ mod tests {
     }
 
     #[test]
-    fn owner_and_kind() {
+    fn audience_and_kind() {
         let p = PagePath::parse(&format!("users/{U}/decisions/x")).unwrap();
-        assert_eq!(p.owner_user_dir(), Some(U));
+        assert_eq!(p.audience(), Audience::User(U));
         assert_eq!(p.kind(), Some(Kind::Decision));
+        let g = PagePath::parse(&format!("groups/{G}/decisions/x")).unwrap();
+        assert_eq!(g.audience(), Audience::Group(G));
+        assert_eq!(g.kind(), Some(Kind::Decision));
+        let ge = PagePath::parse(&format!("groups/{G}/experience/x")).unwrap();
+        assert_eq!(ge.kind(), Some(Kind::Experience));
         let t = PagePath::parse("expertise/x").unwrap();
-        assert_eq!(t.owner_user_dir(), None);
+        assert_eq!(t.audience(), Audience::Tenant);
         assert_eq!(t.kind(), Some(Kind::Expertise));
         assert_eq!(PagePath::parse("index").unwrap().kind(), None);
+    }
+
+    /// The path layout and `Kind::audiences` must agree: every page a path can name has an
+    /// audience its kind allows, and every allowed pair has a path.
+    #[test]
+    fn layout_matches_kind_audiences() {
+        use crate::kinds::AudienceLevel;
+        let level = |a: Audience| match a {
+            Audience::Tenant => AudienceLevel::Tenant,
+            Audience::Group(_) => AudienceLevel::Group,
+            Audience::User(_) => AudienceLevel::User,
+        };
+        let mut seen = std::collections::HashSet::new();
+        for p in [
+            "experience/x".to_string(),
+            "expertise/x".to_string(),
+            "graph/x".to_string(),
+            format!("groups/{G}/experience/x"),
+            format!("groups/{G}/expertise/x"),
+            format!("groups/{G}/decisions/x"),
+            format!("users/{U}/preferences"),
+            format!("users/{U}/decisions/x"),
+        ] {
+            let path = PagePath::parse(&p).unwrap();
+            let kind = path.kind().unwrap();
+            let lvl = level(path.audience());
+            assert!(
+                kind.audiences().contains(&lvl),
+                "{p}: {kind:?} can't be {lvl:?}"
+            );
+            seen.insert((kind, lvl as u8));
+        }
+        for kind in Kind::ALL {
+            for lvl in kind.audiences() {
+                assert!(
+                    seen.contains(&(kind, *lvl as u8)),
+                    "no path for {kind:?} {lvl:?}"
+                );
+            }
+        }
     }
 }

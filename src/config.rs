@@ -70,6 +70,9 @@ pub struct IdentityConfig {
     /// Header carrying the end-user id in API key mode.
     #[serde(default = "default_user_header")]
     pub user_header: String,
+    /// Header carrying the caller's group ids (comma-separated) in API key mode.
+    #[serde(default = "default_group_header")]
+    pub group_header: String,
     /// Environment variable holding the service admin key. Unset or empty disables `/admin`.
     #[serde(default = "default_admin_key_env")]
     pub admin_key_env: String,
@@ -81,6 +84,7 @@ impl Default for IdentityConfig {
             mode: IdentityMode::default(),
             key_header: default_key_header(),
             user_header: default_user_header(),
+            group_header: default_group_header(),
             admin_key_env: default_admin_key_env(),
         }
     }
@@ -114,6 +118,9 @@ fn default_key_header() -> String {
 }
 fn default_user_header() -> String {
     "X-User-Id".into()
+}
+fn default_group_header() -> String {
+    "X-User-Groups".into()
 }
 fn default_admin_key_env() -> String {
     "KB_ADMIN_KEY".into()
@@ -161,6 +168,7 @@ mod tests {
         assert_eq!(cfg.server.port, 8080);
         assert_eq!(cfg.identity.mode, IdentityMode::ApiKey);
         assert_eq!(cfg.identity.user_header, "X-User-Id");
+        assert_eq!(cfg.identity.group_header, "X-User-Groups");
         assert_eq!(cfg.store.file_name, "kb.sqlite");
     }
 

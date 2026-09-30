@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use kb::kinds::Kind;
-use kb::tenants::user_dir_name;
+use kb::tenants::{group_dir_name, user_dir_name};
 use kb::wiki::{Page, PagePath};
 use serde::Deserialize;
 
@@ -71,6 +71,9 @@ struct UserEntry {
     role: String,
     #[allow(dead_code)]
     lang: String,
+    /// The groups the host sends for this user (X-User-Groups).
+    #[serde(default)]
+    groups: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,8 +147,6 @@ struct Question {
     lang: String,
     #[serde(default)]
     user: Option<String>,
-    #[serde(default)]
-    groups: Vec<String>,
     query: String,
     #[serde(default)]
     keywords: Vec<String>,
@@ -184,10 +185,18 @@ struct ExpectedEdge {
     to: String,
 }
 
-/// A page as the fixtures name it: user pages use the raw user id (`users/lily/preferences`).
+/// Who a fixture page is for, with raw group and user ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Aud {
+    Tenant,
+    Group(String),
+    User(String),
+}
+
+/// A page as the fixtures name it: group and user pages use raw ids (`users/lily/preferences`).
 struct FixturePage {
     kind: Option<Kind>,
-    owner: Option<String>,
+    audience: Aud,
     page: Page,
 }
 
@@ -209,6 +218,8 @@ struct Space {
 
 struct Tenant {
     file: TenantFile,
+    /// user id -> the groups the host sends for them.
+    user_groups: HashMap<String, Vec<String>>,
     pages: BTreeMap<String, FixturePage>,
     schemas: HashMap<String, Schema>,
     spaces: HashMap<String, Space>,
@@ -270,17 +281,34 @@ fn wiki_files(wiki: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Maps a fixture path to a real page path: `users/<raw>/…` → `users/u_<hash>/…`.
-fn to_page_path(fixture: &str) -> (String, Option<String>) {
+/// Maps a fixture path to a real page path: `users/<raw>/…` → `users/u_<hash>/…`, and
+/// `groups/<raw>/…` → `groups/g_<hash>/…`.
+fn to_page_path(fixture: &str) -> (String, Aud) {
     let segs: Vec<&str> = fixture.split('/').collect();
-    if segs.first() == Some(&"users") && segs.len() >= 2 {
-        let mut real = segs.clone();
-        let dir = user_dir_name(segs[1]);
-        real[1] = &dir;
-        (real.join("/"), Some(segs[1].to_owned()))
-    } else {
-        (fixture.to_owned(), None)
+    let (dir, aud) = match segs.as_slice() {
+        ["users", raw, ..] => (user_dir_name(raw), Aud::User(raw.to_string())),
+        ["groups", raw, ..] => (group_dir_name(raw), Aud::Group(raw.to_string())),
+        _ => return (fixture.to_owned(), Aud::Tenant),
+    };
+    let mut real = segs.clone();
+    real[1] = &dir;
+    (real.join("/"), aud)
+}
+
+/// Whether a caller with this user id and these groups may read a page.
+fn page_visible(aud: &Aud, user: Option<&str>, groups: &[String]) -> bool {
+    match aud {
+        Aud::Tenant => true,
+        Aud::Group(g) => groups.contains(g),
+        Aud::User(u) => user == Some(u.as_str()),
     }
+}
+
+/// The groups a question's caller brings: those of its user, none without a user.
+fn caller_groups(t: &Tenant, user: Option<&str>) -> Vec<String> {
+    user.and_then(|u| t.user_groups.get(u))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
@@ -292,15 +320,32 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
         report.err(format!("{name}: tenant.yaml id is {:?}", file.id));
     }
     let users: HashSet<&str> = file.users.iter().map(|u| u.id.as_str()).collect();
+    let known_groups: HashSet<&str> = file
+        .users
+        .iter()
+        .flat_map(|u| u.groups.iter())
+        .chain(
+            file.graph
+                .spaces
+                .iter()
+                .filter_map(|s| s.members.as_ref())
+                .flat_map(|m| m.groups.iter()),
+        )
+        .map(String::as_str)
+        .collect();
 
     let mut pages = BTreeMap::new();
     for (fixture, path) in wiki_files(&dir.join("wiki")) {
-        let (real, owner) = to_page_path(&fixture);
+        let (real, audience) = to_page_path(&fixture);
         let where_ = format!("{name}/wiki/{fixture}.md");
-        if let Some(o) = &owner
-            && !users.contains(o.as_str())
-        {
-            report.err(format!("{where_}: user {o:?} is not in tenant.yaml"));
+        match &audience {
+            Aud::User(u) if !users.contains(u.as_str()) => {
+                report.err(format!("{where_}: user {u:?} is not in tenant.yaml"));
+            }
+            Aud::Group(g) if !known_groups.contains(g.as_str()) => {
+                report.err(format!("{where_}: group {g:?} is not used in tenant.yaml"));
+            }
+            _ => {}
         }
         let page_path = match PagePath::parse(&real) {
             Ok(p) => p,
@@ -344,7 +389,14 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
         if is_memory && page.front.about.is_empty() {
             report.err(format!("{where_}: memory page without an anchor"));
         }
-        pages.insert(fixture, FixturePage { kind, owner, page });
+        pages.insert(
+            fixture,
+            FixturePage {
+                kind,
+                audience,
+                page,
+            },
+        );
     }
 
     let mut schemas = HashMap::new();
@@ -521,8 +573,14 @@ fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
         }
     }
 
+    let user_groups = file
+        .users
+        .iter()
+        .map(|u| (u.id.clone(), u.groups.clone()))
+        .collect();
     Tenant {
         file,
+        user_groups,
         pages,
         schemas,
         spaces,
@@ -569,8 +627,13 @@ fn check_anchors(t: &Tenant, report: &mut Report) {
                     let space = anchor.split_once(':').and_then(|(sp, rest)| {
                         rest.contains('/').then(|| &t.spaces[sp])
                     });
+                    let visible = |space: &Space| match &fp.audience {
+                        Aud::Tenant => space.visible_to(None, &[]),
+                        Aud::Group(g) => space.visible_to(None, std::slice::from_ref(g)),
+                        Aud::User(u) => space.visible_to(Some(u), &caller_groups(t, Some(u))),
+                    };
                     match space {
-                        Some(space) if !space.visible_to(fp.owner.as_deref(), &[]) => Err(format!(
+                        Some(space) if !visible(space) => Err(format!(
                             "{anchor:?}: its space is not visible to everyone who can read this page"
                         )),
                         _ => Ok(()),
@@ -579,9 +642,9 @@ fn check_anchors(t: &Tenant, report: &mut Report) {
             } else {
                 match t.pages.get(anchor) {
                     None => Err(format!("{anchor:?}: no such page")),
-                    Some(target) if target.owner.is_some() && target.owner != fp.owner => {
-                        Err(format!("{anchor:?}: another user's page"))
-                    }
+                    Some(target) if !covers(t, &fp.audience, &target.audience) => Err(format!(
+                        "{anchor:?}: not visible to everyone who can read this page"
+                    )),
                     Some(_) => Ok(()),
                 }
             };
@@ -589,6 +652,17 @@ fn check_anchors(t: &Tenant, report: &mut Report) {
                 report.err(format!("{}/wiki/{fixture}.md: anchor {e}", t.file.id));
             }
         }
+    }
+}
+
+/// Whether every reader of a page with audience `source` can also read one with `target`.
+fn covers(t: &Tenant, source: &Aud, target: &Aud) -> bool {
+    match (target, source) {
+        (Aud::Tenant, _) => true,
+        (Aud::Group(g), Aud::Group(sg)) => g == sg,
+        (Aud::Group(g), Aud::User(u)) => caller_groups(t, Some(u)).contains(g),
+        (Aud::User(u), Aud::User(su)) => u == su,
+        _ => false,
     }
 }
 
@@ -639,6 +713,7 @@ fn check_questions(
 
         for q in &qf.questions {
             let w = format!("{} ({})", q.id, fname);
+            let groups = caller_groups(t, q.user.as_deref());
             if !ids.insert(q.id.clone()) {
                 report.err(format!("{w}: duplicate id"));
             }
@@ -720,8 +795,8 @@ fn check_questions(
                     if right_slot != slot {
                         report.err(format!("{w}: {p} belongs in {right_slot}, not {slot}"));
                     }
-                    if fp.owner.is_some() && fp.owner != q.user {
-                        report.err(format!("{w}: {p} belongs to another user"));
+                    if !page_visible(&fp.audience, q.user.as_deref(), &groups) {
+                        report.err(format!("{w}: the caller can't see {p}"));
                     }
                 }
             }
@@ -741,7 +816,7 @@ fn check_questions(
             for sp in &q.must_not_spaces {
                 match t.spaces.get(sp) {
                     None => report.err(format!("{w}: unknown space {sp} in must_not_spaces")),
-                    Some(space) if space.visible_to(q.user.as_deref(), &q.groups) => report.err(
+                    Some(space) if space.visible_to(q.user.as_deref(), &groups) => report.err(
                         format!("{w}: the caller can see {sp}, so it can't be hidden"),
                     ),
                     _ => {}
@@ -750,6 +825,15 @@ fn check_questions(
             for p in q.must_not.iter().chain(&q.trap) {
                 if !t.pages.contains_key(p) {
                     report.err(format!("{w}: page {p} does not exist"));
+                }
+            }
+            for p in &q.must_not {
+                if let Some(fp) = t.pages.get(p)
+                    && page_visible(&fp.audience, q.user.as_deref(), &groups)
+                {
+                    report.err(format!(
+                        "{w}: the caller can see {p}, so it can't be hidden"
+                    ));
                 }
             }
             if !q.expect.relations.is_empty() && q.category != "graph" && q.category != "hop" {
@@ -779,7 +863,7 @@ fn check_questions(
                 if !t.schemas[&space.schema].relations.contains_key(&e.rel) {
                     report.err(format!("{w}: unknown relation {}", e.rel));
                 }
-                if !space.visible_to(q.user.as_deref(), &q.groups) {
+                if !space.visible_to(q.user.as_deref(), &groups) {
                     report.err(format!("{w}: the caller can't see space {fs_}"));
                 }
                 if !space.edges.contains(&format!("{from}|{}|{to}", e.rel)) {
