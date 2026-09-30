@@ -1,0 +1,279 @@
+tenant: swiftcargo
+questions:
+  # --- experience ---------------------------------------------------------------------------
+  - id: swiftcargo-exp-01
+    category: experience
+    milestone: M2
+    lang: en
+    query: "Customs is holding our container because the invoice doesn't match the declaration."
+    keywords: [customs hold, commercial invoice, HS code mismatch]
+    expect: { memories: [experience/customs-hold-release] }
+  - id: swiftcargo-exp-02
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "货被海关查验扣住了，怎么尽快放行？"
+    keywords: [海关扣货, 查验, 放行]
+    expect: { memories: [experience/customs-hold-release] }
+  - id: swiftcargo-exp-03
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "鹿特丹港口拥堵，要不要改港？"
+    keywords: [港口拥堵, 改港]
+    expect: { memories: [experience/port-congestion-rerouting] }
+  - id: swiftcargo-exp-04
+    category: experience
+    milestone: M2
+    lang: en
+    query: "Three cartons arrived crushed. How do we file a claim?"
+    keywords: [damaged cargo, cargo claim]
+    expect: { memories: [experience/damaged-cargo-claims] }
+  - id: swiftcargo-exp-05
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "冷库温度超标了，这批货怎么处理？"
+    keywords: [温度超标, 冷链超温]
+    expect: { memories: [experience/cold-chain-excursions] }
+  - id: swiftcargo-exp-06
+    category: experience
+    milestone: M2
+    lang: en
+    query: "The carrier says delivery failed because the address wasn't found."
+    keywords: [failed delivery, address not found]
+    expect: { memories: [experience/failed-last-mile-delivery] }
+
+  # --- expertise ----------------------------------------------------------------------------
+  - id: swiftcargo-kno-01
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "How many digits does a Chinese HS code have compared with the EU code?"
+    keywords: [HS code, 10-digit China code, 8-digit]
+    expect: { knowledge: [expertise/hs-codes] }
+  - id: swiftcargo-kno-02
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "Under FOB, when does the risk pass to the buyer?"
+    keywords: [FOB, Incoterms, risk transfer]
+    expect: { knowledge: [expertise/incoterms] }
+  - id: swiftcargo-kno-03
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "滞箱费和滞港费有什么区别？"
+    keywords: [滞箱费, 滞港费]
+    expect: { knowledge: [expertise/demurrage-detention] }
+  - id: swiftcargo-kno-04
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "What's the difference between ICC A and ICC C cover?"
+    keywords: [ICC clauses, ICC A, ICC C, cargo insurance]
+    expect: { knowledge: [expertise/cargo-insurance] }
+  - id: swiftcargo-kno-05
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "冷藏货物要保持在多少度？"
+    keywords: [冷链标准, 冷藏运输, 温度]
+    expect: { knowledge: [expertise/cold-chain-standards] }
+  - id: swiftcargo-kno-06
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "锂电池单独运输能上客机吗？"
+    keywords: [锂电池运输, 危险品, UN3480]
+    expect: { knowledge: [expertise/dangerous-goods] }
+
+  # --- decision -----------------------------------------------------------------------------
+  - id: swiftcargo-dec-01
+    category: decision
+    milestone: M2
+    lang: en
+    user: emma
+    query: "Why did we move some Rotterdam cargo onto rail?"
+    keywords: [rail shift, Rotterdam volume]
+    expect: { memories: [users/emma/decisions/switch-rotterdam-to-rail] }
+  - id: swiftcargo-dec-02
+    category: decision
+    milestone: M2
+    lang: en
+    user: emma
+    query: "What's our rule for insuring high-value shipments?"
+    keywords: [high-value insurance, insurance threshold]
+    expect: { memories: [users/emma/decisions/insure-high-value] }
+  - id: swiftcargo-dec-03
+    category: decision
+    milestone: M2
+    lang: zh
+    user: zhao
+    query: "蓝牙耳机我们最后定的是哪个编码？"
+    keywords: [蓝牙耳机归类, 耳机税号]
+    expect: { memories: [users/zhao/decisions/hs-code-earbuds] }
+  - id: swiftcargo-dec-04
+    category: decision
+    milestone: M2
+    lang: zh
+    user: zhao
+    query: "欧盟小客户为什么默认做DDP？"
+    keywords: [默认DDP, 欧盟小客户]
+    expect: { memories: [users/zhao/decisions/ddp-for-eu-smb] }
+  - id: swiftcargo-dec-05
+    category: decision
+    milestone: M2
+    lang: zh
+    user: emma
+    query: "改走中欧班列之后运输时间缩短了多少？"
+    keywords: [中欧班列, 改走铁路]
+    expect: { memories: [users/emma/decisions/switch-rotterdam-to-rail] }
+    notes: Chinese query about Emma's English decision; the alias 中欧班列 carries it.
+
+  # --- preference ---------------------------------------------------------------------------
+  - id: swiftcargo-pre-01
+    category: preference
+    milestone: M2
+    lang: en
+    user: emma
+    query: "What units and timezone should you use with me?"
+    keywords: [metric units, ETA in UTC, preferences]
+    expect: { memories: [users/emma/preferences] }
+  - id: swiftcargo-pre-02
+    category: preference
+    milestone: M2
+    lang: zh
+    user: zhao
+    query: "我的回复习惯是什么？"
+    keywords: [我的习惯, 偏好]
+    expect: { memories: [users/zhao/preferences] }
+  - id: swiftcargo-pre-03
+    category: preference
+    milestone: M2
+    lang: en
+    user: emma
+    query: "Do I prefer bullet points or paragraphs?"
+    keywords: [bullet points, preferences]
+    expect: { memories: [users/emma/preferences] }
+  - id: swiftcargo-pre-04
+    category: preference
+    milestone: M2
+    lang: zh
+    user: zhao
+    query: "提到商品的时候要不要列HS编码？"
+    keywords: [HS编码, 偏好]
+    expect: { memories: [users/zhao/preferences] }
+  - id: swiftcargo-pre-05
+    category: preference
+    milestone: M2
+    lang: en
+    user: zhao
+    query: "How should you cite regulations when answering me?"
+    keywords: [cite regulations, 法规条文, 引用出处]
+    expect: { memories: [users/zhao/preferences] }
+    notes: English query about a Chinese profile; a good agent passes the Chinese keywords too.
+
+  # --- graph --------------------------------------------------------------------------------
+  - id: swiftcargo-gra-01
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Where is shipment AWB-7781 right now?"
+    keywords: [AWB-7781, where is]
+    expect:
+      relations:
+        - { from: "network:shipment/AWB-7781", type: stored_at, to: "network:warehouse/RTM-02" }
+    trap: [expertise/demurrage-detention]
+  - id: swiftcargo-gra-02
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "AWB-7790 是哪家承运的？"
+    keywords: [AWB-7790, 承运商]
+    expect:
+      relations:
+        - { from: "network:shipment/AWB-7790", type: carried_by, to: "network:carrier/CRE" }
+  - id: swiftcargo-gra-03
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which customs declaration covers AWB-7781?"
+    keywords: [AWB-7781, customs declaration]
+    expect:
+      relations:
+        - { from: "network:shipment/AWB-7781", type: declared_under, to: "network:customs_declaration/D2026-5501" }
+    trap: [expertise/hs-codes, experience/customs-hold-release]
+  - id: swiftcargo-gra-04
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "中欧班列那条线从哪里出发，到哪里？"
+    keywords: [中欧班列, 起点, 终点]
+    expect:
+      relations:
+        - { from: "network:route/R-CKG-RTM", type: departs_from, to: "network:warehouse/CKG-01" }
+        - { from: "network:route/R-CKG-RTM", type: arrives_at, to: "network:warehouse/RTM-02" }
+  - id: swiftcargo-gra-05
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which shipment is DHL carrying?"
+    keywords: [DHL, carrier]
+    expect:
+      relations:
+        - { from: "network:shipment/AWB-7782", type: carried_by, to: "network:carrier/DHL" }
+    notes: Asked from the carrier's side, so the edge is walked backwards.
+
+  # --- hop ----------------------------------------------------------------------------------
+  - id: swiftcargo-hop-01
+    category: hop
+    milestone: M5
+    lang: zh
+    query: "目的港一直排不上泊位，货物要不要改走别的线路，额外费用怎么算？"
+    keywords: [港口拥堵, 改线]
+    expect:
+      memories: [experience/port-congestion-rerouting]
+      knowledge: [expertise/demurrage-detention]
+  - id: swiftcargo-hop-02
+    category: hop
+    milestone: M5
+    lang: en
+    query: "The consignee signed for crushed cartons without noting anything. Can we still claim, and what does our cover pay for?"
+    keywords: [damaged cargo, claim]
+    expect:
+      memories: [experience/damaged-cargo-claims]
+      knowledge: [expertise/cargo-insurance]
+
+  # --- cross_lang ---------------------------------------------------------------------------
+  - id: swiftcargo-xl-01
+    category: cross_lang
+    milestone: M5
+    lang: en
+    query: "Can we fly spare laptop power packs on passenger planes?"
+    expect: { knowledge: [expertise/dangerous-goods] }
+    notes: Chinese page; "power packs" avoids the aliases "lithium battery" and "dangerous goods".
+  - id: swiftcargo-xl-02
+    category: cross_lang
+    milestone: M5
+    lang: zh
+    query: "买方要我们把货送到门口，连进口税也一起包了，这在合同里叫什么？"
+    expect: { knowledge: [expertise/incoterms] }
+    notes: English page; the query avoids 贸易术语 and DDP.
+
+  # --- negative and isolation ---------------------------------------------------------------
+  - id: swiftcargo-neg-01
+    category: negative
+    milestone: M2
+    lang: zh
+    query: "推荐一部好看的科幻电影"
+    expect_empty: [memories, knowledge, relations]
+  - id: swiftcargo-iso-01
+    category: isolation
+    milestone: M2
+    lang: en
+    user: emma
+    query: "Which HS code did we decide on for Bluetooth earbuds?"
+    keywords: [earbuds HS code, 8518.30]
+    must_not: [users/zhao/decisions/hs-code-earbuds]
+    notes: Zhao's decision; the HS code page itself may still answer in the knowledge slot.

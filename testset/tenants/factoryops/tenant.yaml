@@ -1,0 +1,10 @@
+id: factoryops
+business: Factory equipment maintenance
+description: >
+  An auto-parts plant with stamping, welding and machining lines. Agents help maintenance
+  engineers and the plant manager with breakdowns, spare parts, welding quality, changeovers,
+  safety procedures and OEE.
+users:
+  - { id: ligong, role: maintenance lead, lang: zh }
+  - { id: sarah, role: plant manager, lang: en }
+graph_spaces: [plant]

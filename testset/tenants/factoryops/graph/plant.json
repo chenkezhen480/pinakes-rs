@@ -1,0 +1,38 @@
+{
+  "space": "plant",
+  "nodes": [
+    { "type": "machine", "key": "CNC-07", "name": "五轴加工中心 CNC-07", "aliases": ["5-axis CNC", "加工中心"] },
+    { "type": "machine", "key": "PRS-02", "name": "冲压机 PRS-02", "aliases": ["stamping press"] },
+    { "type": "machine", "key": "ROB-11", "name": "焊接机器人 ROB-11", "aliases": ["welding robot"] },
+    { "type": "machine", "key": "CNV-03", "name": "输送线 CNV-03", "aliases": ["conveyor"] },
+    { "type": "production_line", "key": "L1", "name": "冲压线 L1", "aliases": ["Stamping line"] },
+    { "type": "production_line", "key": "L2", "name": "焊装线 L2", "aliases": ["Welding line"] },
+    { "type": "production_line", "key": "L3", "name": "机加线 L3", "aliases": ["Machining line"] },
+    { "type": "part", "key": "P-BRG-6205", "name": "6205 深沟球轴承", "aliases": ["bearing 6205", "6205轴承"] },
+    { "type": "part", "key": "P-SRV-400", "name": "400W 伺服电机", "aliases": ["servo motor 400W", "伺服电机"] },
+    { "type": "part", "key": "P-NOZ-12", "name": "焊枪喷嘴 12mm", "aliases": ["welding nozzle", "喷嘴"] },
+    { "type": "supplier", "key": "sup_skf", "name": "SKF", "aliases": ["斯凯孚"] },
+    { "type": "supplier", "key": "sup_yaskawa", "name": "安川电机", "aliases": ["Yaskawa"] },
+    { "type": "supplier", "key": "sup_huarui", "name": "华锐五金", "aliases": ["Huarui Hardware"] },
+    { "type": "work_order", "key": "WO-5510", "name": "工单 WO-5510", "aliases": ["work order WO-5510"] },
+    { "type": "work_order", "key": "WO-5511", "name": "工单 WO-5511", "aliases": ["work order WO-5511"] },
+    { "type": "work_order", "key": "WO-5512", "name": "工单 WO-5512", "aliases": ["work order WO-5512"] }
+  ],
+  "edges": [
+    { "from": "machine/PRS-02", "type": "part_of", "to": "production_line/L1" },
+    { "from": "machine/ROB-11", "type": "part_of", "to": "production_line/L2" },
+    { "from": "machine/CNV-03", "type": "part_of", "to": "production_line/L2" },
+    { "from": "machine/CNC-07", "type": "part_of", "to": "production_line/L3" },
+    { "from": "machine/CNC-07", "type": "uses_part", "to": "part/P-BRG-6205" },
+    { "from": "machine/CNV-03", "type": "uses_part", "to": "part/P-BRG-6205" },
+    { "from": "machine/ROB-11", "type": "uses_part", "to": "part/P-SRV-400" },
+    { "from": "machine/ROB-11", "type": "uses_part", "to": "part/P-NOZ-12" },
+    { "from": "part/P-BRG-6205", "type": "supplied_by", "to": "supplier/sup_skf" },
+    { "from": "part/P-SRV-400", "type": "supplied_by", "to": "supplier/sup_yaskawa" },
+    { "from": "part/P-NOZ-12", "type": "supplied_by", "to": "supplier/sup_huarui" },
+    { "from": "work_order/WO-5510", "type": "repairs", "to": "machine/CNC-07" },
+    { "from": "work_order/WO-5511", "type": "repairs", "to": "machine/ROB-11" },
+    { "from": "work_order/WO-5512", "type": "repairs", "to": "machine/CNV-03" },
+    { "from": "production_line/L1", "type": "feeds", "to": "production_line/L2" }
+  ]
+}

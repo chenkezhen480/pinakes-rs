@@ -1,0 +1,10 @@
+id: paybridge
+business: Payments and risk
+description: >
+  A payment service provider for online merchants. Agents help risk analysts and merchant
+  success managers with chargebacks, fraud rules, settlements, merchant onboarding (KYC) and
+  compliance questions.
+users:
+  - { id: marco, role: risk analyst, lang: en }
+  - { id: chen, role: merchant success manager, lang: zh }
+graph_spaces: [payments]

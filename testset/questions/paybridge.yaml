@@ -1,0 +1,280 @@
+tenant: paybridge
+questions:
+  # --- experience ---------------------------------------------------------------------------
+  - id: paybridge-exp-01
+    category: experience
+    milestone: M2
+    lang: en
+    query: "How do we put together evidence to win a chargeback?"
+    keywords: [chargeback evidence, win a dispute]
+    expect: { memories: [experience/chargeback-evidence] }
+  - id: paybridge-exp-02
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "拒付申诉要准备哪些材料？"
+    keywords: [拒付申诉, 拒付举证, 申诉材料]
+    expect: { memories: [experience/chargeback-evidence] }
+    notes: Chinese query over an English playbook.
+  - id: paybridge-exp-03
+    category: experience
+    milestone: M2
+    lang: en
+    query: "A genuine customer keeps getting blocked by our fraud rules."
+    keywords: [false positive, legit payment blocked]
+    expect: { memories: [experience/false-positive-fraud-blocks] }
+  - id: paybridge-exp-04
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "商户说结算款一直没收到，怎么回复？"
+    keywords: [结算延迟, 没收到结算款]
+    expect: { memories: [experience/settlement-delays] }
+  - id: paybridge-exp-05
+    category: experience
+    milestone: M2
+    lang: en
+    query: "The merchant's KYC documents were rejected again. What do we tell them?"
+    keywords: [KYC rejection, onboarding documents rejected]
+    expect: { memories: [experience/kyc-document-rejections] }
+  - id: paybridge-exp-06
+    category: experience
+    milestone: M2
+    lang: en
+    query: "The customer's card was closed. Where does the refund go?"
+    keywords: [refund to closed card, card closed refund]
+    expect: { memories: [experience/refund-to-closed-card] }
+
+  # --- expertise ----------------------------------------------------------------------------
+  - id: paybridge-kno-01
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "What does Visa reason code 10.4 mean?"
+    keywords: [Visa 10.4, chargeback reason codes]
+    expect: { knowledge: [expertise/chargeback-reason-codes] }
+  - id: paybridge-kno-02
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "At what risk score do we block a payment?"
+    keywords: [risk scoring, block threshold, risk score]
+    expect: { knowledge: [expertise/risk-scoring] }
+  - id: paybridge-kno-03
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "跨境商户的结算周期是多久？"
+    keywords: [结算周期, 跨境, T+2]
+    expect: { knowledge: [expertise/settlement-cycles] }
+  - id: paybridge-kno-04
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "Which documents does a merchant need for KYC?"
+    keywords: [KYC requirements, merchant onboarding]
+    expect: { knowledge: [expertise/kyc-requirements] }
+  - id: paybridge-kno-05
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "Which PCI questionnaire applies if we use hosted fields?"
+    keywords: [PCI DSS, SAQ A, hosted fields]
+    expect: { knowledge: [expertise/pci-dss] }
+  - id: paybridge-kno-06
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "锁汇最长可以锁多久？"
+    keywords: [锁汇, 跨境汇率]
+    expect: { knowledge: [expertise/cross-border-fx] }
+
+  # --- decision -----------------------------------------------------------------------------
+  - id: paybridge-dec-01
+    category: decision
+    milestone: M2
+    lang: en
+    user: marco
+    query: "Why did we change the velocity rule for Voltride?"
+    keywords: [Voltride velocity, velocity threshold change]
+    expect: { memories: [users/marco/decisions/raise-velocity-threshold] }
+  - id: paybridge-dec-02
+    category: decision
+    milestone: M2
+    lang: en
+    user: marco
+    query: "Is there a reserve on Voltride's payouts, and why?"
+    keywords: [Voltride reserve, rolling reserve]
+    expect: { memories: [users/marco/decisions/reserve-voltride] }
+  - id: paybridge-dec-03
+    category: decision
+    milestone: M2
+    lang: zh
+    user: chen
+    query: "茶语当时是怎么接入的？"
+    keywords: [茶语接入, 子商户接入]
+    expect: { memories: [users/chen/decisions/teahouse-sub-merchant] }
+  - id: paybridge-dec-04
+    category: decision
+    milestone: M2
+    lang: zh
+    user: chen
+    query: "老商户的KYC复审什么时候做？"
+    keywords: [KYC复审延期, 老商户]
+    expect: { memories: [users/chen/decisions/postpone-kyc-review] }
+  - id: paybridge-dec-05
+    category: decision
+    milestone: M2
+    lang: mixed
+    user: marco
+    query: "Voltride 的保证金比例定的是多少？"
+    keywords: [Voltride, 保证金, rolling reserve]
+    expect: { memories: [users/marco/decisions/reserve-voltride] }
+
+  # --- preference ---------------------------------------------------------------------------
+  - id: paybridge-pre-01
+    category: preference
+    milestone: M2
+    lang: en
+    user: marco
+    query: "How should you present numbers to me?"
+    keywords: [numbers with thresholds, answer style]
+    expect: { memories: [users/marco/preferences] }
+  - id: paybridge-pre-02
+    category: preference
+    milestone: M2
+    lang: zh
+    user: chen
+    query: "我对回复有什么要求？"
+    keywords: [回复要求, 偏好]
+    expect: { memories: [users/chen/preferences] }
+  - id: paybridge-pre-03
+    category: preference
+    milestone: M2
+    lang: en
+    user: marco
+    query: "Should you use rule names or rule ids with me?"
+    keywords: [rule ids, preferences]
+    expect: { memories: [users/marco/preferences] }
+  - id: paybridge-pre-04
+    category: preference
+    milestone: M2
+    lang: zh
+    user: chen
+    query: "金额要用什么币种显示？"
+    keywords: [人民币, 金额]
+    expect: { memories: [users/chen/preferences] }
+  - id: paybridge-pre-05
+    category: preference
+    milestone: M2
+    lang: en
+    user: chen
+    query: "Do I want the conclusion first or the details first?"
+    keywords: [conclusion first, 先结论后细节]
+    expect: { memories: [users/chen/preferences] }
+
+  # --- graph --------------------------------------------------------------------------------
+  - id: paybridge-gra-01
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which transaction does chargeback cb_301 dispute, and which merchant was it for?"
+    keywords: [cb_301, chargeback, merchant]
+    expect:
+      relations:
+        - { from: "payments:chargeback/cb_301", type: disputes, to: "payments:transaction/txn_55002" }
+        - { from: "payments:transaction/txn_55002", type: charged_by, to: "payments:merchant/mch_902" }
+    trap: [expertise/chargeback-reason-codes, experience/chargeback-evidence]
+    notes: Two hops, chargeback to transaction to merchant.
+  - id: paybridge-gra-02
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "茶语的上级商户是谁？"
+    keywords: [茶语, 上级商户]
+    expect:
+      relations:
+        - { from: "payments:merchant/mch_901", type: sub_merchant_of, to: "payments:merchant/mch_900" }
+  - id: paybridge-gra-03
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which risk rule flagged txn_55004?"
+    keywords: [txn_55004, risk rule]
+    expect:
+      relations:
+        - { from: "payments:transaction/txn_55004", type: flagged_by, to: "payments:risk_rule/rr_velocity_5" }
+    trap: [expertise/risk-scoring, experience/false-positive-fraud-blocks]
+  - id: paybridge-gra-04
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "txn_55001 在哪个结算批次里？"
+    keywords: [txn_55001, 结算批次]
+    expect:
+      relations:
+        - { from: "payments:transaction/txn_55001", type: settled_in, to: "payments:settlement/stl_0927" }
+    trap: [expertise/settlement-cycles]
+  - id: paybridge-gra-05
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which transactions were charged for Voltride?"
+    keywords: [Voltride, transactions]
+    expect:
+      relations:
+        - { from: "payments:transaction/txn_55002", type: charged_by, to: "payments:merchant/mch_902" }
+        - { from: "payments:transaction/txn_55004", type: charged_by, to: "payments:merchant/mch_902" }
+
+  # --- hop ----------------------------------------------------------------------------------
+  - id: paybridge-hop-01
+    category: hop
+    milestone: M5
+    lang: en
+    query: "We keep losing disputes where the cardholder says it wasn't them. What evidence works, and how long do we have to respond?"
+    keywords: [chargeback evidence, dispute]
+    expect:
+      memories: [experience/chargeback-evidence]
+      knowledge: [expertise/chargeback-reason-codes]
+  - id: paybridge-hop-02
+    category: hop
+    milestone: M5
+    lang: zh
+    query: "商户说这周的结算款还没到，一般是什么原因，正常应该几天到账？"
+    keywords: [结算延迟, 到账]
+    expect:
+      memories: [experience/settlement-delays]
+      knowledge: [expertise/settlement-cycles]
+
+  # --- cross_lang ---------------------------------------------------------------------------
+  - id: paybridge-xl-01
+    category: cross_lang
+    milestone: M5
+    lang: en
+    query: "What exchange rate do we use when paying out to foreign sellers?"
+    expect: { knowledge: [expertise/cross-border-fx] }
+    notes: Chinese page; "exchange rate" and "foreign sellers" match no alias.
+  - id: paybridge-xl-02
+    category: cross_lang
+    milestone: M5
+    lang: zh
+    query: "商户的服务器能不能直接保存顾客的银行卡号？"
+    expect: { knowledge: [expertise/pci-dss] }
+    notes: English page; the query avoids PCI DSS and 支付卡安全标准.
+
+  # --- negative and isolation ---------------------------------------------------------------
+  - id: paybridge-neg-01
+    category: negative
+    milestone: M2
+    lang: en
+    query: "Translate 'good morning' into French."
+    expect_empty: [memories, knowledge, relations]
+  - id: paybridge-iso-01
+    category: isolation
+    milestone: M2
+    lang: en
+    user: marco
+    query: "Did we postpone the KYC reviews for older merchants?"
+    keywords: [KYC review postponed, periodic review]
+    must_not: [users/chen/decisions/postpone-kyc-review]
+    notes: Chen's decision; Marco may still see the KYC requirements page.

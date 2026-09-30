@@ -1,0 +1,10 @@
+id: cloudnote
+business: B2B note-taking SaaS
+description: >
+  A collaborative notes and docs product sold to companies on Team, Business and Enterprise
+  plans. Agents answer admins' questions about SSO, billing, plan limits, exports and sync, and
+  help the customer success and sales teams.
+users:
+  - { id: ana, role: customer success lead, lang: en }
+  - { id: jin, role: sales engineer, lang: zh }
+graph_spaces: [accounts]

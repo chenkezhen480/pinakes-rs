@@ -1,0 +1,10 @@
+id: swiftcargo
+business: Cross-border logistics
+description: >
+  A freight forwarder moving goods from China to Europe and North America by sea, rail and air.
+  Agents help operations planners and customs brokers with customs holds, rerouting, claims,
+  cold chain and dangerous goods.
+users:
+  - { id: emma, role: operations planner, lang: en }
+  - { id: zhao, role: customs broker, lang: zh }
+graph_spaces: [network]

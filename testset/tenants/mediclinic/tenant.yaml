@@ -1,0 +1,10 @@
+id: mediclinic
+business: Clinic network, bookings and billing
+description: >
+  A private clinic network. Agents support front-desk staff and doctors with appointments,
+  no-shows, commercial insurance direct billing, medical record requests and telemedicine rules.
+  Administrative questions only; no clinical advice.
+users:
+  - { id: hu, role: head of front desk, lang: zh }
+  - { id: grace, role: pediatrician, lang: en }
+graph_spaces: [care]

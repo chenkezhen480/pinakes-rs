@@ -1,0 +1,284 @@
+tenant: shopline
+questions:
+  # --- experience: agent playbooks in the memories slot -------------------------------------
+  - id: shopline-exp-01
+    category: experience
+    milestone: M2
+    lang: en
+    query: "The customer wants a partial refund but the parcel already shipped. What should I do?"
+    keywords: [partial refund, shipped, refund after shipment]
+    expect: { memories: [experience/partial-refund-after-shipment] }
+  - id: shopline-exp-02
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "客户已经发货了还要部分退款，应该怎么处理？"
+    keywords: [部分退款, 已发货]
+    expect: { memories: [experience/partial-refund-after-shipment] }
+    notes: Chinese query over an English playbook; the Chinese aliases carry it.
+  - id: shopline-exp-03
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "快递三天没更新物流，客户投诉了，怎么安抚？"
+    keywords: [物流延迟, 快递不更新, 催件]
+    expect: { memories: [experience/logistics-delay-complaints] }
+  - id: shopline-exp-04
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "买家两张优惠券一起用，结算的时候报错"
+    keywords: [优惠券叠加, 结算报错]
+    expect: { memories: [experience/coupon-stacking-errors] }
+  - id: shopline-exp-05
+    category: experience
+    milestone: M2
+    lang: en
+    query: "A buyer already paid and now wants to change the shipping address."
+    keywords: [change shipping address, address change]
+    expect: { memories: [experience/address-change-after-payment] }
+  - id: shopline-exp-06
+    category: experience
+    milestone: M2
+    lang: en
+    query: "A buyer says the earbuds are fake. How do we handle the complaint?"
+    keywords: [counterfeit claim, fake product, earbuds]
+    expect: { memories: [experience/counterfeit-claims] }
+
+  # --- expertise: domain pages in the knowledge slot ----------------------------------------
+  - id: shopline-kno-01
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "七天无理由退货有哪些例外商品？"
+    keywords: [七天无理由, 例外商品, 退货规则]
+    expect: { knowledge: [expertise/refund-regulations] }
+  - id: shopline-kno-02
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "What is our delivery time standard for remote areas?"
+    keywords: [shipping SLA, remote areas, delivery time]
+    expect: { knowledge: [expertise/shipping-sla] }
+    notes: English query over a Chinese page, carried by English aliases and keywords.
+  - id: shopline-kno-03
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "平台券和店铺券能一起用吗？"
+    keywords: [平台券, 店铺券, 叠加规则]
+    expect: { knowledge: [expertise/promotion-rules] }
+  - id: shopline-kno-04
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "What is the penalty for sellers caught selling counterfeits?"
+    keywords: [seller penalties, counterfeit penalty]
+    expect: { knowledge: [expertise/seller-penalties] }
+  - id: shopline-kno-05
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "怎么开增值税专用发票，需要什么资料？"
+    keywords: [增值税专用发票, 专票, 税号]
+    expect: { knowledge: [expertise/invoice-issuing] }
+  - id: shopline-kno-06
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "How many points does a Gold member need, and do they get free shipping?"
+    keywords: [Gold member, membership tiers, free shipping]
+    expect: { knowledge: [expertise/membership-tiers] }
+
+  # --- decision: the caller's own decision history ------------------------------------------
+  - id: shopline-dec-01
+    category: decision
+    milestone: M2
+    lang: en
+    user: lily
+    query: "Did we decide to refund shipping costs on partial refunds?"
+    keywords: [refund shipping cost, partial refund]
+    expect: { memories: [users/lily/decisions/refund-shipping-cost] }
+  - id: shopline-dec-02
+    category: decision
+    milestone: M2
+    lang: zh
+    user: lily
+    query: "双11优惠券预算我们定的上限是多少？"
+    keywords: [双11预算, 优惠券预算]
+    expect: { memories: [users/lily/decisions/double11-coupon-budget] }
+  - id: shopline-dec-03
+    category: decision
+    milestone: M2
+    lang: zh
+    user: wang
+    query: "棉语服饰那次假货投诉最后怎么处理的？"
+    keywords: [棉语服饰, 假货投诉处理结果]
+    expect: { memories: [users/wang/decisions/seller-s303-warning] }
+  - id: shopline-dec-04
+    category: decision
+    milestone: M2
+    lang: en
+    user: wang
+    query: "What did we decide about free shipping to Xinjiang and Tibet?"
+    keywords: [remote area shipping, Xinjiang, Tibet, free shipping]
+    expect: { memories: [users/wang/decisions/remote-area-shipping] }
+  - id: shopline-dec-05
+    category: decision
+    milestone: M2
+    lang: zh
+    user: lily
+    query: "上次关于老客户部分退款退不退运费，我们是怎么定的，效果怎样？"
+    keywords: [退运费, 老客户, 部分退款]
+    expect: { memories: [users/lily/decisions/refund-shipping-cost] }
+
+  # --- preference: the caller's profile -----------------------------------------------------
+  - id: shopline-pre-01
+    category: preference
+    milestone: M2
+    lang: zh
+    user: lily
+    query: "我的回复偏好是什么？"
+    keywords: [回复偏好, 偏好]
+    expect: { memories: [users/lily/preferences] }
+  - id: shopline-pre-02
+    category: preference
+    milestone: M2
+    lang: en
+    user: wang
+    query: "How do I like my answers formatted?"
+    keywords: [answer format, preferences]
+    expect: { memories: [users/wang/preferences] }
+  - id: shopline-pre-03
+    category: preference
+    milestone: M2
+    lang: en
+    user: lily
+    query: "Which language should replies to me use?"
+    keywords: [reply language, preferences]
+    expect: { memories: [users/lily/preferences] }
+  - id: shopline-pre-04
+    category: preference
+    milestone: M2
+    lang: zh
+    user: wang
+    query: "我习惯用哪个时区？"
+    keywords: [时区, timezone]
+    expect: { memories: [users/wang/preferences] }
+    notes: Chinese query about an English profile; relies on the bilingual keyword "timezone".
+  - id: shopline-pre-05
+    category: preference
+    milestone: M2
+    lang: zh
+    user: lily
+    query: "导出数据我一般要什么格式？"
+    keywords: [导出格式, Excel]
+    expect: { memories: [users/lily/preferences] }
+
+  # --- graph: real edges in the relations slot ----------------------------------------------
+  - id: shopline-gra-01
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which customer placed order 1042?"
+    keywords: [order 1042, placed by]
+    expect:
+      relations:
+        - { from: "commerce:order/1042", type: placed_by, to: "commerce:customer/c_5521" }
+    trap: [expertise/refund-regulations]
+    notes: The design doc's own example. "order" and "customer" are everywhere in refund prose.
+  - id: shopline-gra-02
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "订单3101用了哪张优惠券？"
+    keywords: [订单3101, 优惠券]
+    expect:
+      relations:
+        - { from: "commerce:order/3101", type: used_coupon, to: "commerce:coupon/NEWUSER-20" }
+    trap: [expertise/promotion-rules, experience/coupon-stacking-errors]
+  - id: shopline-gra-03
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "悦音数码卖的是哪个商品？"
+    keywords: [悦音数码, 商品]
+    expect:
+      relations:
+        - { from: "commerce:product/SKU-AIR-01", type: sold_by, to: "commerce:seller/s_101" }
+    notes: Asked from the seller's side, so the edge is walked backwards.
+  - id: shopline-gra-04
+    category: graph
+    milestone: M3
+    lang: en
+    query: "What's the tracking number for order 2077?"
+    keywords: [order 2077, tracking number]
+    expect:
+      relations:
+        - { from: "commerce:order/2077", type: shipped_via, to: "commerce:shipment/YT9876543210" }
+    trap: [experience/logistics-delay-complaints, expertise/shipping-sla]
+  - id: shopline-gra-05
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "林晓下过哪些订单？"
+    keywords: [林晓, 订单]
+    expect:
+      relations:
+        - { from: "commerce:order/1042", type: placed_by, to: "commerce:customer/c_5521" }
+        - { from: "commerce:order/2077", type: placed_by, to: "commerce:customer/c_5521" }
+    notes: Two edges into one customer, found by the customer's name.
+
+  # --- hop: a memory plus the knowledge it is anchored to -----------------------------------
+  - id: shopline-hop-01
+    category: hop
+    milestone: M5
+    lang: zh
+    query: "快递停了好几天，客户很生气，我们一般怎么安抚，还要补偿什么？"
+    keywords: [快递停滞, 安抚, 补偿]
+    expect:
+      memories: [experience/logistics-delay-complaints]
+      knowledge: [expertise/shipping-sla]
+    notes: The compensation amount lives in the SLA page, reached through the playbook's anchor.
+  - id: shopline-hop-02
+    category: hop
+    milestone: M5
+    lang: en
+    query: "A buyer reported counterfeit earbuds. Besides calming them down, what happens to the seller?"
+    keywords: [counterfeit claim, earbuds]
+    expect:
+      memories: [experience/counterfeit-claims]
+      knowledge: [expertise/seller-penalties]
+
+  # --- cross_lang: no shared alias, needs semantic mode -------------------------------------
+  - id: shopline-xl-01
+    category: cross_lang
+    milestone: M5
+    lang: en
+    query: "Can I get a tax receipt with my company's name on it for reimbursement?"
+    expect: { knowledge: [expertise/invoice-issuing] }
+    notes: The page is Chinese; "receipt" and "reimbursement" appear in no alias or keyword.
+  - id: shopline-xl-02
+    category: cross_lang
+    milestone: M5
+    lang: zh
+    query: "店家以次充好会有什么后果？"
+    expect: { knowledge: [expertise/seller-penalties] }
+    notes: The page is English; 以次充好 (passing off inferior goods) is not an alias.
+
+  # --- negative and isolation ---------------------------------------------------------------
+  - id: shopline-neg-01
+    category: negative
+    milestone: M2
+    lang: en
+    query: "What's the weather in Hangzhou tomorrow?"
+    expect_empty: [memories, knowledge, relations]
+  - id: shopline-iso-01
+    category: isolation
+    milestone: M2
+    lang: zh
+    user: wang
+    query: "双11优惠券预算的上限定的是多少？"
+    keywords: [双11预算, 优惠券预算]
+    must_not: [users/lily/decisions/double11-coupon-budget]
+    notes: Lily made this decision; Wang must not see it, even with the exact keywords.

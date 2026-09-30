@@ -1,0 +1,41 @@
+{
+  "space": "accounts",
+  "nodes": [
+    { "type": "workspace", "key": "ws_acme", "name": "Acme Robotics", "aliases": ["Acme", "艾克米机器人"] },
+    { "type": "workspace", "key": "ws_lumen", "name": "Lumen Studio", "aliases": ["Lumen"] },
+    { "type": "workspace", "key": "ws_bluefin", "name": "蓝鳍科技", "aliases": ["Bluefin Tech", "Bluefin"] },
+    { "type": "subscription", "key": "sub_881", "name": "Acme annual subscription", "aliases": ["sub_881"] },
+    { "type": "subscription", "key": "sub_882", "name": "Lumen monthly subscription", "aliases": ["sub_882"] },
+    { "type": "subscription", "key": "sub_883", "name": "蓝鳍科技年度订阅", "aliases": ["sub_883"] },
+    { "type": "plan", "key": "team", "name": "Team plan", "aliases": ["团队版"] },
+    { "type": "plan", "key": "business", "name": "Business plan", "aliases": ["商业版"] },
+    { "type": "plan", "key": "enterprise", "name": "Enterprise plan", "aliases": ["企业版"] },
+    { "type": "invoice", "key": "INV-2026-0912", "name": "Invoice INV-2026-0912", "aliases": [] },
+    { "type": "invoice", "key": "INV-2026-0915", "name": "Invoice INV-2026-0915", "aliases": [] },
+    { "type": "invoice", "key": "INV-2026-0920", "name": "Invoice INV-2026-0920", "aliases": [] },
+    { "type": "member", "key": "m_ana_ruiz", "name": "Ana Ruiz", "aliases": [] },
+    { "type": "member", "key": "m_jinhao", "name": "金浩", "aliases": ["Jin Hao"] },
+    { "type": "member", "key": "m_priya", "name": "Priya Nair", "aliases": ["Priya"] },
+    { "type": "integration", "key": "int_slack", "name": "Slack", "aliases": [] },
+    { "type": "integration", "key": "int_gdrive", "name": "Google Drive", "aliases": ["GDrive"] },
+    { "type": "integration", "key": "int_feishu", "name": "飞书", "aliases": ["Feishu", "Lark"] }
+  ],
+  "edges": [
+    { "from": "workspace/ws_acme", "type": "has_subscription", "to": "subscription/sub_881" },
+    { "from": "subscription/sub_881", "type": "on_plan", "to": "plan/enterprise" },
+    { "from": "workspace/ws_lumen", "type": "has_subscription", "to": "subscription/sub_882" },
+    { "from": "subscription/sub_882", "type": "on_plan", "to": "plan/team" },
+    { "from": "workspace/ws_bluefin", "type": "has_subscription", "to": "subscription/sub_883" },
+    { "from": "subscription/sub_883", "type": "on_plan", "to": "plan/business" },
+    { "from": "invoice/INV-2026-0912", "type": "billed_to", "to": "workspace/ws_acme" },
+    { "from": "invoice/INV-2026-0915", "type": "billed_to", "to": "workspace/ws_lumen" },
+    { "from": "invoice/INV-2026-0920", "type": "billed_to", "to": "workspace/ws_bluefin" },
+    { "from": "member/m_ana_ruiz", "type": "member_of", "to": "workspace/ws_acme" },
+    { "from": "member/m_jinhao", "type": "member_of", "to": "workspace/ws_bluefin" },
+    { "from": "member/m_priya", "type": "member_of", "to": "workspace/ws_lumen" },
+    { "from": "member/m_priya", "type": "member_of", "to": "workspace/ws_acme" },
+    { "from": "workspace/ws_acme", "type": "connected_to", "to": "integration/int_slack" },
+    { "from": "workspace/ws_lumen", "type": "connected_to", "to": "integration/int_gdrive" },
+    { "from": "workspace/ws_bluefin", "type": "connected_to", "to": "integration/int_feishu" }
+  ]
+}

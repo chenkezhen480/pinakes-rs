@@ -1,0 +1,284 @@
+tenant: factoryops
+questions:
+  # --- experience ---------------------------------------------------------------------------
+  - id: factoryops-exp-01
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "加工中心主轴温度报警了，怎么处理？"
+    keywords: [主轴过热, 主轴报警]
+    expect: { memories: [experience/spindle-overheating] }
+  - id: factoryops-exp-02
+    category: experience
+    milestone: M2
+    lang: en
+    query: "The CNC spindle keeps overheating. What should we check?"
+    keywords: [spindle overheating]
+    expect: { memories: [experience/spindle-overheating] }
+    notes: English query over a Chinese playbook.
+  - id: factoryops-exp-03
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "机器人焊接飞溅突然变多了"
+    keywords: [焊接飞溅, 飞溅大]
+    expect: { memories: [experience/weld-spatter-defects] }
+  - id: factoryops-exp-04
+    category: experience
+    milestone: M2
+    lang: en
+    query: "A critical spare part is out of stock and the line is down."
+    keywords: [emergency spare parts, out of stock, urgent parts]
+    expect: { memories: [experience/emergency-spare-parts] }
+  - id: factoryops-exp-05
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "换模时间太长了，怎么缩短？"
+    keywords: [换模时间长, 换型慢]
+    expect: { memories: [experience/slow-changeovers] }
+  - id: factoryops-exp-06
+    category: experience
+    milestone: M2
+    lang: en
+    query: "We had a lockout near miss: a clamp moved during maintenance."
+    keywords: [lockout near miss, LOTO near miss, stored energy]
+    expect: { memories: [experience/lockout-near-miss] }
+
+  # --- expertise ----------------------------------------------------------------------------
+  - id: factoryops-kno-01
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "主轴轴承多久换一次？"
+    keywords: [保养周期, 轴承更换, 预防性维护]
+    expect: { knowledge: [expertise/preventive-maintenance] }
+  - id: factoryops-kno-02
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "1.5毫米钢板焊接，电流电压用多少？"
+    keywords: [焊接参数, 焊接电流, 电弧电压]
+    expect: { knowledge: [expertise/welding-parameters] }
+  - id: factoryops-kno-03
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "What are the steps of SMED?"
+    keywords: [SMED, quick changeover]
+    expect: { knowledge: [expertise/smed] }
+  - id: factoryops-kno-04
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "What's the lockout-tagout procedure before maintenance?"
+    keywords: [lockout-tagout, LOTO, energy isolation]
+    expect: { knowledge: [expertise/safety-loto] }
+  - id: factoryops-kno-05
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "OEE怎么计算？"
+    keywords: [OEE, 设备综合效率]
+    expect: { knowledge: [expertise/oee-metrics] }
+  - id: factoryops-kno-06
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "What vibration level on a medium-sized machine means we should plan maintenance?"
+    keywords: [vibration analysis, ISO 10816, mm/s]
+    expect: { knowledge: [expertise/vibration-analysis] }
+
+  # --- decision -----------------------------------------------------------------------------
+  - id: factoryops-dec-01
+    category: decision
+    milestone: M2
+    lang: zh
+    user: ligong
+    query: "6205轴承的安全库存现在定的是多少？"
+    keywords: [6205库存, 轴承安全库存]
+    expect: { memories: [users/ligong/decisions/raise-bearing-stock] }
+  - id: factoryops-dec-02
+    category: decision
+    milestone: M2
+    lang: zh
+    user: ligong
+    query: "ROB-11的喷嘴多久换一次，当时是怎么定的？"
+    keywords: [ROB-11喷嘴, 喷嘴更换周期]
+    expect: { memories: [users/ligong/decisions/rob11-nozzle-every-shift] }
+  - id: factoryops-dec-03
+    category: decision
+    milestone: M2
+    lang: en
+    user: sarah
+    query: "What's the OEE target for the welding line this year?"
+    keywords: [L2 OEE target, welding line target]
+    expect: { memories: [users/sarah/decisions/oee-target-l2] }
+  - id: factoryops-dec-04
+    category: decision
+    milestone: M2
+    lang: en
+    user: sarah
+    query: "Did we decide to find a second supplier for the servo motors?"
+    keywords: [dual sourcing, second supplier servo]
+    expect: { memories: [users/sarah/decisions/dual-source-servo] }
+  - id: factoryops-dec-05
+    category: decision
+    milestone: M2
+    lang: en
+    user: ligong
+    query: "Why did we raise the bearing safety stock?"
+    keywords: [bearing safety stock]
+    expect: { memories: [users/ligong/decisions/raise-bearing-stock] }
+    notes: English query about a Chinese decision.
+
+  # --- preference ---------------------------------------------------------------------------
+  - id: factoryops-pre-01
+    category: preference
+    milestone: M2
+    lang: zh
+    user: ligong
+    query: "我的偏好是什么？"
+    keywords: [偏好]
+    expect: { memories: [users/ligong/preferences] }
+  - id: factoryops-pre-02
+    category: preference
+    milestone: M2
+    lang: en
+    user: sarah
+    query: "When do I want the weekly plant report?"
+    keywords: [Friday report, weekly]
+    expect: { memories: [users/sarah/preferences] }
+  - id: factoryops-pre-03
+    category: preference
+    milestone: M2
+    lang: zh
+    user: ligong
+    query: "好几个问题的时候要怎么排序给我？"
+    keywords: [按优先级排序]
+    expect: { memories: [users/ligong/preferences] }
+  - id: factoryops-pre-04
+    category: preference
+    milestone: M2
+    lang: en
+    user: sarah
+    query: "Should reports to me start with the KPIs?"
+    keywords: [KPI first, reporting style]
+    expect: { memories: [users/sarah/preferences] }
+  - id: factoryops-pre-05
+    category: preference
+    milestone: M2
+    lang: zh
+    user: sarah
+    query: "给我的报告要不要配图表？"
+    keywords: [图表, charts]
+    expect: { memories: [users/sarah/preferences] }
+    notes: Chinese query about an English profile.
+
+  # --- graph --------------------------------------------------------------------------------
+  - id: factoryops-gra-01
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "ROB-11 用了哪些备件？"
+    keywords: [ROB-11, 备件]
+    expect:
+      relations:
+        - { from: "plant:machine/ROB-11", type: uses_part, to: "plant:part/P-SRV-400" }
+        - { from: "plant:machine/ROB-11", type: uses_part, to: "plant:part/P-NOZ-12" }
+    trap: [experience/weld-spatter-defects]
+  - id: factoryops-gra-02
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Who supplies the 6205 bearing?"
+    keywords: [bearing 6205, supplier]
+    expect:
+      relations:
+        - { from: "plant:part/P-BRG-6205", type: supplied_by, to: "plant:supplier/sup_skf" }
+    trap: [expertise/preventive-maintenance]
+  - id: factoryops-gra-03
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "工单WO-5512修的是哪台设备，它在哪条产线上？"
+    keywords: [WO-5512, 设备, 产线]
+    expect:
+      relations:
+        - { from: "plant:work_order/WO-5512", type: repairs, to: "plant:machine/CNV-03" }
+        - { from: "plant:machine/CNV-03", type: part_of, to: "plant:production_line/L2" }
+    notes: Two hops, work order to machine to line.
+  - id: factoryops-gra-04
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which machines use the 6205 bearing?"
+    keywords: [bearing 6205, machines]
+    expect:
+      relations:
+        - { from: "plant:machine/CNC-07", type: uses_part, to: "plant:part/P-BRG-6205" }
+        - { from: "plant:machine/CNV-03", type: uses_part, to: "plant:part/P-BRG-6205" }
+    trap: [expertise/preventive-maintenance]
+    notes: Asked from the part's side; two edges walked backwards.
+  - id: factoryops-gra-05
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "冲压线停了会影响哪条产线？"
+    keywords: [冲压线, 下游]
+    expect:
+      relations:
+        - { from: "plant:production_line/L1", type: feeds, to: "plant:production_line/L2" }
+
+  # --- hop ----------------------------------------------------------------------------------
+  - id: factoryops-hop-01
+    category: hop
+    milestone: M5
+    lang: zh
+    query: "加工中心主轴一直报温度高，除了排查，平时还该按什么周期保养？"
+    keywords: [主轴温度高, 排查]
+    expect:
+      memories: [experience/spindle-overheating]
+      knowledge: [expertise/preventive-maintenance]
+  - id: factoryops-hop-02
+    category: hop
+    milestone: M5
+    lang: en
+    query: "Spatter got much worse on the robot cell. What's the usual fix, and which gas mix and current should we run?"
+    keywords: [weld spatter, robot]
+    expect:
+      memories: [experience/weld-spatter-defects]
+      knowledge: [expertise/welding-parameters]
+
+  # --- cross_lang ---------------------------------------------------------------------------
+  - id: factoryops-xl-01
+    category: cross_lang
+    milestone: M5
+    lang: zh
+    query: "机器抖得厉害，是不是快坏了？"
+    expect: { knowledge: [expertise/vibration-analysis] }
+    notes: English page; 抖得厉害 avoids the aliases 振动分析 and 振动监测.
+  - id: factoryops-xl-02
+    category: cross_lang
+    milestone: M5
+    lang: en
+    query: "Which single number tells us how productive a line really is?"
+    expect: { knowledge: [expertise/oee-metrics] }
+    notes: Chinese page; the query avoids OEE and "overall equipment effectiveness".
+
+  # --- negative and isolation ---------------------------------------------------------------
+  - id: factoryops-neg-01
+    category: negative
+    milestone: M2
+    lang: zh
+    query: "明天股市会涨吗？"
+    expect_empty: [memories, knowledge, relations]
+  - id: factoryops-iso-01
+    category: isolation
+    milestone: M2
+    lang: en
+    user: sarah
+    query: "What's the safety stock for 6205 bearings now?"
+    keywords: [bearing safety stock, 6205]
+    must_not: [users/ligong/decisions/raise-bearing-stock]
+    notes: Li Gong's decision; Sarah may still get the part and supplier through the graph.

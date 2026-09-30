@@ -1,0 +1,282 @@
+tenant: cloudnote
+questions:
+  # --- experience ---------------------------------------------------------------------------
+  - id: cloudnote-exp-01
+    category: experience
+    milestone: M2
+    lang: en
+    query: "Users are stuck in an SSO login loop with Okta. How do we fix it?"
+    keywords: [SSO login loop, Okta, SAML redirect loop]
+    expect: { memories: [experience/sso-login-loops] }
+  - id: cloudnote-exp-02
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "单点登录一直跳回登录页，怎么排查？"
+    keywords: [单点登录失败, 登录死循环, SSO]
+    expect: { memories: [experience/sso-login-loops] }
+  - id: cloudnote-exp-03
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "客户续费扣款失败了，我们该怎么跟进？"
+    keywords: [续费失败, 扣款失败]
+    expect: { memories: [experience/failed-card-renewals] }
+    notes: Chinese query over an English playbook.
+  - id: cloudnote-exp-04
+    category: experience
+    milestone: M2
+    lang: en
+    query: "A customer is scared that downgrading will delete their notes."
+    keywords: [downgrade, data loss, plan downgrade]
+    expect: { memories: [experience/downgrade-data-loss-fears] }
+  - id: cloudnote-exp-05
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "客户公司合并了，想把两个工作区合成一个。"
+    keywords: [工作区合并, 合并工作区]
+    expect: { memories: [experience/workspace-migration] }
+  - id: cloudnote-exp-06
+    category: experience
+    milestone: M2
+    lang: en
+    query: "Someone edited a note offline and now there's a conflicting copy."
+    keywords: [sync conflict, conflicting copy, offline edits]
+    expect: { memories: [experience/sync-conflicts] }
+
+  # --- expertise ----------------------------------------------------------------------------
+  - id: cloudnote-kno-01
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "Which plans include SSO and SCIM provisioning?"
+    keywords: [SSO setup, SCIM]
+    expect: { knowledge: [expertise/sso-setup] }
+  - id: cloudnote-kno-02
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "How many days of version history does the Team plan keep?"
+    keywords: [version history, plan limits, Team]
+    expect: { knowledge: [expertise/plan-limits] }
+  - id: cloudnote-kno-03
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "欠费多少天后工作区会变成只读？"
+    keywords: [宽限期, 欠费, 只读]
+    expect: { knowledge: [expertise/billing-dunning] }
+  - id: cloudnote-kno-04
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "How do I export the whole workspace as Markdown?"
+    keywords: [export workspace, Markdown, data export]
+    expect: { knowledge: [expertise/data-export] }
+  - id: cloudnote-kno-05
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "How does sync merge edits made on different devices?"
+    keywords: [sync engine, CRDT, merge]
+    expect: { knowledge: [expertise/sync-engine] }
+  - id: cloudnote-kno-06
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "中国区的数据存在哪里？"
+    keywords: [数据驻留, 中国区, 上海]
+    expect: { knowledge: [expertise/data-residency] }
+
+  # --- decision -----------------------------------------------------------------------------
+  - id: cloudnote-dec-01
+    category: decision
+    milestone: M2
+    lang: en
+    user: ana
+    query: "Why did we give Acme extra time to pay their invoice?"
+    keywords: [Acme grace period, grace extension]
+    expect: { memories: [users/ana/decisions/extend-grace-period-acme] }
+  - id: cloudnote-dec-02
+    category: decision
+    milestone: M2
+    lang: en
+    user: ana
+    query: "What did we decide about SSO for Business customers?"
+    keywords: [SSO add-on, Business plan]
+    expect: { memories: [users/ana/decisions/sso-for-business-plan] }
+  - id: cloudnote-dec-03
+    category: decision
+    milestone: M2
+    lang: zh
+    user: jin
+    query: "飞书集成为什么被提前做了？"
+    keywords: [飞书集成, 蓝鳍科技]
+    expect: { memories: [users/jin/decisions/bluefin-feishu-integration] }
+  - id: cloudnote-dec-04
+    category: decision
+    milestone: M2
+    lang: zh
+    user: jin
+    query: "中国客户的工作区默认开在哪个区域，当时是怎么定的？"
+    keywords: [中国区部署, 上海区域]
+    expect: { memories: [users/jin/decisions/china-region-hosting] }
+  - id: cloudnote-dec-05
+    category: decision
+    milestone: M2
+    lang: en
+    user: ana
+    query: "Did the grace period extension for Acme Robotics work out?"
+    keywords: [Acme renewal, grace period]
+    expect: { memories: [users/ana/decisions/extend-grace-period-acme] }
+
+  # --- preference ---------------------------------------------------------------------------
+  - id: cloudnote-pre-01
+    category: preference
+    milestone: M2
+    lang: en
+    user: ana
+    query: "What's my preferred answer style?"
+    keywords: [preferences, how I like answers]
+    expect: { memories: [users/ana/preferences] }
+  - id: cloudnote-pre-02
+    category: preference
+    milestone: M2
+    lang: zh
+    user: jin
+    query: "我喜欢什么样的回复方式？"
+    keywords: [回复方式, 偏好]
+    expect: { memories: [users/jin/preferences] }
+  - id: cloudnote-pre-03
+    category: preference
+    milestone: M2
+    lang: en
+    user: ana
+    query: "When do I want the weekly account summary?"
+    keywords: [Monday summary, weekly summary]
+    expect: { memories: [users/ana/preferences] }
+  - id: cloudnote-pre-04
+    category: preference
+    milestone: M2
+    lang: en
+    user: jin
+    query: "Do I want tables when comparing plans?"
+    keywords: [tables, 表格, 对比表]
+    expect: { memories: [users/jin/preferences] }
+  - id: cloudnote-pre-05
+    category: preference
+    milestone: M2
+    lang: zh
+    user: ana
+    query: "我的回复里要不要带工单链接？"
+    keywords: [工单链接, ticket links]
+    expect: { memories: [users/ana/preferences] }
+
+  # --- graph --------------------------------------------------------------------------------
+  - id: cloudnote-gra-01
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which plan is Lumen Studio on?"
+    keywords: [Lumen Studio, plan]
+    expect:
+      relations:
+        - { from: "accounts:workspace/ws_lumen", type: has_subscription, to: "accounts:subscription/sub_882" }
+        - { from: "accounts:subscription/sub_882", type: on_plan, to: "accounts:plan/team" }
+    trap: [expertise/plan-limits]
+    notes: Two hops, workspace to subscription to plan; the plans table shares every keyword.
+  - id: cloudnote-gra-02
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "蓝鳍科技接入了哪些第三方集成？"
+    keywords: [蓝鳍科技, 集成]
+    expect:
+      relations:
+        - { from: "accounts:workspace/ws_bluefin", type: connected_to, to: "accounts:integration/int_feishu" }
+  - id: cloudnote-gra-03
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which customer is invoice INV-2026-0915 billed to?"
+    keywords: [INV-2026-0915, billed to]
+    expect:
+      relations:
+        - { from: "accounts:invoice/INV-2026-0915", type: billed_to, to: "accounts:workspace/ws_lumen" }
+    trap: [expertise/billing-dunning]
+  - id: cloudnote-gra-04
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which workspaces does Priya belong to?"
+    keywords: [Priya, workspaces]
+    expect:
+      relations:
+        - { from: "accounts:member/m_priya", type: member_of, to: "accounts:workspace/ws_lumen" }
+        - { from: "accounts:member/m_priya", type: member_of, to: "accounts:workspace/ws_acme" }
+  - id: cloudnote-gra-05
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "Acme 用的是什么套餐？"
+    keywords: [Acme, 套餐]
+    expect:
+      relations:
+        - { from: "accounts:workspace/ws_acme", type: has_subscription, to: "accounts:subscription/sub_881" }
+        - { from: "accounts:subscription/sub_881", type: on_plan, to: "accounts:plan/enterprise" }
+    trap: [expertise/plan-limits, expertise/sso-setup]
+
+  # --- hop ----------------------------------------------------------------------------------
+  - id: cloudnote-hop-01
+    category: hop
+    milestone: M5
+    lang: en
+    query: "An admin is stuck in a SAML redirect loop. What usually fixes it, and what are the setup requirements?"
+    keywords: [SAML redirect loop]
+    expect:
+      memories: [experience/sso-login-loops]
+      knowledge: [expertise/sso-setup]
+  - id: cloudnote-hop-02
+    category: hop
+    milestone: M5
+    lang: en
+    query: "The customer's card keeps getting declined on renewal. How long until they lose access?"
+    keywords: [card declined, renewal]
+    expect:
+      memories: [experience/failed-card-renewals]
+      knowledge: [expertise/billing-dunning]
+    notes: The 14-day read-only rule is in the dunning page, reached through the playbook's anchor.
+
+  # --- cross_lang ---------------------------------------------------------------------------
+  - id: cloudnote-xl-01
+    category: cross_lang
+    milestone: M5
+    lang: en
+    query: "Where are European customers' files physically kept?"
+    expect: { knowledge: [expertise/data-residency] }
+    notes: Chinese page; "physically kept" and "European customers" match no alias.
+  - id: cloudnote-xl-02
+    category: cross_lang
+    milestone: M5
+    lang: zh
+    query: "两台电脑断网时都改了同一段话，最后以谁为准？"
+    expect: { knowledge: [expertise/sync-engine] }
+    notes: English page; 断网 and 同一段话 avoid the aliases 离线模式 and 同步机制.
+
+  # --- negative and isolation ---------------------------------------------------------------
+  - id: cloudnote-neg-01
+    category: negative
+    milestone: M2
+    lang: zh
+    query: "帮我写一首关于秋天的诗"
+    expect_empty: [memories, knowledge, relations]
+  - id: cloudnote-iso-01
+    category: isolation
+    milestone: M2
+    lang: en
+    user: ana
+    query: "Which region did we decide to host Chinese customers in?"
+    keywords: [China region, Shanghai region]
+    must_not: [users/jin/decisions/china-region-hosting]
+    notes: Jin's decision; Ana may still get the data residency page in the knowledge slot.

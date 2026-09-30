@@ -1,0 +1,699 @@
+//! Checks that `testset/` is internally consistent: pages parse and follow the wiki rules,
+//! anchors and graph data resolve, and every question points at things that exist.
+//! Run `cargo test --test testset -- --nocapture` to see the per-category counts.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use kb::kinds::Kind;
+use kb::tenants::user_dir_name;
+use kb::wiki::{Page, PagePath};
+use serde::Deserialize;
+
+fn testset_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("testset")
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TenantFile {
+    id: String,
+    business: String,
+    #[allow(dead_code)]
+    description: String,
+    users: Vec<UserEntry>,
+    graph_spaces: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserEntry {
+    id: String,
+    #[allow(dead_code)]
+    role: String,
+    #[allow(dead_code)]
+    lang: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaNode {
+    #[allow(dead_code)]
+    en: String,
+    #[allow(dead_code)]
+    zh: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    aliases: Vec<String>,
+    #[allow(dead_code)]
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaRelation {
+    from: String,
+    to: String,
+    #[allow(dead_code)]
+    en: String,
+    #[allow(dead_code)]
+    zh: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphData {
+    space: String,
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphNode {
+    #[serde(rename = "type")]
+    node_type: String,
+    key: String,
+    name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    aliases: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphEdge {
+    from: String,
+    #[serde(rename = "type")]
+    rel: String,
+    to: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionFile {
+    tenant: String,
+    questions: Vec<Question>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Question {
+    id: String,
+    category: String,
+    milestone: String,
+    lang: String,
+    #[serde(default)]
+    user: Option<String>,
+    query: String,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    expect: Expect,
+    #[serde(default)]
+    expect_empty: Vec<String>,
+    #[serde(default)]
+    must_not: Vec<String>,
+    #[serde(default)]
+    trap: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Expect {
+    #[serde(default)]
+    memories: Vec<String>,
+    #[serde(default)]
+    knowledge: Vec<String>,
+    #[serde(default)]
+    relations: Vec<ExpectedEdge>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpectedEdge {
+    from: String,
+    #[serde(rename = "type")]
+    rel: String,
+    to: String,
+}
+
+/// A page as the fixtures name it: user pages use the raw user id (`users/lily/preferences`).
+struct FixturePage {
+    kind: Option<Kind>,
+    owner: Option<String>,
+    page: Page,
+}
+
+struct Space {
+    nodes: HashMap<String, SchemaNode>,
+    relations: HashMap<String, SchemaRelation>,
+    /// `type/key` of every node in the data.
+    instances: HashSet<String>,
+    /// `from|rel|to`, all as `type/key`.
+    edges: HashSet<String>,
+}
+
+struct Tenant {
+    file: TenantFile,
+    pages: BTreeMap<String, FixturePage>,
+    spaces: HashMap<String, Space>,
+}
+
+struct Report {
+    errors: Vec<String>,
+}
+
+impl Report {
+    fn err(&mut self, msg: impl Into<String>) {
+        self.errors.push(msg.into());
+    }
+}
+
+fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+        Err(_) => Vec::new(),
+    };
+    out.sort();
+    out
+}
+
+/// Walks `wiki/` and returns fixture paths (raw user ids) with their files.
+fn wiki_files(wiki: &Path) -> Vec<(String, PathBuf)> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+        for p in read_dir_sorted(dir) {
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else if p.extension().is_some_and(|e| e == "md") {
+                let rel = p.strip_prefix(base).unwrap().with_extension("");
+                let rel = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push((rel, p));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(wiki, wiki, &mut out);
+    out
+}
+
+/// Maps a fixture path to a real page path: `users/<raw>/…` → `users/u_<hash>/…`.
+fn to_page_path(fixture: &str) -> (String, Option<String>) {
+    let segs: Vec<&str> = fixture.split('/').collect();
+    if segs.first() == Some(&"users") && segs.len() >= 2 {
+        let mut real = segs.clone();
+        let dir = user_dir_name(segs[1]);
+        real[1] = &dir;
+        (real.join("/"), Some(segs[1].to_owned()))
+    } else {
+        (fixture.to_owned(), None)
+    }
+}
+
+fn load_tenant(dir: &Path, report: &mut Report) -> Tenant {
+    let name = dir.file_name().unwrap().to_str().unwrap().to_owned();
+    let file: TenantFile =
+        serde_norway::from_str(&fs::read_to_string(dir.join("tenant.yaml")).unwrap())
+            .unwrap_or_else(|e| panic!("{name}/tenant.yaml: {e}"));
+    if file.id != name {
+        report.err(format!("{name}: tenant.yaml id is {:?}", file.id));
+    }
+    let users: HashSet<&str> = file.users.iter().map(|u| u.id.as_str()).collect();
+
+    let mut pages = BTreeMap::new();
+    for (fixture, path) in wiki_files(&dir.join("wiki")) {
+        let (real, owner) = to_page_path(&fixture);
+        let where_ = format!("{name}/wiki/{fixture}.md");
+        if let Some(o) = &owner
+            && !users.contains(o.as_str())
+        {
+            report.err(format!("{where_}: user {o:?} is not in tenant.yaml"));
+        }
+        let page_path = match PagePath::parse(&real) {
+            Ok(p) => p,
+            Err(e) => {
+                report.err(format!("{where_}: {e}"));
+                continue;
+            }
+        };
+        let text = fs::read_to_string(&path).unwrap();
+        let page = match Page::parse(page_path.clone(), &text) {
+            Ok(p) => p,
+            Err(e) => {
+                report.err(format!("{where_}: {e}"));
+                continue;
+            }
+        };
+        let kind = page_path.kind();
+        if page.front.kind != kind {
+            report.err(format!(
+                "{where_}: front matter kind {:?} but folder says {kind:?}",
+                page.front.kind
+            ));
+        }
+        for (field, missing) in [
+            ("title", page.front.title.is_none()),
+            ("summary", page.front.summary.is_none()),
+            ("aliases", page.front.aliases.is_empty()),
+            ("updated", page.front.updated.is_none()),
+        ] {
+            if missing {
+                report.err(format!("{where_}: missing {field}"));
+            }
+        }
+        if page.body.trim().is_empty() {
+            report.err(format!("{where_}: empty body"));
+        }
+        let is_memory = matches!(
+            kind,
+            Some(Kind::Experience | Kind::Decision | Kind::Preference)
+        );
+        if is_memory && page.front.about.is_empty() {
+            report.err(format!("{where_}: memory page without an anchor"));
+        }
+        pages.insert(fixture, FixturePage { kind, owner, page });
+    }
+
+    let mut spaces = HashMap::new();
+    for space in &file.graph_spaces {
+        let Some(schema) = pages.get(&format!("graph/{space}")) else {
+            report.err(format!("{name}: no schema page graph/{space}.md"));
+            continue;
+        };
+        let extra = &schema.page.front.extra;
+        let nodes: HashMap<String, SchemaNode> = extra
+            .get("nodes")
+            .cloned()
+            .map(serde_norway::from_value)
+            .transpose()
+            .unwrap_or_else(|e| panic!("{name}/graph/{space}.md nodes: {e}"))
+            .unwrap_or_default();
+        let relations: HashMap<String, SchemaRelation> = extra
+            .get("relations")
+            .cloned()
+            .map(serde_norway::from_value)
+            .transpose()
+            .unwrap_or_else(|e| panic!("{name}/graph/{space}.md relations: {e}"))
+            .unwrap_or_default();
+        if nodes.is_empty() || relations.is_empty() {
+            report.err(format!("{name}/graph/{space}.md: no nodes or relations"));
+        }
+        for (rel, r) in &relations {
+            for end in [&r.from, &r.to] {
+                if !nodes.contains_key(end) {
+                    report.err(format!(
+                        "{name}/graph/{space}.md: {rel} uses unknown type {end}"
+                    ));
+                }
+            }
+            if r.aliases.is_empty() {
+                report.err(format!("{name}/graph/{space}.md: {rel} has no aliases"));
+            }
+        }
+
+        let data_path = dir.join("graph").join(format!("{space}.json"));
+        let data: GraphData = serde_json::from_str(
+            &fs::read_to_string(&data_path)
+                .unwrap_or_else(|_| panic!("missing {}", data_path.display())),
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", data_path.display()));
+        let dwhere = format!("{name}/graph/{space}.json");
+        if data.space != *space {
+            report.err(format!("{dwhere}: space is {:?}", data.space));
+        }
+        let mut instances = HashSet::new();
+        let mut types_of = HashMap::new();
+        for n in &data.nodes {
+            if !nodes.contains_key(&n.node_type) {
+                report.err(format!(
+                    "{dwhere}: node {} has unknown type {}",
+                    n.key, n.node_type
+                ));
+            }
+            if n.name.trim().is_empty() {
+                report.err(format!("{dwhere}: node {} has no name", n.key));
+            }
+            let id = format!("{}/{}", n.node_type, n.key);
+            if !instances.insert(id.clone()) {
+                report.err(format!("{dwhere}: duplicate node {id}"));
+            }
+            types_of.insert(id, n.node_type.clone());
+        }
+        let mut edges = HashSet::new();
+        for e in &data.edges {
+            let Some(r) = relations.get(&e.rel) else {
+                report.err(format!("{dwhere}: edge uses unknown relation {}", e.rel));
+                continue;
+            };
+            for (end, want) in [(&e.from, &r.from), (&e.to, &r.to)] {
+                match types_of.get(end) {
+                    None => report.err(format!("{dwhere}: edge end {end} does not exist")),
+                    Some(t) if t != want => report.err(format!(
+                        "{dwhere}: {} expects {want} but {end} is a {t}",
+                        e.rel
+                    )),
+                    _ => {}
+                }
+            }
+            if !edges.insert(format!("{}|{}|{}", e.from, e.rel, e.to)) {
+                report.err(format!(
+                    "{dwhere}: duplicate edge {} {} {}",
+                    e.from, e.rel, e.to
+                ));
+            }
+        }
+        spaces.insert(
+            space.clone(),
+            Space {
+                nodes,
+                relations,
+                instances,
+                edges,
+            },
+        );
+    }
+
+    Tenant {
+        file,
+        pages,
+        spaces,
+    }
+}
+
+/// Resolves `space:type` or `space:type/key`; returns an error message if it doesn't resolve.
+fn check_entity(t: &Tenant, entity: &str) -> Result<(), String> {
+    let (space, rest) = entity
+        .split_once(':')
+        .ok_or_else(|| format!("{entity:?} is not an entity"))?;
+    let s = t
+        .spaces
+        .get(space)
+        .ok_or_else(|| format!("{entity:?}: unknown graph space {space}"))?;
+    match rest.split_once('/') {
+        None => s
+            .nodes
+            .contains_key(rest)
+            .then_some(())
+            .ok_or_else(|| format!("{entity:?}: unknown node type {rest}")),
+        Some((ty, _)) => {
+            if !s.nodes.contains_key(ty) {
+                return Err(format!("{entity:?}: unknown node type {ty}"));
+            }
+            s.instances
+                .contains(rest)
+                .then_some(())
+                .ok_or_else(|| format!("{entity:?}: no such node in the graph data"))
+        }
+    }
+}
+
+fn check_anchors(t: &Tenant, report: &mut Report) {
+    for (fixture, fp) in &t.pages {
+        for anchor in &fp.page.front.about {
+            let res = if anchor.contains(':') {
+                check_entity(t, anchor)
+            } else {
+                match t.pages.get(anchor) {
+                    None => Err(format!("{anchor:?}: no such page")),
+                    Some(target) if target.owner.is_some() && target.owner != fp.owner => {
+                        Err(format!("{anchor:?}: another user's page"))
+                    }
+                    Some(_) => Ok(()),
+                }
+            };
+            if let Err(e) = res {
+                report.err(format!("{}/wiki/{fixture}.md: anchor {e}", t.file.id));
+            }
+        }
+    }
+}
+
+/// Lowercased title, aliases and keywords of a page: what keyword search can match on.
+fn page_terms(page: &Page) -> Vec<String> {
+    let mut terms: Vec<String> = page.front.aliases.clone();
+    terms.extend(page.front.title.clone());
+    if let Some(serde_norway::Value::Sequence(kw)) = page.front.extra.get("keywords") {
+        terms.extend(kw.iter().filter_map(|v| v.as_str().map(str::to_owned)));
+    }
+    terms.into_iter().map(|t| t.to_lowercase()).collect()
+}
+
+const CATEGORIES: &[(&str, &str)] = &[
+    ("experience", "M2"),
+    ("expertise", "M2"),
+    ("decision", "M2"),
+    ("preference", "M2"),
+    ("graph", "M3"),
+    ("hop", "M5"),
+    ("cross_lang", "M5"),
+    ("negative", "M2"),
+    ("isolation", "M2"),
+];
+const SLOTS: &[&str] = &["memories", "knowledge", "relations"];
+
+fn check_questions(
+    tenants: &HashMap<String, Tenant>,
+    report: &mut Report,
+) -> BTreeMap<String, BTreeMap<String, usize>> {
+    let categories: HashMap<&str, &str> = CATEGORIES.iter().copied().collect();
+    let mut ids = HashSet::new();
+    let mut referenced: HashSet<(String, String)> = HashSet::new();
+    // category -> tenant -> count
+    let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut langs: BTreeMap<String, usize> = BTreeMap::new();
+
+    for path in read_dir_sorted(&testset_dir().join("questions")) {
+        let fname = path.file_name().unwrap().to_str().unwrap().to_owned();
+        let qf: QuestionFile = serde_norway::from_str(&fs::read_to_string(&path).unwrap())
+            .unwrap_or_else(|e| panic!("questions/{fname}: {e}"));
+        let Some(t) = tenants.get(&qf.tenant) else {
+            report.err(format!("questions/{fname}: unknown tenant {}", qf.tenant));
+            continue;
+        };
+        let users: HashSet<&str> = t.file.users.iter().map(|u| u.id.as_str()).collect();
+
+        for q in &qf.questions {
+            let w = format!("{} ({})", q.id, fname);
+            if !ids.insert(q.id.clone()) {
+                report.err(format!("{w}: duplicate id"));
+            }
+            match categories.get(q.category.as_str()) {
+                None => report.err(format!("{w}: unknown category {}", q.category)),
+                Some(m) if *m != q.milestone => report.err(format!(
+                    "{w}: category {} belongs to {m}, not {}",
+                    q.category, q.milestone
+                )),
+                _ => {}
+            }
+            if !["en", "zh", "mixed"].contains(&q.lang.as_str()) {
+                report.err(format!("{w}: unknown lang {}", q.lang));
+            }
+            if q.query.trim().is_empty() {
+                report.err(format!("{w}: empty query"));
+            }
+            if q.keywords.iter().any(|k| k.trim().is_empty()) {
+                report.err(format!("{w}: empty keyword"));
+            }
+            if let Some(u) = &q.user
+                && !users.contains(u.as_str())
+            {
+                report.err(format!("{w}: unknown user {u}"));
+            }
+            *counts
+                .entry(q.category.clone())
+                .or_default()
+                .entry(qf.tenant.clone())
+                .or_default() += 1;
+            *langs.entry(q.lang.clone()).or_default() += 1;
+
+            let has_expectation = !q.expect.memories.is_empty()
+                || !q.expect.knowledge.is_empty()
+                || !q.expect.relations.is_empty();
+            match q.category.as_str() {
+                "negative" => {
+                    if has_expectation || q.expect_empty.len() != SLOTS.len() {
+                        report.err(format!("{w}: negative questions expect every slot empty"));
+                    }
+                }
+                "isolation" => {
+                    if q.must_not.is_empty() || q.user.is_none() {
+                        report.err(format!("{w}: isolation needs a user and must_not"));
+                    }
+                }
+                _ if !has_expectation => report.err(format!("{w}: expects nothing")),
+                _ => {}
+            }
+            for s in &q.expect_empty {
+                if !SLOTS.contains(&s.as_str()) {
+                    report.err(format!("{w}: unknown slot {s} in expect_empty"));
+                }
+            }
+
+            let slot_pages = [
+                ("memories", &q.expect.memories),
+                ("knowledge", &q.expect.knowledge),
+            ];
+            for (slot, list) in slot_pages {
+                for p in list {
+                    let Some(fp) = t.pages.get(p) else {
+                        report.err(format!("{w}: expected page {p} does not exist"));
+                        continue;
+                    };
+                    referenced.insert((t.file.id.clone(), p.clone()));
+                    let right_slot = match fp.kind {
+                        Some(Kind::Experience | Kind::Decision | Kind::Preference) => "memories",
+                        Some(Kind::Expertise | Kind::Graph) => "knowledge",
+                        None => "none",
+                    };
+                    if right_slot != slot {
+                        report.err(format!("{w}: {p} belongs in {right_slot}, not {slot}"));
+                    }
+                    if fp.owner.is_some() && fp.owner != q.user {
+                        report.err(format!("{w}: {p} belongs to another user"));
+                    }
+                }
+            }
+            // A cross-language question must not be answerable by plain keyword matching: its
+            // query may not contain any alias, keyword or title of the page it expects.
+            if q.category == "cross_lang" {
+                let query = q.query.to_lowercase();
+                for p in q.expect.memories.iter().chain(&q.expect.knowledge) {
+                    let Some(fp) = t.pages.get(p) else { continue };
+                    for term in page_terms(&fp.page) {
+                        if term.chars().count() >= 2 && query.contains(&term) {
+                            report.err(format!("{w}: query contains {term:?} from {p}"));
+                        }
+                    }
+                }
+            }
+            for p in q.must_not.iter().chain(&q.trap) {
+                if !t.pages.contains_key(p) {
+                    report.err(format!("{w}: page {p} does not exist"));
+                }
+            }
+            if !q.expect.relations.is_empty() && q.category != "graph" && q.category != "hop" {
+                report.err(format!("{w}: only graph and hop questions expect edges"));
+            }
+            for e in &q.expect.relations {
+                let parse = |end: &str| -> Option<(String, String)> {
+                    let (space, rest) = end.split_once(':')?;
+                    Some((space.to_owned(), rest.to_owned()))
+                };
+                let (Some((fs_, from)), Some((ts, to))) = (parse(&e.from), parse(&e.to)) else {
+                    report.err(format!("{w}: edge ends must be space:type/key"));
+                    continue;
+                };
+                if fs_ != ts {
+                    report.err(format!("{w}: edge crosses graph spaces"));
+                    continue;
+                }
+                let Some(space) = t.spaces.get(&fs_) else {
+                    report.err(format!("{w}: unknown graph space {fs_}"));
+                    continue;
+                };
+                if !space.relations.contains_key(&e.rel) {
+                    report.err(format!("{w}: unknown relation {}", e.rel));
+                }
+                if !space.edges.contains(&format!("{from}|{}|{to}", e.rel)) {
+                    report.err(format!("{w}: edge {from} {} {to} not in graph data", e.rel));
+                }
+            }
+        }
+    }
+
+    // Every tenant-level page and every user page should be the answer to something.
+    for t in tenants.values() {
+        for (fixture, fp) in &t.pages {
+            if fp.kind.is_some()
+                && fp.kind != Some(Kind::Graph)
+                && !referenced.contains(&(t.file.id.clone(), fixture.clone()))
+            {
+                report.err(format!(
+                    "{}/wiki/{fixture}.md: no question expects it",
+                    t.file.id
+                ));
+            }
+        }
+    }
+
+    eprintln!("\nquestions by language: {langs:?}");
+    counts
+}
+
+#[test]
+fn testset_is_consistent() {
+    let mut report = Report { errors: Vec::new() };
+    let mut tenants = HashMap::new();
+    for dir in read_dir_sorted(&testset_dir().join("tenants")) {
+        if dir.is_dir() {
+            let t = load_tenant(&dir, &mut report);
+            check_anchors(&t, &mut report);
+            tenants.insert(t.file.id.clone(), t);
+        }
+    }
+    if tenants.len() < 6 {
+        report.err(format!(
+            "expected six scenario tenants, found {}",
+            tenants.len()
+        ));
+    }
+    let counts = check_questions(&tenants, &mut report);
+
+    let tenant_names: BTreeSet<&String> = tenants.keys().collect();
+    eprintln!(
+        "\n{:<12}{}",
+        "category",
+        tenant_names
+            .iter()
+            .map(|t| format!("{t:>12}"))
+            .collect::<String>()
+            + "       total"
+    );
+    let mut grand = 0;
+    for (cat, per) in &counts {
+        let total: usize = per.values().sum();
+        grand += total;
+        let row: String = tenant_names
+            .iter()
+            .map(|t| format!("{:>12}", per.get(*t).copied().unwrap_or(0)))
+            .collect();
+        eprintln!("{cat:<12}{row}{total:>12}");
+    }
+    eprintln!(
+        "{:<12}{grand:>width$}",
+        "all",
+        width = 12 * tenant_names.len() + 12
+    );
+    for (t, tenant) in &tenants {
+        eprintln!(
+            "{t}: {} ({} pages)",
+            tenant.file.business,
+            tenant.pages.len()
+        );
+    }
+
+    for kind in ["experience", "expertise", "decision", "preference", "graph"] {
+        let n: usize = counts.get(kind).map(|m| m.values().sum()).unwrap_or(0);
+        if n < 30 {
+            report.err(format!(
+                "only {n} {kind} questions; the design asks for at least 30"
+            ));
+        }
+    }
+
+    if !report.errors.is_empty() {
+        panic!(
+            "{} problem(s) in testset/:\n  {}",
+            report.errors.len(),
+            report.errors.join("\n  ")
+        );
+    }
+}

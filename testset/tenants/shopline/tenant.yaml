@@ -1,0 +1,10 @@
+id: shopline
+business: E-commerce marketplace
+description: >
+  A Chinese B2C marketplace with third-party sellers. Agents handle buyer support (refunds,
+  logistics, coupons, counterfeit claims) and help operations staff with promotions and seller
+  management.
+users:
+  - { id: lily, role: operations manager, lang: zh }
+  - { id: wang, role: customer service lead, lang: en }
+graph_spaces: [commerce]

@@ -1,0 +1,282 @@
+tenant: mediclinic
+questions:
+  # --- experience ---------------------------------------------------------------------------
+  - id: mediclinic-exp-01
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "患者爽约了，要怎么跟进？"
+    keywords: [爽约, 爽约跟进]
+    expect: { memories: [experience/no-show-follow-up] }
+  - id: mediclinic-exp-02
+    category: experience
+    milestone: M2
+    lang: en
+    query: "A patient missed their appointment. How should we follow up?"
+    keywords: [missed appointment, no-show]
+    expect: { memories: [experience/no-show-follow-up] }
+    notes: English query over a Chinese playbook.
+  - id: mediclinic-exp-03
+    category: experience
+    milestone: M2
+    lang: en
+    query: "The insurer rejected the pre-authorization for a patient's scan."
+    keywords: [pre-authorization rejected, preauth denied]
+    expect: { memories: [experience/insurance-preauth-rejections] }
+  - id: mediclinic-exp-04
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "儿科号都约满了，家长很着急，怎么安排？"
+    keywords: [儿科挂不上号, 号源紧张]
+    expect: { memories: [experience/pediatrics-slot-shortage] }
+  - id: mediclinic-exp-05
+    category: experience
+    milestone: M2
+    lang: zh
+    query: "患者家属来复印病历，要核验什么？"
+    keywords: [病历复印, 家属代办]
+    expect: { memories: [experience/medical-record-requests] }
+  - id: mediclinic-exp-06
+    category: experience
+    milestone: M2
+    lang: en
+    query: "How do we register a foreign patient who only has a passport?"
+    keywords: [international patients, foreign patient registration, passport]
+    expect: { memories: [experience/international-patient-intake] }
+
+  # --- expertise ----------------------------------------------------------------------------
+  - id: mediclinic-kno-01
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "提前多久取消可以退挂号费？"
+    keywords: [取消规则, 退号, 挂号费]
+    expect: { knowledge: [expertise/cancellation-policy] }
+  - id: mediclinic-kno-02
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "哪些保险可以直付，预授权要提前几天申请？"
+    keywords: [商保直付, 预授权]
+    expect: { knowledge: [expertise/direct-billing] }
+  - id: mediclinic-kno-03
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "号源每天几点放出来？"
+    keywords: [放号时间, 号源规则]
+    expect: { knowledge: [expertise/scheduling-rules] }
+  - id: mediclinic-kno-04
+    category: expertise
+    milestone: M2
+    lang: zh
+    query: "保险公司来要患者病历，可以给吗？"
+    keywords: [保险公司调阅, 患者隐私, 授权委托]
+    expect: { knowledge: [expertise/privacy-consent] }
+  - id: mediclinic-kno-05
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "Can a first-time patient have an online consultation?"
+    keywords: [telemedicine, online consultation]
+    expect: { knowledge: [expertise/telemedicine-rules] }
+    notes: English query over a Chinese page, carried by English aliases.
+  - id: mediclinic-kno-06
+    category: expertise
+    milestone: M2
+    lang: en
+    query: "How much is a specialist consultation for self-pay patients?"
+    keywords: [fee schedule, specialist consultation, self-pay]
+    expect: { knowledge: [expertise/fee-schedule] }
+
+  # --- decision -----------------------------------------------------------------------------
+  - id: mediclinic-dec-01
+    category: decision
+    milestone: M2
+    lang: zh
+    user: hu
+    query: "我们为了降低爽约率做了什么决定？"
+    keywords: [降低爽约率, 短信提醒]
+    expect: { memories: [users/hu/decisions/no-show-sms-reminders] }
+  - id: mediclinic-dec-02
+    category: decision
+    milestone: M2
+    lang: zh
+    user: hu
+    query: "周末儿科加了多少个号？"
+    keywords: [周末儿科加号, 增加号源]
+    expect: { memories: [users/hu/decisions/weekend-pediatrics-slots] }
+  - id: mediclinic-dec-03
+    category: decision
+    milestone: M2
+    lang: en
+    user: grace
+    query: "Did we decide to accept Bupa direct billing?"
+    keywords: [Bupa direct billing]
+    expect: { memories: [users/grace/decisions/accept-bupa-direct-billing] }
+  - id: mediclinic-dec-04
+    category: decision
+    milestone: M2
+    lang: en
+    user: grace
+    query: "What did we decide about online follow-ups for asthma patients?"
+    keywords: [online follow-up, asthma follow-ups]
+    expect: { memories: [users/grace/decisions/online-follow-ups-asthma] }
+  - id: mediclinic-dec-05
+    category: decision
+    milestone: M2
+    lang: zh
+    user: hu
+    query: "短信提醒改成两次以后，爽约率变化大吗？"
+    keywords: [短信提醒, 爽约率]
+    expect: { memories: [users/hu/decisions/no-show-sms-reminders] }
+
+  # --- preference ---------------------------------------------------------------------------
+  - id: mediclinic-pre-01
+    category: preference
+    milestone: M2
+    lang: zh
+    user: hu
+    query: "我喜欢什么样的回答？"
+    keywords: [偏好, 简短]
+    expect: { memories: [users/hu/preferences] }
+  - id: mediclinic-pre-02
+    category: preference
+    milestone: M2
+    lang: en
+    user: grace
+    query: "When do I want my morning digest?"
+    keywords: [morning digest]
+    expect: { memories: [users/grace/preferences] }
+  - id: mediclinic-pre-03
+    category: preference
+    milestone: M2
+    lang: zh
+    user: hu
+    query: "跟患者沟通的内容要怎么给我？"
+    keywords: [电话话术, 模板]
+    expect: { memories: [users/hu/preferences] }
+  - id: mediclinic-pre-04
+    category: preference
+    milestone: M2
+    lang: en
+    user: grace
+    query: "Should you include patient ids when answering me?"
+    keywords: [patient ids, preferences]
+    expect: { memories: [users/grace/preferences] }
+  - id: mediclinic-pre-05
+    category: preference
+    milestone: M2
+    lang: zh
+    user: grace
+    query: "我的回复语言设置是什么？"
+    keywords: [偏好, English]
+    expect: { memories: [users/grace/preferences] }
+    notes: Chinese query about an English profile.
+
+  # --- graph --------------------------------------------------------------------------------
+  - id: mediclinic-gra-01
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "预约A-8802是哪位医生接诊的？"
+    keywords: [A-8802, 接诊医生]
+    expect:
+      relations:
+        - { from: "care:appointment/A-8802", type: with_doctor, to: "care:doctor/d_22" }
+    trap: [expertise/scheduling-rules]
+  - id: mediclinic-gra-02
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Which department does Dr. Liu work in?"
+    keywords: [Dr. Liu, department]
+    expect:
+      relations:
+        - { from: "care:doctor/d_21", type: works_in, to: "care:department/CARD" }
+  - id: mediclinic-gra-03
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "张伟参保的是哪家保险？"
+    keywords: [张伟, 保险]
+    expect:
+      relations:
+        - { from: "care:patient/p_1001", type: covered_by, to: "care:insurance_plan/INS-PA" }
+    trap: [expertise/direct-billing]
+  - id: mediclinic-gra-04
+    category: graph
+    milestone: M3
+    lang: en
+    query: "Where was appointment A-8802 referred to, and who booked it?"
+    keywords: [A-8802, referral, booked]
+    expect:
+      relations:
+        - { from: "care:appointment/A-8802", type: referred_to, to: "care:department/CARD" }
+        - { from: "care:appointment/A-8802", type: booked_by, to: "care:patient/p_1002" }
+  - id: mediclinic-gra-05
+    category: graph
+    milestone: M3
+    lang: zh
+    query: "哪些患者买的是平安健康的保险？"
+    keywords: [平安健康, 患者]
+    expect:
+      relations:
+        - { from: "care:patient/p_1001", type: covered_by, to: "care:insurance_plan/INS-PA" }
+        - { from: "care:patient/p_1003", type: covered_by, to: "care:insurance_plan/INS-PA" }
+    trap: [expertise/direct-billing]
+    notes: Asked from the insurer's side; two edges walked backwards.
+
+  # --- hop ----------------------------------------------------------------------------------
+  - id: mediclinic-hop-01
+    category: hop
+    milestone: M5
+    lang: zh
+    query: "患者第二次没来了，回访时要不要提醒后果，后果具体是什么？"
+    keywords: [患者没来, 回访]
+    expect:
+      memories: [experience/no-show-follow-up]
+      knowledge: [expertise/cancellation-policy]
+  - id: mediclinic-hop-02
+    category: hop
+    milestone: M5
+    lang: en
+    query: "An expat patient wants us to bill their insurer so they don't pay upfront. What do we check at registration, and what does the insurer need from us?"
+    keywords: [expat patients, insurer]
+    expect:
+      memories: [experience/international-patient-intake]
+      knowledge: [expertise/direct-billing]
+
+  # --- cross_lang ---------------------------------------------------------------------------
+  - id: mediclinic-xl-01
+    category: cross_lang
+    milestone: M5
+    lang: zh
+    query: "看一次专家要花多少钱？"
+    expect: { knowledge: [expertise/fee-schedule] }
+    notes: English page; the query avoids 收费标准 and 挂号费.
+  - id: mediclinic-xl-02
+    category: cross_lang
+    milestone: M5
+    lang: en
+    query: "Can I phone a patient's relative and tell them the test results?"
+    expect: { knowledge: [expertise/privacy-consent] }
+    notes: Chinese page; the query avoids "privacy" and "consent".
+
+  # --- negative and isolation ---------------------------------------------------------------
+  - id: mediclinic-neg-01
+    category: negative
+    milestone: M2
+    lang: en
+    query: "What's a good recipe for pork dumplings?"
+    expect_empty: [memories, knowledge, relations]
+  - id: mediclinic-iso-01
+    category: isolation
+    milestone: M2
+    lang: en
+    user: grace
+    query: "How many extra weekend pediatric slots did we add?"
+    keywords: [weekend pediatric slots]
+    must_not: [users/hu/decisions/weekend-pediatrics-slots]
+    notes: Hu's decision; Grace may still see the scheduling rules page.
