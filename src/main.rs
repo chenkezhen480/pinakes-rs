@@ -39,7 +39,14 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let state = AppState::new(config, admin_key.as_deref());
-    let app = kb::router(state);
+    if let Some(key) = state.prepare().await? {
+        // Shown once; it is also kept in the key file.
+        println!(
+            "Created the default tenant. Its API key (also in {}):\n{key}",
+            state.config.data.dir.join(kb::PERSONAL_KEY_FILE).display()
+        );
+    }
+    let app = kb::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -50,5 +57,7 @@ async fn main() -> anyhow::Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    // Lines still queued when the server stops are written before exiting.
+    tokio::task::spawn_blocking(move || state.traces.flush()).await?;
     Ok(())
 }

@@ -6,13 +6,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 
+use crate::search::SearchSnapshot;
+use crate::search::tracker::ReadTracker;
 use crate::store::{SqliteStore, Store};
-use crate::wiki::WikiFs;
+use crate::wiki::{History, WikiFs};
 
 const MAX_ID_LEN: usize = 256;
 const HASH_HEX_LEN: usize = 16;
@@ -92,6 +95,14 @@ pub struct Tenant {
     /// API key hashes, loaded from the store when the tenant opens. Key management (not in v1
     /// yet) must update this set as well as the store.
     key_hashes: RwLock<HashSet<String>>,
+    /// What searches read, built on the first search after a caller has authenticated (never
+    /// while checking a key). Swapped whole by `reindex`, so a running search keeps its copy.
+    search: std::sync::RwLock<Option<Arc<SearchSnapshot>>>,
+    /// Lets only one build of the snapshot run at a time.
+    building: Mutex<()>,
+    /// Which pages each agent session has read.
+    pub reads: ReadTracker,
+    keep_history: bool,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -106,6 +117,43 @@ impl std::fmt::Debug for Tenant {
 impl Tenant {
     pub fn wiki(&self) -> WikiFs {
         WikiFs::new(self.dir.join("wiki"))
+    }
+
+    /// The tenant's wiki history, when it is kept.
+    fn history(&self) -> Option<History> {
+        self.keep_history.then(|| History::new(&self.dir))
+    }
+
+    fn current_snapshot(&self) -> Option<Arc<SearchSnapshot>> {
+        self.search
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The current search snapshot, built from the wiki on first use. Concurrent first
+    /// searches wait for one build instead of each running their own.
+    pub async fn snapshot(&self) -> anyhow::Result<Arc<SearchSnapshot>> {
+        if let Some(s) = self.current_snapshot() {
+            return Ok(s);
+        }
+        let _building = self.building.lock().await;
+        if let Some(s) = self.current_snapshot() {
+            return Ok(s);
+        }
+        let snapshot = Arc::new(build_snapshot(self.wiki(), self.history()).await?);
+        *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    /// Rebuilds the search snapshot from the wiki files and swaps it in. Searches already
+    /// running finish on the old one.
+    #[tracing::instrument(name = "reindex", skip_all, fields(tenant = %self.dir_name))]
+    pub async fn reindex(&self) -> anyhow::Result<()> {
+        let _building = self.building.lock().await;
+        let snapshot = build_snapshot(self.wiki(), self.history()).await?;
+        *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(snapshot));
+        Ok(())
     }
 
     async fn has_key_hash(&self, hash: &str) -> bool {
@@ -132,6 +180,9 @@ pub struct CreatedTenant {
 pub struct Tenants {
     root: PathBuf,
     store_file: String,
+    session_idle: Duration,
+    /// Keep every wiki version a snapshot is built from, for replays (see `wiki::History`).
+    keep_history: bool,
     /// Open tenants. The lock is only ever held for a map lookup or insert, never across disk
     /// work, so loading one tenant can't stall requests for the others.
     open: RwLock<HashMap<String, Arc<Tenant>>>,
@@ -140,13 +191,26 @@ pub struct Tenants {
 }
 
 impl Tenants {
-    pub fn new(root: impl Into<PathBuf>, store_file: impl Into<String>) -> Self {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        store_file: impl Into<String>,
+        session_idle: Duration,
+    ) -> Self {
         Self {
             root: root.into(),
             store_file: store_file.into(),
+            session_idle,
+            keep_history: false,
             open: RwLock::new(HashMap::new()),
             creating: Mutex::new(()),
         }
+    }
+
+    /// Keeps each wiki version a search snapshot is built from in the tenant's history, so
+    /// traced searches can be replayed on the wiki they ran on.
+    pub fn keep_history(mut self, on: bool) -> Self {
+        self.keep_history = on;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -217,6 +281,20 @@ impl Tenants {
             .then_some(tenant))
     }
 
+    /// Opens a tenant by its folder name (`t_` plus 16 hex digits), for offline tools such as
+    /// `kb-replay`. Anything else, and unknown folders, give `None`.
+    pub(crate) async fn open(&self, dir_name: &str) -> anyhow::Result<Option<Arc<Tenant>>> {
+        let well_formed = dir_name.strip_prefix("t_").is_some_and(|h| {
+            h.len() == HASH_HEX_LEN
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        if !well_formed {
+            return Ok(None);
+        }
+        self.open_by_dir(dir_name).await
+    }
+
     /// Returns an open tenant, loading it from disk on first use.
     async fn open_by_dir(&self, dir_name: &str) -> anyhow::Result<Option<Arc<Tenant>>> {
         if let Some(t) = self.open.read().await.get(dir_name) {
@@ -257,8 +335,29 @@ impl Tenants {
             dir,
             store: Arc::new(store),
             key_hashes: RwLock::new(key_hashes),
+            search: std::sync::RwLock::new(None),
+            building: Mutex::new(()),
+            reads: ReadTracker::new(self.session_idle),
+            keep_history: self.keep_history,
         })
     }
+}
+
+/// Reads every page of a wiki and builds its search snapshot, off the async threads. With a
+/// history, the version is stored there first; failing to store it only logs a warning.
+async fn build_snapshot(wiki: WikiFs, history: Option<History>) -> anyhow::Result<SearchSnapshot> {
+    tokio::task::spawn_blocking(move || {
+        let pages = wiki.all_pages()?;
+        if let Some(history) = history {
+            let version = crate::search::version_of(&pages);
+            if let Err(e) = history.save(&version, &pages) {
+                tracing::warn!(%version, error = %e, "could not keep this wiki version");
+            }
+        }
+        SearchSnapshot::build(pages)
+    })
+    .await
+    .context("building the search snapshot panicked")?
 }
 
 fn build_tenant_dir(
@@ -332,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn create_then_authenticate() {
         let dir = tempfile::tempdir().unwrap();
-        let tenants = Tenants::new(dir.path(), "kb.sqlite");
+        let tenants = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
         let created = tenants.create("acme", "initial").await.unwrap();
         assert_eq!(created.tenant.id, "acme");
         assert!(matches!(
@@ -344,7 +443,7 @@ mod tests {
         assert_eq!(found.unwrap().id, "acme");
 
         // A fresh registry (as after a restart) loads the tenant from disk.
-        let reopened = Tenants::new(dir.path(), "kb.sqlite");
+        let reopened = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
         assert!(
             reopened
                 .authenticate(&created.api_key)
@@ -363,7 +462,11 @@ mod tests {
         assert!(tenants.authenticate(&wrong).await.unwrap().is_none());
 
         // Many concurrent requests on a cold tenant all succeed.
-        let cold = Arc::new(Tenants::new(dir.path(), "kb.sqlite"));
+        let cold = Arc::new(Tenants::new(
+            dir.path(),
+            "kb.sqlite",
+            Duration::from_secs(60),
+        ));
         let tasks: Vec<_> = (0..16)
             .map(|_| {
                 let (t, k) = (cold.clone(), created.api_key.clone());
@@ -380,5 +483,45 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names, vec![tenant_dir_name("acme")]);
+    }
+
+    /// Checking a key never builds the search snapshot: a wrong secret costs one hash, not an
+    /// index build.
+    #[tokio::test]
+    async fn authentication_builds_no_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let created = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60))
+            .create("acme", "initial")
+            .await
+            .unwrap();
+        let cold = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
+        let mut wrong = created.api_key.clone();
+        wrong.replace_range(
+            wrong.len() - 1..,
+            if wrong.ends_with('0') { "1" } else { "0" },
+        );
+        assert!(cold.authenticate(&wrong).await.unwrap().is_none());
+        let tenant = cold.authenticate(&created.api_key).await.unwrap().unwrap();
+        assert!(tenant.current_snapshot().is_none());
+        tenant.snapshot().await.unwrap();
+        assert!(tenant.current_snapshot().is_some());
+    }
+
+    #[tokio::test]
+    async fn reindex_swaps_in_new_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let tenants = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
+        let tenant = tenants.create("acme", "initial").await.unwrap().tenant;
+        let before = tenant.snapshot().await.unwrap();
+        assert!(before.catalog.pages.is_empty());
+
+        let mut page = crate::wiki::Page::new(crate::wiki::PagePath::parse("expertise/x").unwrap());
+        page.front.title = Some("X".into());
+        tenant.wiki().write(&page).unwrap();
+        tenant.reindex().await.unwrap();
+
+        assert_eq!(tenant.snapshot().await.unwrap().catalog.pages.len(), 1);
+        // A search that started earlier still holds the old snapshot.
+        assert!(before.catalog.pages.is_empty());
     }
 }

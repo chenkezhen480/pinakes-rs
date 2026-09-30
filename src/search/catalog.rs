@@ -1,0 +1,408 @@
+//! The in-memory copy of a tenant's pages that searches read: front matter, the body split into
+//! sections and lines, and normalized text for matching keywords. Built from the wiki files.
+
+use std::collections::{HashMap, HashSet};
+
+use serde_norway::Value;
+
+use super::text::normalize;
+use super::tokenize::Analyzer;
+use crate::kinds::Kind;
+use crate::wiki::{Audience, Page, PagePath};
+
+/// The slot a page comes back in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Slot {
+    Memories,
+    Knowledge,
+}
+
+impl Slot {
+    pub fn of(kind: Kind) -> Slot {
+        match kind {
+            Kind::Experience | Kind::Decision | Kind::Preference => Slot::Memories,
+            Kind::Expertise | Kind::Graph => Slot::Knowledge,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Slot::Memories => "memories",
+            Slot::Knowledge => "knowledge",
+        }
+    }
+}
+
+/// The audience value indexed for a page: `tenant`, or the group or user folder name.
+pub fn audience_key(path: &PagePath) -> String {
+    match path.audience() {
+        Audience::Tenant => "tenant".to_owned(),
+        Audience::Group(dir) | Audience::User(dir) => dir.to_owned(),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Line {
+    pub text: String,
+    pub norm: String,
+    /// Word tokens, for finding matching lines without segmenting at search time.
+    pub words: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Section {
+    /// `None` for text before the first heading.
+    pub heading: Option<String>,
+    pub heading_words: HashSet<String>,
+    pub level: usize,
+    pub lines: Vec<Line>,
+}
+
+/// Normalized text of a group of fields, with its word tokens, for checking which keywords a
+/// page matched.
+#[derive(Debug, Clone, Default)]
+pub struct FieldText {
+    pub norm: String,
+    pub words: HashSet<String>,
+}
+
+impl FieldText {
+    fn new(analyzer: &Analyzer, parts: &[&str]) -> Self {
+        let norm = normalize(&parts.join("\n"));
+        let words = analyzer.words(&norm).into_iter().map(|t| t.text).collect();
+        Self { norm, words }
+    }
+}
+
+/// A node type described by a schema page: `schema:type` and the names it goes by.
+#[derive(Debug, Clone)]
+pub struct NodeType {
+    pub entity: String,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PageEntry {
+    pub path: PagePath,
+    pub kind: Kind,
+    pub slot: Slot,
+    pub audience: String,
+    pub title: String,
+    pub summary: String,
+    pub aliases: Vec<String>,
+    pub keywords: Vec<String>,
+    pub about: Vec<String>,
+    pub sources: Vec<String>,
+    pub sections: Vec<Section>,
+    /// `[[link]]` targets in the body, as written.
+    pub links: Vec<String>,
+    /// For schema pages: the node types it defines.
+    pub node_types: Vec<NodeType>,
+    /// Descriptions of the schema's node and relation types (schema pages only).
+    pub schema_text: String,
+    /// Title, aliases, keywords and summary.
+    pub head: FieldText,
+    pub body: FieldText,
+}
+
+/// All pages of one tenant, in path order.
+#[derive(Debug, Default)]
+pub struct Catalog {
+    pub pages: Vec<PageEntry>,
+    by_path: HashMap<String, usize>,
+}
+
+impl Catalog {
+    /// Builds entries from pages. Pages without a kind (`index`, `log`) are skipped.
+    pub fn build(pages: Vec<Page>, analyzer: &Analyzer) -> Self {
+        let mut out = Catalog::default();
+        for page in pages {
+            let Some(kind) = page.path.kind() else {
+                continue;
+            };
+            let entry = entry_for(page, kind, analyzer);
+            out.by_path
+                .insert(entry.path.as_str().to_owned(), out.pages.len());
+            out.pages.push(entry);
+        }
+        out
+    }
+
+    pub fn get(&self, path: &str) -> Option<(usize, &PageEntry)> {
+        self.by_path.get(path).map(|&i| (i, &self.pages[i]))
+    }
+
+    /// Every term the tenant-level pages name: titles, aliases, keywords and node type names,
+    /// for the tokenizer's term list. Group and user pages are left out, so one user's private
+    /// terms never change how anyone else's text is split; bigrams still cover them.
+    pub fn terms_of(pages: &[Page]) -> Vec<String> {
+        let mut out = Vec::new();
+        for page in pages
+            .iter()
+            .filter(|p| matches!(p.path.audience(), Audience::Tenant))
+        {
+            let f = &page.front;
+            out.extend(f.title.iter().map(|t| normalize(t)));
+            out.extend(f.aliases.iter().map(|t| normalize(t)));
+            out.extend(f.keywords.iter().map(|t| normalize(t)));
+            for nt in node_types(&page.front.extra) {
+                out.extend(nt.names.iter().map(|t| normalize(t)));
+            }
+        }
+        out
+    }
+}
+
+fn entry_for(page: Page, kind: Kind, analyzer: &Analyzer) -> PageEntry {
+    let f = page.front;
+    let title = f
+        .title
+        .clone()
+        .unwrap_or_else(|| page.path.segments().last().unwrap_or("").to_owned());
+    let summary = f.summary.clone().unwrap_or_default();
+    let node_types = if kind == Kind::Graph {
+        node_types(&f.extra)
+    } else {
+        Vec::new()
+    };
+    let schema_text = if kind == Kind::Graph {
+        schema_text(&f.extra)
+    } else {
+        String::new()
+    };
+    let sections = sections(&page.body, analyzer);
+    let links = links(&page.body);
+
+    let mut head_parts: Vec<&str> = vec![&title, &summary];
+    head_parts.extend(f.aliases.iter().map(String::as_str));
+    head_parts.extend(f.keywords.iter().map(String::as_str));
+    head_parts.push(&schema_text);
+    let head = FieldText::new(analyzer, &head_parts);
+    let body = FieldText::new(analyzer, &[&page.body]);
+
+    PageEntry {
+        audience: audience_key(&page.path),
+        slot: Slot::of(kind),
+        path: page.path,
+        kind,
+        title,
+        summary,
+        aliases: f.aliases,
+        keywords: f.keywords,
+        about: f.about,
+        sources: f.sources,
+        sections,
+        links,
+        node_types,
+        schema_text,
+        head,
+        body,
+    }
+}
+
+fn words_of(analyzer: &Analyzer, norm: &str) -> HashSet<String> {
+    analyzer.words(norm).into_iter().map(|t| t.text).collect()
+}
+
+/// Splits a Markdown body at ATX headings; `#` lines inside fenced code blocks are text, not
+/// headings. Blank lines are dropped.
+pub fn sections(body: &str, analyzer: &Analyzer) -> Vec<Section> {
+    let mut out = vec![Section {
+        heading: None,
+        heading_words: HashSet::new(),
+        level: 0,
+        lines: Vec::new(),
+    }];
+    let mut fence = Fence::default();
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !fence.step(line)
+            && let Some((level, heading)) = heading_of(line)
+        {
+            out.push(Section {
+                heading: Some(heading.to_owned()),
+                heading_words: words_of(analyzer, &normalize(heading)),
+                level,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        let norm = normalize(line);
+        out.last_mut().expect("never empty").lines.push(Line {
+            text: line.to_owned(),
+            words: words_of(analyzer, &norm),
+            norm,
+        });
+    }
+    out.retain(|s| s.heading.is_some() || !s.lines.is_empty());
+    out
+}
+
+/// Tracks fenced code blocks (``` or ~~~) line by line.
+#[derive(Debug, Default)]
+pub struct Fence {
+    open: Option<char>,
+}
+
+impl Fence {
+    /// Feeds one trimmed line; returns whether it is inside a code block or is a fence line
+    /// itself, in which case it can't be a heading.
+    pub fn step(&mut self, line: &str) -> bool {
+        let marker = ['`', '~']
+            .into_iter()
+            .find(|&c| line.starts_with(&c.to_string().repeat(3)));
+        match (self.open, marker) {
+            (None, Some(c)) => {
+                self.open = Some(c);
+                true
+            }
+            (Some(open), Some(c)) if open == c => {
+                self.open = None;
+                true
+            }
+            (open, _) => open.is_some(),
+        }
+    }
+}
+
+/// `## Pitfalls` → `(2, "Pitfalls")`.
+pub fn heading_of(line: &str) -> Option<(usize, &str)> {
+    let level = line.bytes().take_while(|&b| b == b'#').count();
+    if level == 0 || level > 6 {
+        return None;
+    }
+    let rest = &line[level..];
+    if !rest.starts_with(' ') {
+        return None;
+    }
+    Some((level, rest.trim().trim_end_matches('#').trim()))
+}
+
+/// `[[link]]` targets in a Markdown body, in order, without duplicates.
+pub fn links(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            break;
+        };
+        let target = after[..end].split('|').next().unwrap_or("").trim();
+        if !target.is_empty() && !out.iter().any(|t| t == target) {
+            out.push(target.to_owned());
+        }
+        rest = &after[end + 2..];
+    }
+    out
+}
+
+fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(Value::as_str)
+}
+
+fn str_list(v: &Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(Value::as_sequence)
+        .map(|seq| {
+            seq.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn node_types(extra: &std::collections::BTreeMap<String, Value>) -> Vec<NodeType> {
+    let Some(schema) = extra.get("schema").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(nodes) = extra.get("nodes").and_then(Value::as_mapping) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (name, def) in nodes {
+        let Some(name) = name.as_str() else {
+            continue;
+        };
+        let mut names = vec![name.to_owned()];
+        names.extend(str_list(def, "aliases"));
+        out.push(NodeType {
+            entity: format!("{schema}:{name}"),
+            names,
+        });
+    }
+    out
+}
+
+/// The schema's type descriptions as searchable text: names, English and Chinese meanings and
+/// aliases of every node and relation type.
+fn schema_text(extra: &std::collections::BTreeMap<String, Value>) -> String {
+    let mut parts = Vec::new();
+    for section in ["nodes", "relations"] {
+        let Some(map) = extra.get(section).and_then(Value::as_mapping) else {
+            continue;
+        };
+        for (name, def) in map {
+            if let Some(name) = name.as_str() {
+                parts.push(name.replace('_', " "));
+            }
+            for key in ["en", "zh"] {
+                if let Some(s) = str_field(def, key) {
+                    parts.push(s.to_owned());
+                }
+            }
+            parts.extend(str_list(def, "aliases"));
+        }
+    }
+    parts.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_sections() {
+        let s = sections(
+            "# Title\n\nintro\n\n## Steps\n1. one\n2. two\n```bash\n# install deps\n```\n### Deep ###\nx\n",
+            &Analyzer::new([]),
+        );
+        let heads: Vec<_> = s
+            .iter()
+            .map(|s| (s.heading.as_deref(), s.level, s.lines.len()))
+            .collect();
+        assert_eq!(
+            heads,
+            vec![
+                (Some("Title"), 1, 1),
+                (Some("Steps"), 2, 5),
+                (Some("Deep"), 3, 1)
+            ]
+        );
+        assert_eq!(heading_of("#hashtag"), None);
+    }
+
+    #[test]
+    fn finds_links() {
+        assert_eq!(
+            links("see [[expertise/a]] and [[b|B]], [[expertise/a]] [[broken"),
+            vec!["expertise/a", "b"]
+        );
+    }
+
+    #[test]
+    fn schema_pages_yield_node_types() {
+        let text = "---\nkind: graph\ntitle: Commerce\nschema: commerce\nnodes:\n  order: { en: \"An order\", zh: \"订单\", aliases: [orders, 订单], key: order_id }\nrelations:\n  placed_by: { from: order, to: customer, en: \"Who placed it\", zh: \"下单的客户\", aliases: [下单人] }\n---\n\n# Commerce\n";
+        let page = Page::parse(PagePath::parse("graph/commerce").unwrap(), text).unwrap();
+        let cat = Catalog::build(vec![page], &Analyzer::new([]));
+        let e = &cat.pages[0];
+        assert_eq!(e.slot, Slot::Knowledge);
+        assert_eq!(e.node_types[0].entity, "commerce:order");
+        assert_eq!(e.node_types[0].names, vec!["order", "orders", "订单"]);
+        assert!(e.schema_text.contains("placed by"));
+        assert!(e.head.norm.contains("下单人"));
+    }
+}

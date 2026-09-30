@@ -48,4 +48,5 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 ## Layout
 
 Single package: `src/lib.rs` holds the modules, `src/main.rs` only reads config and starts the
-server, and `tests/` holds HTTP-level integration tests that drive the axum `Router` directly.
+server, `src/bin/kb-replay.rs` replays search traces, and `tests/` holds HTTP-level integration
+tests that drive the axum `Router` directly (shared helpers in `tests/common/`).

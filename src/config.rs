@@ -18,6 +18,63 @@ pub struct Config {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub store: StoreConfig,
+    #[serde(default)]
+    pub search: SearchConfig,
+    #[serde(default)]
+    pub trace: TraceConfig,
+}
+
+/// Search traces (design, "Search traces and replay").
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceConfig {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Trace files older than this many days are removed; 0 keeps them forever.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    /// Hits per slot when a search doesn't say.
+    #[serde(default)]
+    pub slots: crate::search::SlotSizes,
+    /// Read-tracker sessions expire after this many idle minutes.
+    #[serde(default = "default_session_idle_minutes")]
+    pub session_idle_minutes: u64,
+    /// Switches for experiments; leave unset in normal use.
+    #[serde(default)]
+    pub ablation: crate::search::Ablation,
+}
+
+impl SearchConfig {
+    /// 16 hex digits identifying the settings that shape search results (slot sizes and
+    /// ablation switches), recorded in traces and replay reports.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let shaping = serde_json::json!({ "slots": self.slots, "ablation": self.ablation });
+        hex::encode(&Sha256::digest(shaping.to_string().as_bytes())[..8])
+    }
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            slots: crate::search::SlotSizes::default(),
+            session_idle_minutes: default_session_idle_minutes(),
+            ablation: crate::search::Ablation::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,10 +117,31 @@ pub enum IdentityMode {
     Jwt,
 }
 
+/// Who the service is set up for (design, "Personal deployments").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Deployment {
+    /// Shared by many tenants; callers name their user in a header.
+    #[default]
+    MultiTenant,
+    /// One person: the default tenant is created on first start, and a request without the
+    /// user header acts as the default user.
+    Personal,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdentityConfig {
     #[serde(default)]
     pub mode: IdentityMode,
+    #[serde(default)]
+    pub deployment: Deployment,
+    /// The tenant a personal deployment creates and uses.
+    #[serde(default = "default_tenant")]
+    pub default_tenant: String,
+    /// The user a request without the user header acts as, in a personal deployment. An
+    /// ordinary user id: it grants no admin rights.
+    #[serde(default = "default_user")]
+    pub default_user: String,
     /// Header carrying the API key. For `Authorization`, a `Bearer ` prefix is stripped.
     #[serde(default = "default_key_header")]
     pub key_header: String,
@@ -82,6 +160,9 @@ impl Default for IdentityConfig {
     fn default() -> Self {
         Self {
             mode: IdentityMode::default(),
+            deployment: Deployment::default(),
+            default_tenant: default_tenant(),
+            default_user: default_user(),
             key_header: default_key_header(),
             user_header: default_user_header(),
             group_header: default_group_header(),
@@ -113,6 +194,18 @@ fn default_port() -> u16 {
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
 }
+fn yes() -> bool {
+    true
+}
+fn default_retention_days() -> u32 {
+    30
+}
+fn default_tenant() -> String {
+    "000000".into()
+}
+fn default_user() -> String {
+    "admin".into()
+}
 fn default_key_header() -> String {
     "Authorization".into()
 }
@@ -124,6 +217,9 @@ fn default_group_header() -> String {
 }
 fn default_admin_key_env() -> String {
     "KB_ADMIN_KEY".into()
+}
+fn default_session_idle_minutes() -> u64 {
+    30
 }
 fn default_store_file() -> String {
     "kb.sqlite".into()
@@ -146,9 +242,23 @@ impl Config {
         if self.identity.mode == IdentityMode::Jwt {
             anyhow::bail!("identity.mode = \"jwt\" is not implemented yet (milestone M7)");
         }
+        let id = &self.identity;
+        crate::tenants::validate_id("identity.default_tenant", &id.default_tenant)
+            .map_err(anyhow::Error::msg)?;
+        crate::tenants::validate_id("identity.default_user", &id.default_user)
+            .map_err(anyhow::Error::msg)?;
         let f = &self.store.file_name;
         if f.is_empty() || f.contains(['/', '\\']) || f.starts_with('.') {
             anyhow::bail!("store.file_name must be a plain file name, got {f:?}");
+        }
+        let s = &self.search.slots;
+        let max = crate::search::MAX_SLOT;
+        if s.memories > max || s.knowledge > max || s.relations > max {
+            anyhow::bail!("search.slots values must be at most {max}");
+        }
+        let a = &self.search.ablation;
+        if !a.words && !a.bigrams {
+            anyhow::bail!("search.ablation must keep words or bigrams on");
         }
         Ok(())
     }
@@ -170,6 +280,29 @@ mod tests {
         assert_eq!(cfg.identity.user_header, "X-User-Id");
         assert_eq!(cfg.identity.group_header, "X-User-Groups");
         assert_eq!(cfg.store.file_name, "kb.sqlite");
+        assert_eq!(cfg.search.slots.relations, 5);
+        assert_eq!(cfg.search.session_idle_minutes, 30);
+        assert!(cfg.trace.enabled);
+        assert_eq!(cfg.trace.retention_days, 30);
+    }
+
+    #[test]
+    fn search_slots_from_file() {
+        let cfg = Config::from_toml_str(
+            "[search]
+slots = { memories = 4, knowledge = 2, relations = 6 }
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.search.slots.memories, 4);
+        assert!(
+            Config::from_toml_str(
+                "[search]
+slots = { memories = 40, knowledge = 2, relations = 6 }
+"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -178,6 +311,26 @@ mod tests {
             Config::from_toml_str("[server]\nport = 9000\n[librarian]\nprovider = \"anthropic\"\n")
                 .unwrap();
         assert_eq!(cfg.server.port, 9000);
+    }
+
+    #[test]
+    fn shipped_config_file_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.search.slots, crate::search::SlotSizes::default());
+    }
+
+    #[test]
+    fn personal_deployment_defaults() {
+        let cfg = Config::from_toml_str("[identity]\ndeployment = \"personal\"\n").unwrap();
+        assert_eq!(cfg.identity.deployment, Deployment::Personal);
+        assert_eq!(cfg.identity.default_tenant, "000000");
+        assert_eq!(cfg.identity.default_user, "admin");
+        assert_eq!(
+            Config::from_toml_str("").unwrap().identity.deployment,
+            Deployment::MultiTenant
+        );
+        assert!(Config::from_toml_str("[identity]\ndefault_user = \"\"\n").is_err());
     }
 
     #[test]

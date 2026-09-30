@@ -2,6 +2,8 @@
 
 mod admin;
 mod pages;
+mod read;
+mod search;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -13,6 +15,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/pages", get(pages::list))
         .route("/pages/{*path}", get(pages::get))
+        .route("/search", post(search::search))
+        .route("/read", post(read::read))
         .route("/admin/tenants", post(admin::create_tenant))
         .with_state(state)
 }

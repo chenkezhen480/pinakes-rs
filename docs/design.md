@@ -171,16 +171,23 @@ The service never creates or authenticates end users, and never manages groups. 
 
 Group ids are optional and only matter for restricted graph spaces: in API key mode they come from the `X-User-Groups` header (comma-separated), in JWT mode from a claim in the same token. Ids are opaque strings: the service never reads meaning into them. Header names, claim names and key lists are all set in config, so developers can adapt the service without changing code.
 
+**Personal deployments.** The service targets both shared platforms and one person running it for themselves. `deployment = "personal"` in `[identity]` (decided 2026-09-30) keeps the same model with defaults filled in:
+
+- On first start the service creates the default tenant `000000`, generates its API key, writes the key to `personal-api-key.txt` in the data folder and prints it once. Calls still carry that key; nothing is open without one.
+- A request without the user header acts as the default user `admin`. `admin` is an ordinary user id: it grants no admin rights, which still need the admin key.
+- There is no default group; a single person needs none.
+- Both defaults can be changed in config (`default_tenant`, `default_user`). In the default `multi_tenant` deployment none of this applies: a request without the user header sees tenant-level pages only.
+
 **How isolation is enforced.**
 
 - **One folder per tenant.** Each tenant gets its own folder, holding its wiki files, its SQLite file and its search index.
 - **Safe folder names.** Folder names are derived from the ids (a hash), never the raw strings, so an id like `../other` can't escape its folder.
 - **Filters the caller can't remove.** The service adds the tenant, group and user filters to every search, graph walk and read, and request bodies can't widen them. Anchors that lead into another user's or group's pages are dropped before a walk starts.
 - **One graph database, filtered.** Neo4j Community edition runs a single database, so every node and edge carries the tenant id, with an index on it, and every Cypher query the service sends filters on it.
-- **Separate ranking statistics.** Separate indexes mean one tenant's content never shifts another tenant's search results.
+- **Separate ranking statistics.** Separate indexes mean one tenant's content never shifts another tenant's search results. Inside a tenant, one index holds every audience's pages behind a filter, so another user's or group's pages do count in the term statistics and can nudge scores slightly; the name matcher and the tokenizer's term list, by contrast, only use what the caller may see. Responses never carry scores, so this can't practically be used to probe for hidden content. Separate indexes per group and user would remove it at a large cost; decided 2026-09-30 to accept it.
 - **Graph spaces with a visibility.** Shared spaces are open to the whole tenant; private and restricted spaces are filtered out of every search, walk and anchor for callers who may not see them (see "Who can see a graph space").
 - **A scoped librarian.** The librarian only ever sees pages the new content's audience may see: for a group page, the tenant's pages and that group's; for a user page, also that user's and their groups'. Another tenant's content never enters a prompt, and content is never merged into a page with a wider audience: a group decision can't end up on a tenant page. A page may anchor only to pages and nodes that everyone who can read it can also see.
-- **Clean deletion.** Deleting a tenant deletes its folder and its nodes and edges in Neo4j. Deleting a user removes their decision history and preferences, with the anchors and vectors that came from them. Groups live outside the service, so a group's pages stay until an admin deletes them.
+- **Clean deletion.** Deleting a tenant deletes its folder and its nodes and edges in Neo4j. Deleting a user removes their decision history and preferences, with the anchors and vectors that came from them. Groups live outside the service, so a group's pages stay until an admin deletes them. Their pages also leave the wiki history kept for replays (see "Search traces and replay").
 - **Loaded on demand.** A tenant's index, vectors and graph load on first use, from its files, its SQLite file and Neo4j. Busy tenants stay in memory, and idle ones cost only disk space.
 
 ## Search signals: names, keywords and meaning, in English and Chinese
@@ -192,11 +199,11 @@ Inside the one entry, three signals find things: names, keywords and meaning. Na
 
 The next section lists the exact tools and parameters agents use for this.
 
-**Tokenizing Chinese.** Chinese has no spaces between words, so a plain tokenizer finds almost nothing. Each text field is therefore indexed twice, and searches use both versions, with whole words weighted higher. Aliases, node names and domain terms from the wiki are added to jieba's dictionary, so it doesn't split them wrongly:
+**Tokenizing Chinese.** Chinese has no spaces between words, so a plain tokenizer finds almost nothing. Each text field is therefore indexed twice, and searches use both versions, with whole words weighted higher. Aliases, node names and domain terms from the wiki are kept whole, so jieba doesn't split them wrongly. All tenants share one base jieba dictionary; each tenant's own terms are found first by its name matcher and emitted as whole words, and only the text between them goes to jieba. So one tenant's terms never change another tenant's tokens, and no tenant needs its own copy of the dictionary:
 
 | Version | How the text is split | Why |
 |---|---|---|
-| Words | jieba segmentation for Chinese (via `tantivy-jieba`), English words lowercased | Precise matches on whole words |
+| Words | The tenant's known terms kept whole, jieba segmentation (via `jieba-rs`) for the rest of the Chinese text, English words lowercased and stemmed | Precise matches on whole words |
 | Bigrams | Overlapping 2-character pieces of Chinese text, English words as-is | Catches domain terms that jieba's dictionary splits wrongly |
 
 **The name matcher.** Every alias and title in the tenant's wiki, and the name and aliases of every graph node, go into an Aho-Corasick automaton, rebuilt when pages or graph data change. It finds all known names in a query in one pass, in either language, in microseconds. Page and type aliases come from page front matter and schema descriptions; instance names (a customer called 林晓, machine ROB-11) come from the graph data, since the wiki holds only schemas.
@@ -293,6 +300,7 @@ POST /search
 **Tool descriptions teach the strategy.** As in A-RAG, the guidance lives in the MCP tool descriptions, not in a fixed workflow:
 
 - wrap the request into a query with meaning, plus short, specific keywords, with good and bad examples
+- abstract first-person questions into the topic they are about: "what language should replies to me use?" becomes keywords like `preferences`, `reply language`, `偏好`, `回复语言`. The service does no such rewriting itself (decided 2026-09-30); it only reports weak slots and unmatched keywords, so the agent can retry
 - read the slots first, then open only the promising hits in full
 - follow each hit's route: `read` for a file, `graph` or `path` for a node
 - on a weak slot, retry with other terms, pass `entities` or `intent`, or switch `mode` to `semantic`
@@ -323,6 +331,17 @@ Five rules keep it fast:
 3. **One round trip per task.** One `search` returns memories, knowledge and relations together, so an agent often needs no second call.
 4. **Keep hot data in memory.** Busy tenants' indexes, vectors, name matchers and graphs stay loaded, in a size-limited cache. They're loaded from the files, SQLite and Neo4j when a tenant opens, and a search never queries SQLite or Neo4j.
 5. **Writes never block reads.** Each tenant has one writer. Searches keep using the last committed snapshot while an ingest runs.
+
+## Search traces and replay
+
+Every `/search` and `/read` that is answered leaves one line in the tenant's `logs/search-<date>.jsonl` (decided 2026-09-30), so real traffic can be studied and replayed against later versions of the search:
+
+- **What a line holds.** Time, a request id, the endpoint, the tenant folder and the caller's hashed user and group folders (never raw ids), the full request, what came back per slot (page ids, how each matched, coverage), the entities, the intent, the unmatched keywords, the time of each step, the version of the search snapshot (a hash of the wiki it was built from), the code that answered (crate version and git commit, `-dirty` for uncommitted changes) and a fingerprint of the search settings (slot sizes and ablation switches).
+- **Off the read path.** Handlers hand the line to a background writer and never wait for it; if the writer falls behind, lines are dropped and counted rather than slowing a search. Nothing on the read path touches SQLite.
+- **Wiki history.** Every wiki version a search snapshot is built from is kept in the tenant's `history/`, content-addressed so an unchanged page is stored once (`history/objects/`, plus one manifest per version in `history/versions/`). No git is needed, and a wiki the host keeps in its own git is left alone. Next to each day's traces, `logs/versions-<date>.txt` lists the versions that day's lines ran on.
+- **Retention.** Trace files and version lists older than `retention_days` (30 by default, in `[trace]`) are removed, then the wiki versions no remaining list names and nothing built recently, with the page objects only they used. Deleting a user does not touch traces; they expire with the retention period. It does remove that user's pages from every kept wiki version (decided 2026-09-30), since those copies hold the pages' full text; searches by that user can then no longer be replayed on their recorded wiki.
+- **Weak slots.** A weak slot is visible in its line, which is the miss log that lint reviews (see "Misses improve the wiki").
+- **Replay.** `kb-replay` reads trace files and runs each recorded search again with the current code and config, on the wiki version it ran on (rebuilt from the history, the default) or on today's wiki (`--wiki current`). On the recorded wiki a difference comes from the code or the settings alone, which is what an experiment on search needs; on today's wiki it shows what users would get now. The report lists which results stayed the same and which changed (pages added, dropped or reordered, coverage flips), which code and settings answered at the time and now, and which searches had to fall back to today's wiki because their version had expired. By default it replays the last 7 days (`--days N`, 0 for all of the 30 kept); it streams the files line by line, so its memory stays flat however much it replays. Replays never write traces, never mark pages as read, and never consume or delete what they read.
 
 ## Architecture
 
@@ -410,6 +429,8 @@ data/
         │           ├── preferences.md
         │           └── decisions/     e.g. refund-policy.md
         ├── kb.sqlite          jobs, proposals, API keys, audit log, embeddings
+        ├── logs/              search traces, one JSONL file per day (search-2026-09-30.jsonl)
+        ├── history/           past wiki versions for replays: objects/ and versions/
         └── index/             derived, safe to delete
             └── tantivy/       wiki pages and relation types
 ```
@@ -523,7 +544,7 @@ A crate is a Rust library published on crates.io. About seventeen of them cover 
 | [axum](https://crates.io/crates/axum) | 0.8 | HTTP server and routing |
 | serde, serde_json | 1.x | JSON in and out |
 | [tantivy](https://crates.io/crates/tantivy) | 0.26 | BM25 search index, one per tenant |
-| [tantivy-jieba](https://crates.io/crates/tantivy-jieba) | 0.20 | Chinese word segmentation for tantivy, built on jieba-rs |
+| [jieba-rs](https://crates.io/crates/jieba-rs) | 0.11 | Chinese word segmentation, inside our own tantivy tokenizer (`tantivy-jieba` can only use one global dictionary or a full copy per tokenizer, so it can't keep each tenant's terms apart) |
 | [aho-corasick](https://crates.io/crates/aho-corasick) | 1.x | The name matcher: finds every known alias in a query in one pass |
 | [petgraph](https://crates.io/crates/petgraph) | 0.8 | The in-memory copy of the graph: edges, anchors, walks and paths |
 | [fastembed](https://docs.rs/fastembed/latest/fastembed/) | latest | Local multilingual embeddings, such as multilingual-e5-small |
@@ -782,11 +803,11 @@ There are nine milestones, and each ends with a check you can run yourself. Isol
 | # | Build | Done when |
 |---|---|---|
 | M1 | Skeleton: config, identity in API key mode, tenant folders and id mapping, the `Store` trait with one SQLite file per tenant, pages as files, `/pages`, a tracing span per step | Two tenants' pages and SQLite files are completely invisible to each other over HTTP |
-| M2 | One entry, keyword mode: name matcher, English and Chinese tokenizers with the jieba dictionary, per-tenant tantivy index, the three channels and their slots, routes, `/read` with the read tracker | The test set's questions come back in the right slot, in both languages |
+| M2 | One entry, keyword mode: name matcher, English and Chinese tokenizers with the jieba dictionary, per-tenant tantivy index (in memory, rebuilt from the wiki when the tenant opens), the three channels and their slots, routes, `/read` of pages with the read tracker, search traces and `kb-replay`, the personal deployment defaults | The test set's questions come back in the right slot, in both languages |
 | M3 | Graph: `/ingest/graph/schema`, `/space` and `/data`, schema definitions and descriptions, spaces under schemas with their visibility, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, instance names in the name matcher, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords; nothing from a space the caller can't see ever appears; and the tests pass against the Neo4j container |
-| M4 | Librarian and inserts: `LlmClient` with both backends, plan and verify steps, the other four insert entry points, anchoring, per-tenant write queue, `/jobs`, proposals, rules for all five kinds | New content updates the related pages instead of duplicating them, every memory is anchored, and unsupported edits are held for review |
+| M4 | Librarian and inserts: `LlmClient` with both backends, plan and verify steps, the other four insert entry points, anchoring, per-tenant write queue, `/jobs`, proposals, rules for all five kinds, raw records in `sources/` and `/read` of the sources a visible page cites | New content updates the related pages instead of duplicating them, every memory is anchored, and unsupported edits are held for review |
 | M5 | Hop and meaning: the memory-to-knowledge hop, embeddings computed at write time with the e5 prefixes and stored in SQLite, `mode` with `semantic`, `both` and `auto` | Questions that need a memory plus the knowledge it leads to are answered, and semantic mode recovers cross-language misses |
-| M6 | Speed: caches, loading tenants on demand, a benchmark at 1k, 10k and 100k pages | Per-step timings meet the targets in "How it stays fast", in both modes |
+| M6 | Speed: caches, loading tenants on demand, the tantivy index on disk (`index/tantivy/`) with incremental sync by page hash, a benchmark at 1k, 10k and 100k pages | Per-step timings meet the targets in "How it stays fast", in both modes |
 | M7 | MCP, test chat and packaging: the `/mcp` tools with their strategy descriptions, JWT mode, `/dev` chat with streaming, the Dockerfile and `docker-compose.yml` | An MCP client can search, follow routes and record, choosing its own order of calls, and `docker compose up` starts the service and Neo4j on a clean machine |
 | M8 | Lint and deletion: contradictions, stale claims, duplicates, broken links, unanchored memories, frequent weak slots; user and tenant deletion | Lint returns findings with page links, and deleted data is gone from files, SQLite, indexes, vectors and Neo4j |
 | M9 | Acquisition: gap finding, one external connector, candidate proposals, approval flow, provenance, budgets | An approved external source fills a logged gap, and a planted bad page is stopped before it reaches the wiki |
@@ -811,7 +832,7 @@ The thesis experiments run on M2 to M6. Other search entry points are opened onl
 - Andrej Karpathy, [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) (gist, April 2026)
 - Du et al., [A-RAG: Scaling Agentic Retrieval-Augmented Generation via Hierarchical Retrieval Interfaces](https://arxiv.org/abs/2602.03442) (arXiv, February 2026)
 - [tantivy on crates.io](https://crates.io/crates/tantivy)
-- [tantivy-jieba on crates.io](https://crates.io/crates/tantivy-jieba)
+- [jieba-rs on crates.io](https://crates.io/crates/jieba-rs)
 - [aho-corasick on crates.io](https://crates.io/crates/aho-corasick)
 - [petgraph on crates.io](https://crates.io/crates/petgraph)
 - [rusqlite on crates.io](https://crates.io/crates/rusqlite)

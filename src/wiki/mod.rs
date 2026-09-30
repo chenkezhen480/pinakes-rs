@@ -1,8 +1,10 @@
 //! Wiki pages as Markdown files with YAML front matter, one folder tree per tenant.
 
+mod history;
 mod page;
 mod path;
 
+pub use history::History;
 pub use page::{FrontMatter, Page};
 pub use path::{Audience, PagePath};
 
@@ -69,6 +71,13 @@ impl WikiFs {
         let text = match std::fs::read_to_string(&file) {
             Ok(t) => t,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(WikiError::NotFound),
+            // Not UTF-8: a bad page, like broken front matter, not a failure of the service.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                return Err(WikiError::Malformed {
+                    path: path.to_string(),
+                    reason: "not valid UTF-8".into(),
+                });
+            }
             Err(e) => return Err(e.into()),
         };
         Page::parse(path.clone(), &text)
@@ -86,69 +95,122 @@ impl WikiFs {
         Ok(())
     }
 
-    /// Lists pages visible to a caller: every tenant-level page, the pages of the caller's own
-    /// groups, and the user pages under `users/<own_user_dir>/` when a user is given. Other
-    /// groups' and users' folders are never opened.
+    /// Lists pages visible to a caller: `index`, `log`, every tenant-level page, the pages of the
+    /// caller's own groups, and the user pages under `users/<own_user_dir>/` when a user is
+    /// given. Other groups' and users' folders are never opened.
     pub fn list(
         &self,
         own_user_dir: Option<&str>,
         own_group_dirs: &[String],
     ) -> Result<Vec<PageSummary>, WikiError> {
-        let mut out = Vec::new();
-        for root in ["index", "log"] {
-            self.push_if_page(root, &mut out)?;
-        }
-        for dir in ["experience", "expertise", "graph"] {
-            self.list_dir(dir, &mut out)?;
-        }
-        for group_dir in own_group_dirs {
-            for sub in ["experience", "expertise", "decisions"] {
-                self.list_dir(&format!("groups/{group_dir}/{sub}"), &mut out)?;
-            }
-        }
-        if let Some(user_dir) = own_user_dir {
-            self.push_if_page(&format!("users/{user_dir}/preferences"), &mut out)?;
-            self.list_dir(&format!("users/{user_dir}/decisions"), &mut out)?;
-        }
+        let user_dirs: Vec<String> = own_user_dir.map(str::to_owned).into_iter().collect();
+        let mut paths: Vec<PagePath> = ["index", "log"]
+            .iter()
+            .filter_map(|p| PagePath::parse(p).ok())
+            .collect();
+        paths.extend(self.page_paths(own_group_dirs, &user_dirs)?);
+        let mut out: Vec<PageSummary> = self.read_all(paths)?.iter().map(Page::summary).collect();
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
 
-    fn list_dir(&self, rel_dir: &str, out: &mut Vec<PageSummary>) -> Result<(), WikiError> {
-        let dir = self.root.join(rel_dir);
-        let entries = match std::fs::read_dir(&dir) {
+    /// Every page of the tenant, for every audience, except `index` and `log`. Only the search
+    /// snapshot uses this; it filters by the caller's scope on every query.
+    pub fn all_pages(&self) -> Result<Vec<Page>, WikiError> {
+        let groups = self.subdirs("groups")?;
+        let users = self.subdirs("users")?;
+        let mut out = self.read_all(self.page_paths(&groups, &users)?)?;
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
+    /// The paths of the pages that exist for the tenant and for the given group and user
+    /// folders. The one place that walks the wiki layout; it agrees with `PagePath::parse`, and
+    /// names that aren't valid page paths (such as raw ids) are left out.
+    fn page_paths(
+        &self,
+        group_dirs: &[String],
+        user_dirs: &[String],
+    ) -> Result<Vec<PagePath>, WikiError> {
+        let mut dirs: Vec<String> = ["experience", "expertise", "graph"]
+            .map(String::from)
+            .to_vec();
+        let mut rels = Vec::new();
+        for group in group_dirs {
+            for sub in ["experience", "expertise", "decisions"] {
+                dirs.push(format!("groups/{group}/{sub}"));
+            }
+        }
+        for user in user_dirs {
+            rels.push(format!("users/{user}/preferences"));
+            dirs.push(format!("users/{user}/decisions"));
+        }
+        for dir in &dirs {
+            for stem in self.page_stems(dir)? {
+                rels.push(format!("{dir}/{stem}"));
+            }
+        }
+        Ok(rels
+            .iter()
+            .filter_map(|r| PagePath::parse(r).ok())
+            .collect())
+    }
+
+    /// Reads pages, skipping missing ones and logging and skipping malformed ones.
+    fn read_all(&self, paths: Vec<PagePath>) -> Result<Vec<Page>, WikiError> {
+        let mut out = Vec::new();
+        for path in paths {
+            match self.read(&path) {
+                Ok(page) => out.push(page),
+                Err(WikiError::NotFound) => {}
+                Err(WikiError::Malformed { path, reason }) => {
+                    tracing::warn!(%path, %reason, "skipping malformed page");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    fn subdirs(&self, rel_dir: &str) -> Result<Vec<String>, WikiError> {
+        let entries = match std::fs::read_dir(self.root.join(rel_dir)) {
             Ok(e) => e,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                out.push(name.to_owned());
+            }
+        }
+        Ok(out)
+    }
+
+    fn page_stems(&self, rel_dir: &str) -> Result<Vec<String>, WikiError> {
+        let entries = match std::fs::read_dir(self.root.join(rel_dir)) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
         for entry in entries {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
             }
-            let name = entry.file_name();
-            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".md")) else {
-                continue;
-            };
-            self.push_if_page(&format!("{rel_dir}/{stem}"), out)?;
-        }
-        Ok(())
-    }
-
-    fn push_if_page(&self, rel: &str, out: &mut Vec<PageSummary>) -> Result<(), WikiError> {
-        // Files whose names aren't valid page paths are skipped rather than exposed.
-        let Ok(path) = PagePath::parse(rel) else {
-            return Ok(());
-        };
-        match self.read(&path) {
-            Ok(page) => out.push(page.summary()),
-            Err(WikiError::NotFound) => {}
-            Err(WikiError::Malformed { path, reason }) => {
-                tracing::warn!(%path, %reason, "skipping malformed page");
+            if let Some(stem) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.strip_suffix(".md"))
+            {
+                out.push(stem.to_owned());
             }
-            Err(e) => return Err(e),
         }
-        Ok(())
+        Ok(out)
     }
 }
 
@@ -210,6 +272,28 @@ mod tests {
             .map(|s| s.path)
             .collect();
         assert_eq!(anon, vec!["expertise/refunds"]);
+    }
+
+    #[test]
+    fn non_utf8_pages_are_skipped_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = WikiFs::new(dir.path());
+        wiki.write(&page("expertise/good", "Good")).unwrap();
+        std::fs::write(
+            dir.path().join("expertise").join("bad.md"),
+            [0xff, 0xfe, 0x00],
+        )
+        .unwrap();
+        let bad = wiki.read(&PagePath::parse("expertise/bad").unwrap());
+        assert!(matches!(bad, Err(WikiError::Malformed { .. })));
+        let all: Vec<_> = wiki
+            .all_pages()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.path.to_string())
+            .collect();
+        assert_eq!(all, vec!["expertise/good"]);
+        assert_eq!(wiki.list(None, &[]).unwrap().len(), 1);
     }
 
     #[test]

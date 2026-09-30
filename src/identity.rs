@@ -11,6 +11,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
+use crate::config::Deployment;
 use crate::error::ApiError;
 use crate::tenants::{Tenant, group_dir_name, user_dir_name, validate_id};
 use crate::wiki::{Audience, PagePath};
@@ -50,6 +51,47 @@ impl Scope {
 
     pub fn groups(&self) -> &[Group] {
         &self.groups
+    }
+
+    /// A scope for offline tools that already hold the data folder, such as `kb-replay`,
+    /// rebuilt from the folder names a trace recorded. Request handlers never use this: over
+    /// HTTP a Scope only comes from credentials.
+    pub(crate) fn offline(
+        tenant: Arc<Tenant>,
+        user_dir: Option<String>,
+        group_dirs: Vec<String>,
+    ) -> Self {
+        Scope {
+            tenant,
+            user: user_dir.map(|dir| User {
+                id: dir.clone(),
+                dir,
+            }),
+            groups: group_dirs
+                .into_iter()
+                .map(|dir| Group {
+                    id: dir.clone(),
+                    dir,
+                })
+                .collect(),
+        }
+    }
+
+    /// A trace record for this caller: tenant, user and group folders, never raw ids.
+    pub fn trace_record(&self, endpoint: crate::trace::Endpoint) -> crate::trace::TraceRecord {
+        let mut r = crate::trace::TraceRecord::new(endpoint, &self.tenant.dir_name);
+        r.user = self.user.as_ref().map(|u| u.dir.clone());
+        r.groups = self.groups.iter().map(|g| g.dir.clone()).collect();
+        r
+    }
+
+    /// The page audiences this caller may see, as the search index names them: `tenant`, the
+    /// caller's group folders and the caller's user folder. Agrees with [`Scope::can_see`].
+    pub fn audience_keys(&self) -> Vec<String> {
+        let mut out = vec!["tenant".to_owned()];
+        out.extend(self.groups.iter().map(|g| g.dir.clone()));
+        out.extend(self.user.iter().map(|u| u.dir.clone()));
+        out
     }
 
     /// Whether this caller may see a page: tenant-level pages always, group pages when the caller
@@ -119,6 +161,11 @@ impl FromRequestParts<AppState> for Scope {
             .ok_or(ApiError::Unauthorized)?;
 
         let user = match parts.headers.get(cfg.user_header.as_str()) {
+            // A personal deployment has one person, so no header means that person.
+            None if cfg.deployment == Deployment::Personal => Some(User {
+                id: cfg.default_user.clone(),
+                dir: user_dir_name(&cfg.default_user),
+            }),
             None => None,
             Some(v) => {
                 let id = v

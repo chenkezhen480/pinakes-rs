@@ -11,6 +11,9 @@ dir = "./data"                 # the Docker image will point this at its /data v
 
 [identity]
 mode = "api_key"               # "jwt" arrives in M7
+deployment = "multi_tenant"    # or "personal": one person, default tenant and user below
+default_tenant = "000000"      # personal: created on first start, key in <data>/personal-api-key.txt
+default_user = "admin"         # personal: the user when no user header is sent (no admin rights)
 key_header = "Authorization"   # "Bearer <key>"
 user_header = "X-User-Id"
 admin_key_env = "KB_ADMIN_KEY"
@@ -28,10 +31,15 @@ model = "claude-sonnet-5"
 # base_url = "http://localhost:11434/v1"   # for openai_compatible
 
 [search]                       # (M2)
+slots = { memories = 3, knowledge = 3, relations = 5 }   # hits per slot by default, max 20
+session_idle_minutes = 30      # read-tracker sessions expire after this idle time
 languages = ["en", "zh"]
-default_mode = "keyword"       # keyword, semantic, both or auto
-slots = { memories = 3, knowledge = 3, relations = 5 }
-hop = { top_memories = 3, depth = 1 }
+default_mode = "keyword"       # (M5) keyword, semantic, both or auto
+hop = { top_memories = 3, depth = 1 }   # (M5)
+
+[trace]                        # search traces: <tenant>/logs/search-<date>.jsonl
+enabled = true
+retention_days = 30            # 0 keeps them forever
 
 [embedding]                    # (M5) local, runs inside the process
 model = "multilingual-e5-small"
