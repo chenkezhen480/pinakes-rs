@@ -120,7 +120,7 @@ updated: 2026-09-29
 
 **Relation types are searchable; edges are not summarized.** Each relation type in a description becomes one entry in a small index of its own: its name, both descriptions, its aliases and the node types it connects. A space with 40 relation types has 40 entries, and they rarely change. For a question like "which customer placed order 1042" (订单1042的下单客户), "placed" or 下单 matches `placed_by`, the name matcher finds the order, and the graph returns the real edge. The answer always comes from the graph itself.
 
-**Graph data skips the librarian.** Nodes and edges arrive through `/ingest/graph`. Code checks them against the schema (known types, required keys, both ends present) and writes them to Neo4j. No LLM is involved, and no page is written.
+**Graph data skips the librarian.** Nodes and edges arrive through `/ingest/graph`. Code checks them against the schema (known types, required keys, both ends present) and writes them to Neo4j. No LLM is involved, and no page is written: the wiki holds only the schema, never individual nodes. Each node's name and aliases are added to the name matcher as they are written.
 
 **Anchors join the wiki to the graph.** Memory and knowledge pages list the entities they're about in their front matter. The lift and the memory-to-knowledge hop follow these anchors, so the librarian must anchor every memory, and lint flags any memory without one.
 
@@ -168,7 +168,7 @@ The next section lists the exact tools and parameters agents use for this.
 | Words | jieba segmentation for Chinese (via `tantivy-jieba`), English words lowercased | Precise matches on whole words |
 | Bigrams | Overlapping 2-character pieces of Chinese text, English words as-is | Catches domain terms that jieba's dictionary splits wrongly |
 
-**The name matcher.** Every alias, title and node name in the tenant's wiki goes into an Aho-Corasick automaton, rebuilt when pages change. It finds all known names in a query in one pass, in either language, in microseconds. Aliases come from page front matter and schema descriptions, so the wiki's catalog is the matcher's only source.
+**The name matcher.** Every alias and title in the tenant's wiki, and the name and aliases of every graph node, go into an Aho-Corasick automaton, rebuilt when pages or graph data change. It finds all known names in a query in one pass, in either language, in microseconds. Page and type aliases come from page front matter and schema descriptions; instance names (a customer called 林晓, machine ROB-11) come from the graph data, since the wiki holds only schemas.
 
 **Meaning, when the agent asks for it.** Vectors are part of version 1, but only as a mode the agent chooses. Following A-RAG, the service doesn't decide when to use them. It returns coverage per slot and the keywords that matched nothing, and the agent decides whether to retry with `mode: semantic`. In A-RAG's ablation, removing semantic search hurt most on the hardest multi-hop benchmark. Vectors help most with:
 
@@ -743,7 +743,7 @@ There are nine milestones, and each ends with a check you can run yourself. Isol
 |---|---|---|
 | M1 | Skeleton: config, identity in API key mode, tenant folders and id mapping, the `Store` trait with one SQLite file per tenant, pages as files, `/pages`, a tracing span per step | Two tenants' pages and SQLite files are completely invisible to each other over HTTP |
 | M2 | One entry, keyword mode: name matcher, English and Chinese tokenizers with the jieba dictionary, per-tenant tantivy index, the three channels and their slots, routes, `/read` with the read tracker | The test set's questions come back in the right slot, in both languages |
-| M3 | Graph: `/ingest/graph`, schema descriptions, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords, and the tests pass against the Neo4j container |
+| M3 | Graph: `/ingest/graph`, schema descriptions, the relation-type index, the `GraphStore` trait with Neo4j and SQLite backends, graph data checked against schemas, instance names in the name matcher, page anchors, the petgraph copy, lifting, `/graph` and `/graph/path` | Relationship questions return the right edges in the relations slot, even when knowledge pages share their keywords, and the tests pass against the Neo4j container |
 | M4 | Librarian and inserts: `LlmClient` with both backends, plan and verify steps, the other four insert entry points, anchoring, per-tenant write queue, `/jobs`, proposals, rules for all five kinds | New content updates the related pages instead of duplicating them, every memory is anchored, and unsupported edits are held for review |
 | M5 | Hop and meaning: the memory-to-knowledge hop, embeddings computed at write time with the e5 prefixes and stored in SQLite, `mode` with `semantic`, `both` and `auto` | Questions that need a memory plus the knowledge it leads to are answered, and semantic mode recovers cross-language misses |
 | M6 | Speed: caches, loading tenants on demand, a benchmark at 1k, 10k and 100k pages | Per-step timings meet the targets in "How it stays fast", in both modes |
@@ -758,7 +758,7 @@ The thesis experiments run on M2 to M6. Other search entry points are opened onl
 - ☐ **Default identity mode.** Should the first release default to API keys, or to JWTs signed by the host system?
 - ☐ **How much agent history to file.** Every task, or only failures and new approaches?
 - ☐ **Retention.** How long should raw records be kept, especially task records and user decisions?
-- ☐ **Instance data in graph spaces.** Do spaces hold individual nodes, such as specific orders, or only the schema? With instances, their names go into the name matcher as they are written. Decide before M3.
+- ☑ **Instance data in graph spaces.** Decided 2026-09-30: graph spaces hold individual nodes (specific orders, customers, machines) in Neo4j; the wiki holds only the schema description. Instance names and aliases are loaded from the graph data into the name matcher. Watch the matcher's memory for tenants with millions of nodes.
 - ☐ **Neo4j at scale.** The Community edition keeps every tenant in one database. Is that enough, or do large deployments need the Enterprise edition, or one Neo4j per group of tenants?
 - ☐ **Which entry point to open first.** After the wiki-only experiment: direct graph queries, search over raw chunks, or per-kind search tools?
 - ☐ **Embedding model.** Is multilingual-e5-small accurate enough for Chinese, or is a larger model worth the extra latency?

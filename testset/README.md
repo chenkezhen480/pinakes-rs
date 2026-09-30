@@ -106,8 +106,10 @@ slot in `expect_empty` is empty or marked weak. Other hits in a slot don't fail 
 - ids are unique, categories and milestones are consistent, and each of the five knowledge kinds
   has at least 30 questions.
 
-## Open question it assumes an answer to
+## Graph data and the wiki
 
-Graph spaces here hold instance data (orders, shipments, machines…), not only schemas. This is
-open question 4 in the design ("Instance data in graph spaces"); the `graph` questions depend on
-it. If the answer is "schema only", those questions need rewriting before M3.
+As decided for open question 4 (2026-09-30): the wiki holds only each graph space's schema
+description (`wiki/graph/<space>.md`); individual nodes and edges live in `graph/<space>.json`,
+which M3 sends to `/ingest/graph` and which ends up in Neo4j, never in the wiki. Node names and
+aliases in that file feed the name matcher, which is how questions such as "林晓下过哪些订单？"
+find their starting entity.
