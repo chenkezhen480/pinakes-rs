@@ -2,6 +2,7 @@
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
@@ -26,8 +27,9 @@ pub struct CreateTenantResponse {
 pub async fn create_tenant(
     _admin: Admin,
     State(app): State<AppState>,
-    Json(req): Json<CreateTenantRequest>,
+    body: Result<Json<CreateTenantRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreateTenantResponse>), ApiError> {
+    let Json(req) = body?;
     let created = app
         .tenants
         .create(&req.tenant_id, "initial")

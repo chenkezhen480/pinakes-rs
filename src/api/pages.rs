@@ -1,6 +1,7 @@
 //! `GET /pages` and `GET /pages/{path}`: browsing the wiki. No LLM, no search.
 
 use axum::Json;
+use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query};
 use serde::{Deserialize, Serialize};
 
@@ -19,11 +20,12 @@ pub struct ListResponse {
     pub pages: Vec<PageSummary>,
 }
 
-#[tracing::instrument(name = "list_pages", skip_all, fields(kind = ?q.kind))]
+#[tracing::instrument(name = "list_pages", skip_all)]
 pub async fn list(
     scope: Scope,
-    Query(q): Query<ListQuery>,
+    query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Json<ListResponse>, ApiError> {
+    let Query(q) = query?;
     let wiki = scope.tenant().wiki();
     let user_dir = scope.user().map(|u| u.dir.clone());
     let mut pages = tokio::task::spawn_blocking(move || wiki.list(user_dir.as_deref()))
@@ -44,8 +46,13 @@ pub struct PageResponse {
     pub body: String,
 }
 
-#[tracing::instrument(name = "get_page", skip_all, fields(path = %raw))]
-pub async fn get(scope: Scope, Path(raw): Path<String>) -> Result<Json<PageResponse>, ApiError> {
+#[tracing::instrument(name = "get_page", skip_all, fields(path = tracing::field::Empty))]
+pub async fn get(
+    scope: Scope,
+    raw: Result<Path<String>, PathRejection>,
+) -> Result<Json<PageResponse>, ApiError> {
+    let Path(raw) = raw?;
+    tracing::Span::current().record("path", raw.as_str());
     let path = PagePath::parse(&raw)?;
     // Another user's page is reported exactly like a missing one.
     if !scope.can_see(&path) {

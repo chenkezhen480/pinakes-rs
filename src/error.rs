@@ -1,6 +1,7 @@
 //! The error type every HTTP handler returns.
 
 use axum::Json;
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
@@ -46,6 +47,25 @@ impl IntoResponse for ApiError {
             Json(json!({ "error": { "code": code, "message": message } })),
         )
             .into_response()
+    }
+}
+
+// axum's own extractor failures (bad JSON, unknown query values) use the same error shape.
+impl From<JsonRejection> for ApiError {
+    fn from(r: JsonRejection) -> Self {
+        ApiError::BadRequest(r.body_text())
+    }
+}
+
+impl From<QueryRejection> for ApiError {
+    fn from(r: QueryRejection) -> Self {
+        ApiError::BadRequest(r.body_text())
+    }
+}
+
+impl From<PathRejection> for ApiError {
+    fn from(r: PathRejection) -> Self {
+        ApiError::BadRequest(r.body_text())
     }
 }
 

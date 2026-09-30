@@ -47,11 +47,16 @@ impl Scope {
     }
 }
 
-/// The API key from the configured header. For `Authorization`, the `Bearer ` prefix is removed.
+/// The API key from the configured header. For `Authorization`, the `Bearer` scheme is required
+/// (case-insensitive, as RFC 7235 says) and removed.
 fn api_key<'a>(headers: &'a HeaderMap, header: &str) -> Option<&'a str> {
     let value = headers.get(header)?.to_str().ok()?.trim();
     let key = if header.eq_ignore_ascii_case("authorization") {
-        value.strip_prefix("Bearer ")?.trim()
+        let (scheme, rest) = value.split_once(' ')?;
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            return None;
+        }
+        rest.trim()
     } else {
         value
     };
@@ -141,6 +146,10 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("authorization", HeaderValue::from_static("Bearer abc"));
         assert_eq!(api_key(&h, "Authorization"), Some("abc"));
+        h.insert("authorization", HeaderValue::from_static("bearer  abc"));
+        assert_eq!(api_key(&h, "Authorization"), Some("abc"));
+        h.insert("authorization", HeaderValue::from_static("Basic abc"));
+        assert_eq!(api_key(&h, "Authorization"), None);
         h.insert("authorization", HeaderValue::from_static("abc"));
         assert_eq!(api_key(&h, "Authorization"), None);
         h.insert("x-api-key", HeaderValue::from_static(" abc "));

@@ -80,7 +80,7 @@ impl WikiFs {
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = file.with_extension(format!("md.tmp-{}", std::process::id()));
+        let tmp = file.with_extension(format!("md.tmp-{}", hex::encode(rand::random::<[u8; 8]>())));
         std::fs::write(&tmp, page.render())?;
         std::fs::rename(&tmp, &file)?;
         Ok(())

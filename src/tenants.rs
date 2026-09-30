@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::store::{SqliteStore, Store};
 use crate::wiki::WikiFs;
@@ -84,6 +84,8 @@ pub struct Tenant {
     pub dir_name: String,
     pub dir: PathBuf,
     pub store: Arc<dyn Store>,
+    /// API key hashes, loaded from the store when the tenant opens. Key management (not in v1
+    /// yet) must update this set as well as the store.
     key_hashes: RwLock<HashSet<String>>,
 }
 
@@ -125,7 +127,11 @@ pub struct CreatedTenant {
 pub struct Tenants {
     root: PathBuf,
     store_file: String,
+    /// Open tenants. The lock is only ever held for a map lookup or insert, never across disk
+    /// work, so loading one tenant can't stall requests for the others.
     open: RwLock<HashMap<String, Arc<Tenant>>>,
+    /// Serializes tenant creation.
+    creating: Mutex<()>,
 }
 
 impl Tenants {
@@ -134,6 +140,7 @@ impl Tenants {
             root: root.into(),
             store_file: store_file.into(),
             open: RwLock::new(HashMap::new()),
+            creating: Mutex::new(()),
         }
     }
 
@@ -153,9 +160,11 @@ impl Tenants {
         let dir_name = tenant_dir_name(tenant_id);
         let final_dir = self.root.join(&dir_name);
 
-        // Holding the write lock serializes creations and keeps the cache consistent.
-        let mut open = self.open.write().await;
-        if final_dir.exists() {
+        let _creating = self.creating.lock().await;
+        if tokio::fs::try_exists(&final_dir)
+            .await
+            .context("checking for an existing tenant folder")?
+        {
             return Err(CreateTenantError::AlreadyExists);
         }
 
@@ -183,7 +192,7 @@ impl Tenants {
         }
 
         let tenant = Arc::new(self.load(&dir_name).await?);
-        open.insert(dir_name, tenant.clone());
+        self.open.write().await.insert(dir_name, tenant.clone());
         Ok(CreatedTenant { tenant, api_key })
     }
 
@@ -208,16 +217,18 @@ impl Tenants {
         if let Some(t) = self.open.read().await.get(dir_name) {
             return Ok(Some(t.clone()));
         }
-        let mut open = self.open.write().await;
-        if let Some(t) = open.get(dir_name) {
-            return Ok(Some(t.clone()));
-        }
-        if !self.root.join(dir_name).join(&self.store_file).is_file() {
+        let file = self.root.join(dir_name).join(&self.store_file);
+        let exists = tokio::fs::metadata(&file).await.is_ok_and(|m| m.is_file());
+        if !exists {
             return Ok(None);
         }
+        // Load without holding the lock. If two requests race on a cold tenant, both load it and
+        // the first insert wins; the other copy is dropped.
         let tenant = Arc::new(self.load(dir_name).await?);
-        open.insert(dir_name.to_owned(), tenant.clone());
-        Ok(Some(tenant))
+        let mut open = self.open.write().await;
+        Ok(Some(
+            open.entry(dir_name.to_owned()).or_insert(tenant).clone(),
+        ))
     }
 
     async fn load(&self, dir_name: &str) -> anyhow::Result<Tenant> {
@@ -343,6 +354,18 @@ mod tests {
             '0'
         });
         assert!(tenants.authenticate(&wrong).await.unwrap().is_none());
+
+        // Many concurrent requests on a cold tenant all succeed.
+        let cold = Arc::new(Tenants::new(dir.path(), "kb.sqlite"));
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let (t, k) = (cold.clone(), created.api_key.clone());
+                tokio::spawn(async move { t.authenticate(&k).await.unwrap().is_some() })
+            })
+            .collect();
+        for task in tasks {
+            assert!(task.await.unwrap());
+        }
 
         // No temp folders are left behind.
         let names: Vec<_> = std::fs::read_dir(dir.path())

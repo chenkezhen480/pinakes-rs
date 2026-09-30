@@ -432,3 +432,32 @@ async fn bad_user_header_is_rejected() {
     let (s, _) = app.call(Call::get("/pages").key(&key).user(&long)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn request_errors_use_the_json_error_shape() {
+    let app = TestApp::new();
+    let key = app.create_tenant("acme").await;
+
+    let (s, body) = app.call(Call::get("/pages?kind=nonsense").key(&key)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request", "{body}");
+
+    let (s, body) = app
+        .call(Call::post("/admin/tenants", json!({ "wrong_field": 1 })).key(ADMIN))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request", "{body}");
+}
+
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive() {
+    let app = TestApp::new();
+    let key = app.create_tenant("acme").await;
+    let req = Request::builder()
+        .uri("/pages")
+        .header("Authorization", format!("bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
