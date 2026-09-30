@@ -273,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_and_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("kb.sqlite");
+        let path = dir.path().join("pinakes.sqlite");
         SqliteStore::create_for_tenant(&path, "acme", "abc123", "initial").unwrap();
         let store = SqliteStore::open_existing(&path).unwrap();
         assert_eq!(store.tenant_id().await.unwrap().as_deref(), Some("acme"));
@@ -291,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn graph_schemas_and_spaces() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("kb.sqlite");
+        let path = dir.path().join("pinakes.sqlite");
         SqliteStore::create_for_tenant(&path, "acme", "abc", "initial").unwrap();
         let store = SqliteStore::open_existing(&path).unwrap();
         let mut def: SchemaDef = serde_json::from_value(serde_json::json!({
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn create_refuses_existing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("kb.sqlite");
+        let path = dir.path().join("pinakes.sqlite");
         drop(SqliteStore::create(&path).unwrap());
         assert!(SqliteStore::create(&path).is_err());
     }

@@ -43,7 +43,7 @@ async fn first_start_creates_the_default_tenant_once() {
 
     // A key is still required.
     let (status, _) = app
-        .post(Caller::new("kb_nope"), "/search", json!({ "query": "x" }))
+        .post(Caller::new("pnx_nope"), "/search", json!({ "query": "x" }))
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

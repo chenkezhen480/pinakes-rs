@@ -223,7 +223,7 @@ async fn sqlite_files_are_separate() {
     let key_b = app.create_tenant("globex").await;
 
     for (tenant, own, other) in [("acme", &key_a, &key_b), ("globex", &key_b, &key_a)] {
-        let file = app.tenant_dir(tenant).join("kb.sqlite");
+        let file = app.tenant_dir(tenant).join("pinakes.sqlite");
         let store = SqliteStore::open_existing(&file).unwrap();
         assert_eq!(store.tenant_id().await.unwrap().as_deref(), Some(tenant));
         let hashes = store.api_key_hashes().await.unwrap();
@@ -245,13 +245,13 @@ async fn forged_and_malformed_keys_are_rejected() {
     // A's secret routed to B's folder.
     let b_hash = &tenant_dir_name("globex")[2..];
     let secret = key_a.rsplit('_').next().unwrap();
-    let forged = format!("kb_{b_hash}_{secret}");
+    let forged = format!("pnx_{b_hash}_{secret}");
     // B's folder with a made-up secret.
-    let guessed = format!("kb_{b_hash}_{}", "0".repeat(64));
+    let guessed = format!("pnx_{b_hash}_{}", "0".repeat(64));
     // Well-formed key for a tenant that doesn't exist.
-    let ghost = format!("kb_{}_{}", &tenant_dir_name("nobody")[2..], "0".repeat(64));
+    let ghost = format!("pnx_{}_{}", &tenant_dir_name("nobody")[2..], "0".repeat(64));
 
-    for key in [forged.as_str(), &guessed, &ghost, "kb_garbage", ADMIN] {
+    for key in [forged.as_str(), &guessed, &ghost, "pnx_garbage", ADMIN] {
         let (s, body) = app.call(Call::get("/pages").key(key)).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED, "{key}: {body}");
     }

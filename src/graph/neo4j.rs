@@ -1,6 +1,6 @@
 //! The Neo4j graph backend. Neo4j Community has one database, so every tenant shares it: each
-//! node is labelled `KbNode` plus its type, and carries `tenant`, `space`, `type` and `key`;
-//! each edge is a `KB_REL` relationship carrying `tenant`, `space` and `type`. Every query
+//! node is labelled `PinakesNode` plus its type, and carries `tenant`, `space`, `type` and `key`;
+//! each edge is a `PINAKES_REL` relationship carrying `tenant`, `space` and `type`. Every query
 //! binds the tenant, and nothing else ever reaches Cypher text except type names, which are
 //! validated identifiers.
 //!
@@ -24,10 +24,10 @@ use crate::config::Neo4jConfig;
 
 /// Constraints and indexes, created once per connection. Idempotent.
 const SETUP: &[&str] = &[
-    "CREATE CONSTRAINT kb_node_identity IF NOT EXISTS FOR (n:KbNode) \
+    "CREATE CONSTRAINT pinakes_node_identity IF NOT EXISTS FOR (n:PinakesNode) \
      REQUIRE (n.tenant, n.space, n.type, n.key) IS UNIQUE",
-    "CREATE INDEX kb_node_tenant IF NOT EXISTS FOR (n:KbNode) ON (n.tenant)",
-    "CREATE INDEX kb_rel_tenant IF NOT EXISTS FOR ()-[r:KB_REL]-() ON (r.tenant)",
+    "CREATE INDEX pinakes_node_tenant IF NOT EXISTS FOR (n:PinakesNode) ON (n.tenant)",
+    "CREATE INDEX pinakes_rel_tenant IF NOT EXISTS FOR ()-[r:PINAKES_REL]-() ON (r.tenant)",
 ];
 
 /// Rows per `UNWIND` statement.
@@ -158,7 +158,7 @@ impl GraphStore for Neo4jGraphStore {
             validate_name("node type", ty).map_err(anyhow::Error::msg)?;
             let cypher = format!(
                 "UNWIND $rows AS row \
-                 MERGE (n:KbNode {{tenant: $tenant, space: row.space, type: $type, key: row.key}}) \
+                 MERGE (n:PinakesNode {{tenant: $tenant, space: row.space, type: $type, key: row.key}}) \
                  SET n.name = row.name, n.aliases = row.aliases, n:`{ty}`"
             );
             for chunk in list.chunks(CHUNK) {
@@ -178,9 +178,9 @@ impl GraphStore for Neo4jGraphStore {
             txn.run(
                 query(
                     "UNWIND $rows AS row \
-                     MATCH (a:KbNode {tenant: $tenant, space: row.space, type: row.from_type, key: row.from_key}) \
-                     MATCH (b:KbNode {tenant: $tenant, space: row.space, type: row.to_type, key: row.to_key}) \
-                     MERGE (a)-[:KB_REL {tenant: $tenant, space: row.space, type: row.type}]->(b)",
+                     MATCH (a:PinakesNode {tenant: $tenant, space: row.space, type: row.from_type, key: row.from_key}) \
+                     MATCH (b:PinakesNode {tenant: $tenant, space: row.space, type: row.to_type, key: row.to_key}) \
+                     MERGE (a)-[:PINAKES_REL {tenant: $tenant, space: row.space, type: row.type}]->(b)",
                 )
                 .param("tenant", tenant)
                 .param("rows", rows),
@@ -197,7 +197,7 @@ impl GraphStore for Neo4jGraphStore {
         let mut rows = graph
             .execute(
                 query(
-                    "MATCH (n:KbNode {tenant: $tenant}) \
+                    "MATCH (n:PinakesNode {tenant: $tenant}) \
                      RETURN n.space AS space, n.type AS type, n.key AS key, n.name AS name, \
                             n.aliases AS aliases \
                      ORDER BY space, type, key",
@@ -219,7 +219,7 @@ impl GraphStore for Neo4jGraphStore {
         let mut rows = graph
             .execute(
                 query(
-                    "MATCH (a:KbNode {tenant: $tenant})-[r:KB_REL {tenant: $tenant}]->(b:KbNode {tenant: $tenant}) \
+                    "MATCH (a:PinakesNode {tenant: $tenant})-[r:PINAKES_REL {tenant: $tenant}]->(b:PinakesNode {tenant: $tenant}) \
                      RETURN r.space AS space, r.type AS type, a.type AS from_type, a.key AS from_key, \
                             b.type AS to_type, b.key AS to_key \
                      ORDER BY space, type, from_type, from_key, to_type, to_key",
@@ -244,7 +244,8 @@ impl GraphStore for Neo4jGraphStore {
         let (graph, tenant) = self.open().await?;
         graph
             .run(
-                query("MATCH (n:KbNode {tenant: $tenant}) DETACH DELETE n").param("tenant", tenant),
+                query("MATCH (n:PinakesNode {tenant: $tenant}) DETACH DELETE n")
+                    .param("tenant", tenant),
             )
             .await?;
         Ok(())

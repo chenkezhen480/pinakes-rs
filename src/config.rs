@@ -286,7 +286,7 @@ fn default_session_idle_minutes() -> u64 {
     30
 }
 fn default_store_file() -> String {
-    "kb.sqlite".into()
+    "pinakes.sqlite".into()
 }
 fn default_max_depth() -> usize {
     3
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(cfg.identity.mode, IdentityMode::ApiKey);
         assert_eq!(cfg.identity.user_header, "X-User-Id");
         assert_eq!(cfg.identity.group_header, "X-User-Groups");
-        assert_eq!(cfg.store.file_name, "kb.sqlite");
+        assert_eq!(cfg.store.file_name, "pinakes.sqlite");
         assert_eq!(cfg.search.slots.relations, 5);
         assert_eq!(cfg.search.session_idle_minutes, 30);
         assert!(cfg.trace.enabled);

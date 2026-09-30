@@ -75,7 +75,7 @@ async fn bad_requests_are_rejected() {
     let (status, _) = w
         .app
         .post(
-            Caller::new("kb_nope"),
+            Caller::new("pnx_nope"),
             "/search",
             json!({ "query": "refund" }),
         )

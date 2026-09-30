@@ -23,7 +23,7 @@ admin_key_env = "PINAKES_ADMIN_KEY"
 # user_claim = "sub"
 
 [store]                        # one SQLite file per tenant, WAL mode
-file_name = "kb.sqlite"
+file_name = "pinakes.sqlite"
 
 [librarian]                    # (M4) the only LLM the service calls
 provider = "anthropic"         # or "openai_compatible"

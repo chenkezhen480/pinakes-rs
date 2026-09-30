@@ -20,7 +20,7 @@ use crate::wiki::{History, WikiFs};
 
 const MAX_ID_LEN: usize = 256;
 const HASH_HEX_LEN: usize = 16;
-const KEY_PREFIX: &str = "kb_";
+const KEY_PREFIX: &str = "pnx_";
 
 /// Wiki folders created with every tenant.
 const WIKI_DIRS: &[&str] = &["experience", "expertise", "graph", "users"];
@@ -68,7 +68,7 @@ pub fn validate_id(what: &str, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// API keys look like `kb_<16 hex: tenant folder hash>_<64 hex: secret>`. The prefix routes the
+/// API keys look like `pnx_<16 hex: tenant folder hash>_<64 hex: secret>`. The prefix routes the
 /// key to its tenant's folder without a global table; only the hash of the whole key is stored.
 fn new_api_key(tenant_dir: &str) -> String {
     let hash = tenant_dir.strip_prefix("t_").expect("tenant dir name");
@@ -523,10 +523,10 @@ mod tests {
     fn malformed_keys_route_nowhere() {
         for k in [
             "",
-            "kb_",
-            "kb_0123456789abcdef",
-            "kb_0123456789abcdef_short",
-            "kb_../../etc_0000000000000000000000000000000000000000000000000000000000000000",
+            "pnx_",
+            "pnx_0123456789abcdef",
+            "pnx_0123456789abcdef_short",
+            "pnx_../../etc_0000000000000000000000000000000000000000000000000000000000000000",
             "xx_0123456789abcdef_0000000000000000000000000000000000000000000000000000000000000000",
         ] {
             assert_eq!(tenant_dir_from_key(k), None, "{k}");
@@ -545,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn create_then_authenticate() {
         let dir = tempfile::tempdir().unwrap();
-        let tenants = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
+        let tenants = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60));
         let created = tenants.create("acme", "initial").await.unwrap();
         assert_eq!(created.tenant.id, "acme");
         assert!(matches!(
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(found.unwrap().id, "acme");
 
         // A fresh registry (as after a restart) loads the tenant from disk.
-        let reopened = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
+        let reopened = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60));
         assert!(
             reopened
                 .authenticate(&created.api_key)
@@ -578,7 +578,7 @@ mod tests {
         // Many concurrent requests on a cold tenant all succeed.
         let cold = Arc::new(Tenants::new(
             dir.path(),
-            "kb.sqlite",
+            "pinakes.sqlite",
             Duration::from_secs(60),
         ));
         let tasks: Vec<_> = (0..16)
@@ -604,11 +604,11 @@ mod tests {
     #[tokio::test]
     async fn authentication_builds_no_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        let created = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60))
+        let created = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60))
             .create("acme", "initial")
             .await
             .unwrap();
-        let cold = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
+        let cold = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60));
         let mut wrong = created.api_key.clone();
         wrong.replace_range(
             wrong.len() - 1..,
@@ -624,7 +624,7 @@ mod tests {
     #[tokio::test]
     async fn reindex_swaps_in_new_pages() {
         let dir = tempfile::tempdir().unwrap();
-        let tenants = Tenants::new(dir.path(), "kb.sqlite", Duration::from_secs(60));
+        let tenants = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60));
         let tenant = tenants.create("acme", "initial").await.unwrap().tenant;
         let before = tenant.snapshot().await.unwrap();
         assert!(before.catalog.pages.is_empty());
