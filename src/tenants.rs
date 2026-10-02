@@ -113,6 +113,9 @@ pub struct Tenant {
     graph_failed_at: std::sync::Mutex<Option<Instant>>,
     /// Held by every graph write (schemas, spaces, data), so they apply one at a time.
     pub graph_writer: Mutex<()>,
+    /// Held while wiki pages are written and the tenant re-indexed (librarian jobs, schema
+    /// descriptions), so writes never interleave. LLM calls happen outside it.
+    pub wiki_writer: Mutex<()>,
 }
 
 /// How long after a failed graph load requests fail at once rather than try again.
@@ -453,6 +456,7 @@ impl Tenants {
             graph_loading: Mutex::new(()),
             graph_failed_at: std::sync::Mutex::new(None),
             graph_writer: Mutex::new(()),
+            wiki_writer: Mutex::new(()),
         })
     }
 }

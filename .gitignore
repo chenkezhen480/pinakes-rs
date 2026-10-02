@@ -3,3 +3,4 @@
 .env
 *.sqlite-wal
 *.sqlite-shm
+/model.conf

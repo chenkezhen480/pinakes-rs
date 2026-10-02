@@ -1,0 +1,10 @@
+# The librarian's model: the one LLM the service calls (writes only, never searches).
+# Copy this file to model.conf, next to config.toml, and fill it in. model.conf holds the key,
+# so it is not in git. config.toml points here with [librarian] model_file.
+
+provider = "anthropic"                            # the Anthropic Messages API, or "openai_compatible"
+base_url = "https://api.deepseek.com/anthropic"   # DeepSeek's Anthropic-compatible endpoint;
+                                                  # remove it to call Anthropic itself
+model = "deepseek-flash"                          # the one model for every step
+api_key = ""                                      # the key; when empty, the variable below is read
+key_env = "DEEPSEEK_API_KEY"

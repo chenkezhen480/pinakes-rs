@@ -3,6 +3,8 @@
 mod admin;
 mod graph;
 mod ingest;
+mod insert;
+mod jobs;
 mod pages;
 mod read;
 mod search;
@@ -16,11 +18,22 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/pages", get(pages::list))
-        .route("/pages/{*path}", get(pages::get))
+        .route("/pages/{*path}", get(pages::get).put(pages::put))
         .route("/search", post(search::search))
         .route("/read", post(read::read))
         .route("/graph", post(graph::graph))
         .route("/graph/path", post(graph::path))
+        .route("/ingest/experience", post(insert::experience))
+        .route("/ingest/decision", post(insert::decision))
+        // A document can be long.
+        .route(
+            "/ingest/expertise",
+            post(insert::expertise).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
+        .route("/ingest/preference", post(insert::preference))
+        .route("/jobs/{id}", get(jobs::get))
+        .route("/proposals", get(jobs::list))
+        .route("/proposals/{id}/approve", post(jobs::approve))
         .route("/ingest/graph/schema", post(ingest::schema))
         .route("/ingest/graph/space", post(ingest::space))
         // A full batch (`graph::def::MAX_BATCH` nodes and edges) is well over axum's 2 MB default.

@@ -300,10 +300,20 @@ async fn read_tracker_and_headings() {
         .await;
     assert_eq!(resp["pages"][0]["error"], "heading_not_found");
     assert_eq!(resp["pages"][1]["error"], "not_found");
-    for ids in [json!([]), json!(["../secret"]), json!(["sources/x.json"])] {
+    for ids in [
+        json!([]),
+        json!(["../secret"]),
+        json!(["sources/../x.json"]),
+    ] {
         let (status, _) = w.app.post(c, "/read", json!({ "ids": ids })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{ids}");
     }
+    // A source id no visible page cites is not found, like a hidden page.
+    let (_, resp) = w
+        .app
+        .post(c, "/read", json!({ "ids": ["sources/x.json"] }))
+        .await;
+    assert_eq!(resp["pages"][0]["error"], "not_found");
 }
 
 /// A page whose file can't be parsed fails on its own; the other ids are still read.

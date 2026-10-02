@@ -1,5 +1,7 @@
-//! Per-tenant operational storage: API keys, the audit log, graph schema definitions and the
-//! registry of graph spaces, and later jobs, proposals and embeddings. Each tenant has its own
+//! Per-tenant operational storage: API keys, the audit log, graph schema definitions, the
+//! registry of graph spaces, the librarian's proposals and the documents it has filed (ids and
+//! versions); embeddings arrive in M5. Job status
+//! lives in memory in version 1 (`crate::jobs`). Each tenant has its own
 //! backend instance, so a store never sees another tenant.
 
 mod sqlite;
@@ -10,6 +12,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::graph::{SchemaDef, SpaceDef};
+use crate::librarian::{Document, Proposal};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuditEntry {
@@ -45,4 +48,25 @@ pub trait Store: Send + Sync {
 
     /// Registers a new space. Fails if the name is taken.
     async fn add_graph_space(&self, def: &SpaceDef) -> anyhow::Result<()>;
+
+    /// Stores a proposal, or replaces it (to change its status).
+    async fn put_proposal(&self, p: &Proposal) -> anyhow::Result<()>;
+
+    async fn proposal(&self, id: &str) -> anyhow::Result<Option<Proposal>>;
+
+    /// Proposals still waiting for review, oldest first.
+    async fn held_proposals(&self) -> anyhow::Result<Vec<Proposal>>;
+
+    /// A document the service issued an id for.
+    async fn document(&self, id: &str) -> anyhow::Result<Option<Document>>;
+
+    /// The raw records of a document's versions, oldest first.
+    async fn document_sources(&self, id: &str) -> anyhow::Result<Vec<String>>;
+
+    /// Every raw record that is a document version, with its document.
+    async fn documents_by_source(&self) -> anyhow::Result<Vec<(String, Document)>>;
+
+    /// Records a raw record as a document's next version (creating the document, or updating
+    /// its title), in one transaction. Returns the version number, from 1.
+    async fn add_document_version(&self, doc: &Document, source: &str) -> anyhow::Result<u32>;
 }

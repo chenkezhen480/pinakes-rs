@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::{AuditEntry, Store};
 use crate::graph::{SchemaDef, SpaceDef};
+use crate::librarian::{Document, Proposal};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
 const MIGRATIONS: &[&str] = &[
@@ -44,6 +45,32 @@ const MIGRATIONS: &[&str] = &[
         schema     TEXT NOT NULL,
         definition TEXT NOT NULL,   -- JSON of graph::SpaceDef
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+"#,
+    r#"
+    CREATE TABLE proposals (
+        id         TEXT PRIMARY KEY,
+        status     TEXT NOT NULL,   -- held or approved
+        audience   TEXT NOT NULL,   -- tenant, or the group or user folder
+        proposal   TEXT NOT NULL,   -- JSON of librarian::Proposal
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE INDEX proposals_status ON proposals (status);
+"#,
+    r#"
+    CREATE TABLE documents (
+        id         TEXT PRIMARY KEY,   -- d_ plus 16 hex, issued by the service
+        audience   TEXT NOT NULL,      -- tenant, or the group folder
+        title      TEXT NOT NULL,      -- the latest version's title
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE TABLE document_versions (
+        document   TEXT NOT NULL REFERENCES documents (id),
+        version    INTEGER NOT NULL,
+        source     TEXT NOT NULL UNIQUE,   -- the raw record in sources/
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        PRIMARY KEY (document, version)
     );
 "#,
 ];
@@ -264,11 +291,171 @@ impl Store for SqliteStore {
         })
         .await
     }
+
+    async fn put_proposal(&self, p: &Proposal) -> anyhow::Result<()> {
+        let (id, status, audience, json) = (
+            p.id.clone(),
+            p.status.as_str().to_owned(),
+            p.audience.clone(),
+            serde_json::to_string(p)?,
+        );
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO proposals (id, status, audience, proposal) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (id) DO UPDATE SET status = excluded.status,
+                 proposal = excluded.proposal",
+                params![id, status, audience, json],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    async fn proposal(&self, id: &str) -> anyhow::Result<Option<Proposal>> {
+        let id = id.to_owned();
+        let row: Option<String> = self
+            .with_conn(move |c| {
+                c.query_row(
+                    "SELECT proposal FROM proposals WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .await?;
+        row.map(|r| serde_json::from_str(&r).context("a stored proposal"))
+            .transpose()
+    }
+
+    async fn held_proposals(&self) -> anyhow::Result<Vec<Proposal>> {
+        let rows: Vec<String> = self
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT proposal FROM proposals WHERE status = 'held' ORDER BY created_at, id",
+                )?;
+                stmt.query_map([], |r| r.get(0))?.collect()
+            })
+            .await?;
+        rows.iter()
+            .map(|r| serde_json::from_str(r).context("a stored proposal"))
+            .collect()
+    }
+
+    async fn document(&self, id: &str) -> anyhow::Result<Option<Document>> {
+        let id = id.to_owned();
+        self.with_conn(move |c| {
+            c.query_row(
+                "SELECT id, audience, title FROM documents WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(Document {
+                        id: r.get(0)?,
+                        audience: r.get(1)?,
+                        title: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+        })
+        .await
+    }
+
+    async fn document_sources(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        let id = id.to_owned();
+        self.with_conn(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT source FROM document_versions WHERE document = ?1 ORDER BY version",
+            )?;
+            stmt.query_map(params![id], |r| r.get(0))?.collect()
+        })
+        .await
+    }
+
+    async fn documents_by_source(&self) -> anyhow::Result<Vec<(String, Document)>> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT v.source, d.id, d.audience, d.title
+                 FROM document_versions v JOIN documents d ON d.id = v.document",
+            )?;
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    Document {
+                        id: r.get(1)?,
+                        audience: r.get(2)?,
+                        title: r.get(3)?,
+                    },
+                ))
+            })?
+            .collect()
+        })
+        .await
+    }
+
+    async fn add_document_version(&self, doc: &Document, source: &str) -> anyhow::Result<u32> {
+        let (doc, source) = (doc.clone(), source.to_owned());
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<u32> {
+            let mut c = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("sqlite mutex poisoned"))?;
+            let tx = c.transaction()?;
+            tx.execute(
+                "INSERT INTO documents (id, audience, title) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (id) DO UPDATE SET title = excluded.title,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                params![doc.id, doc.audience, doc.title],
+            )?;
+            let version: u32 = tx.query_row(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM document_versions WHERE document = ?1",
+                params![doc.id],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO document_versions (document, version, source) VALUES (?1, ?2, ?3)",
+                params![doc.id, version, source],
+            )?;
+            tx.commit()?;
+            Ok(version)
+        })
+        .await
+        .context("sqlite task panicked")?
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn documents_and_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pinakes.sqlite");
+        SqliteStore::create_for_tenant(&path, "acme", "abc", "initial").unwrap();
+        let store = SqliteStore::open_existing(&path).unwrap();
+        let mut doc = Document {
+            id: "d_0011223344556677".into(),
+            audience: "tenant".into(),
+            title: "Manual".into(),
+        };
+        assert_eq!(store.add_document_version(&doc, "a.json").await.unwrap(), 1);
+        doc.title = "Manual v2".into();
+        assert_eq!(store.add_document_version(&doc, "b.json").await.unwrap(), 2);
+        assert!(
+            store.add_document_version(&doc, "b.json").await.is_err(),
+            "a record is one version"
+        );
+        assert_eq!(store.document(&doc.id).await.unwrap(), Some(doc.clone()));
+        assert_eq!(store.document("d_ffffffffffffffff").await.unwrap(), None);
+        assert_eq!(
+            store.document_sources(&doc.id).await.unwrap(),
+            vec!["a.json", "b.json"]
+        );
+        let mut by_source = store.documents_by_source().await.unwrap();
+        by_source.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(by_source.len(), 2);
+        assert_eq!(by_source[1], ("b.json".to_owned(), doc));
+    }
 
     #[tokio::test]
     async fn roundtrip_and_reopen() {

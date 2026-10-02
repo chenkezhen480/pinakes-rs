@@ -1,7 +1,7 @@
 //! The graph insert entry points: `/ingest/graph/schema`, `/ingest/graph/space` and
-//! `/ingest/graph/data`. Code checks everything against the stored schema; no LLM is involved.
-//! Only a schema writes the wiki (its description, `graph/<schema>.md`); spaces and data never
-//! do. Each tenant applies graph writes one at a time, and searches keep reading the previous
+//! `/ingest/graph/data`. Code checks everything against the stored schema. Only a schema writes
+//! the wiki (its description, `graph/<schema>.md`), and only a schema involves the librarian;
+//! spaces and data never do. Each tenant applies graph writes one at a time, and searches keep reading the previous
 //! in-memory graph until the new one is swapped in.
 
 use axum::Json;
@@ -15,6 +15,7 @@ use crate::error::ApiError;
 use crate::graph::def::{self, DataRequest, SchemaDef, SpaceRequest, Visibility};
 use crate::graph::{GraphSnapshot, describe};
 use crate::identity::Scope;
+use crate::librarian::DescribeError;
 use crate::wiki::WikiError;
 
 #[derive(Debug, Serialize)]
@@ -26,16 +27,20 @@ pub struct SchemaResponse {
     pub created: bool,
 }
 
-/// `POST /ingest/graph/schema`: create a schema, or change one additively. Its definition is
-/// stored as the authoritative copy and its description page is written from it.
+/// `POST /ingest/graph/schema`: create a schema, or change one additively. The librarian
+/// writes its description first; then the definition (the authoritative copy) and the
+/// description page are stored together. If the model can't be reached (502), the verifier
+/// rejects the description twice (422), or storing fails, nothing is stored and a change
+/// leaves the schema as it was.
 #[tracing::instrument(name = "ingest_graph_schema", skip_all)]
 pub async fn schema(
-    State(_app): State<AppState>,
+    State(app): State<AppState>,
     scope: Scope,
     body: Result<Json<SchemaDef>, JsonRejection>,
 ) -> Result<Json<SchemaResponse>, ApiError> {
     let Json(def) = body?;
     def.validate().map_err(ApiError::BadRequest)?;
+    let librarian = app.librarian()?;
     let tenant = scope.tenant();
     let _writer = tenant.graph_writer.lock().await;
     let graph = tenant.graph().await?;
@@ -53,9 +58,47 @@ pub async fn schema(
         None => def,
     };
 
-    // The definition first: it is what decides which data is accepted. The description is
-    // derived from it; if writing the page fails, sending the same schema again rewrites it.
-    tenant.store.put_graph_schema(&stored).await?;
+    let wiki = tenant.wiki();
+    let path = describe::page_path(&stored.schema)?;
+    let current = {
+        let (wiki, path) = (wiki.clone(), path.clone());
+        tokio::task::spawn_blocking(move || match wiki.read(&path) {
+            Ok(page) => Ok(Some(page)),
+            // A missing or broken page gets a new description.
+            Err(WikiError::NotFound | WikiError::Malformed { .. }) => Ok(None),
+            Err(e) => Err(e),
+        })
+        .await
+        .map_err(anyhow::Error::from)??
+    };
+    let page = librarian
+        .describe(&tenant.dir, &stored, current.as_ref())
+        .await
+        .map_err(|e| match e {
+            DescribeError::Llm(_) => ApiError::BadGateway(e.to_string()),
+            DescribeError::Rejected(_) => ApiError::Unprocessable(e.to_string()),
+        })?;
+
+    // The page and the definition are stored together: if the definition can't be stored,
+    // the page goes back to what it was.
+    let _wiki_writer = tenant.wiki_writer.lock().await;
+    let before = {
+        let (wiki, path, page) = (wiki.clone(), path.clone(), page.clone());
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, WikiError> {
+            let before = wiki.read_text(&path)?;
+            wiki.write(&page)?;
+            Ok(before)
+        })
+        .await
+        .map_err(anyhow::Error::from)??
+    };
+    if let Err(e) = tenant.store.put_graph_schema(&stored).await {
+        let restored = tokio::task::spawn_blocking(move || wiki.restore_text(&path, before)).await;
+        if !matches!(restored, Ok(Ok(()))) {
+            tracing::error!(schema = %stored.schema, "could not put the description page back");
+        }
+        return Err(e.into());
+    }
     tenant
         .store
         .audit(
@@ -78,28 +121,12 @@ pub async fn schema(
     let spaces = graph.spaces.iter().map(|s| s.def.clone()).collect();
     let next = GraphSnapshot::build_blocking(graph, move |g| g.with_meta(schemas, spaces)).await?;
     tenant.set_graph(next);
-
-    let wiki = tenant.wiki();
-    let path = describe::page_path(&stored.schema)?;
-    let today = crate::trace::now_rfc3339()[..10].to_owned();
-    let for_page = stored.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), WikiError> {
-        let current = match wiki.read(&path) {
-            Ok(page) => Some(page),
-            Err(WikiError::NotFound) => None,
-            // A broken page is replaced by one written from the definition.
-            Err(WikiError::Malformed { .. }) => None,
-            Err(e) => return Err(e),
-        };
-        let page = describe::describe(&for_page, current.as_ref(), &today)?;
-        wiki.write(&page)
-    })
-    .await
-    .map_err(anyhow::Error::from)??;
     tenant.reindex().await?;
+    crate::librarian::write_index(tenant).await?;
+    crate::librarian::record_log(tenant, &format!("describe {}", page.path)).await?;
     tracing::info!(schema = %stored.schema, created, "graph schema stored");
     Ok(Json(SchemaResponse {
-        page: format!("graph/{}", stored.schema),
+        page: page.path.to_string(),
         schema: stored.schema,
         created,
     }))

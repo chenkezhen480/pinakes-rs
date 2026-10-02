@@ -1,5 +1,6 @@
 # Service configuration. Secrets stay in environment variables, never in this file:
-# PINAKES_ADMIN_KEY (admin routes), later ANTHROPIC_API_KEY and NEO4J_PASSWORD.
+# PINAKES_ADMIN_KEY (admin routes) and NEO4J_PASSWORD. The librarian's model and key are in
+# model.conf (see model.conf.example), which is not in git.
 # Sections marked (Mx) are read from that milestone on; until then they are ignored.
 
 [server]
@@ -25,10 +26,14 @@ admin_key_env = "PINAKES_ADMIN_KEY"
 [store]                        # one SQLite file per tenant, WAL mode
 file_name = "pinakes.sqlite"
 
-[librarian]                    # (M4) the only LLM the service calls
-provider = "anthropic"         # or "openai_compatible"
-model = "claude-sonnet-5"
-# base_url = "http://localhost:11434/v1"   # for openai_compatible
+[librarian]                    # the only LLM the service calls, never on the read path
+model_file = "model.conf"      # which model, where and its key: copy model.conf.example there
+                               # (next to this file; not in git). Without a model the
+                               # librarian is off and writes answer 503; without a key the
+                               # service asks for it in the terminal.
+max_tokens = 16000             # per reply
+timeout_secs = 300             # per call
+related_pages = 8              # related pages the librarian is shown (5 to 10 in the design)
 
 [search]                       # (M2)
 slots = { memories = 3, knowledge = 3, relations = 5 }   # hits per slot by default, max 20
@@ -59,5 +64,5 @@ enabled = false
 providers = []
 daily_token_budget = 200000
 
-[jobs]                         # (M4)
-keep_finished_minutes = 60
+[jobs]                         # the per-tenant write queue; job status lives in memory
+keep_finished_minutes = 60     # finished jobs stay visible at /jobs/{id} this long

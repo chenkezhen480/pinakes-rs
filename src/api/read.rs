@@ -1,6 +1,7 @@
-//! `POST /read`: a follow-up after `/search`. Returns whole pages or one heading of them, with
-//! the read tracker. Takes page ids as search returns them; a page the caller can't see is
-//! reported exactly like a missing one. Raw sources arrive in M4.
+//! `POST /read`: a follow-up after `/search`. Returns whole pages or one heading of them, and
+//! the raw sources pages cite (`sources/<name>`, as hits list them), with the read tracker.
+//! A page the caller can't see is reported exactly like a missing one, and so is a source no
+//! page the caller can see cites: a source takes the audience of the pages citing it.
 
 use axum::Json;
 use axum::extract::State;
@@ -11,6 +12,7 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::identity::Scope;
 use crate::kinds::Kind;
+use crate::librarian::sources;
 use crate::search::catalog::{Fence, heading_of};
 use crate::search::text::normalize;
 use crate::search::{SearchSnapshot, validate_session};
@@ -18,6 +20,8 @@ use crate::trace::Endpoint;
 use crate::wiki::{Page, PagePath, WikiError};
 
 const MAX_IDS: usize = 20;
+/// Source ids are `sources/<name>`; a `heading` doesn't apply to them.
+const SOURCE_PREFIX: &str = "sources/";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,9 +106,19 @@ pub async fn read(
     if req.heading.as_deref().is_some_and(|h| h.trim().is_empty()) {
         return Err(ApiError::BadRequest("heading is empty".into()));
     }
-    // Only pages that search can return: every kind of page, not `index` or `log`.
+    // Only pages that search can return: every kind of page, not `index` or `log`. Sources are
+    // read separately below.
     let mut paths = Vec::new();
+    let mut wants_source = false;
     for id in &req.ids {
+        if let Some(name) = id.strip_prefix(SOURCE_PREFIX) {
+            if !sources::valid_name(name) {
+                return Err(ApiError::BadRequest(format!("{id:?} is not a source id")));
+            }
+            wants_source = true;
+            paths.push((id.clone(), None));
+            continue;
+        }
         let path = PagePath::parse(id)?;
         let readable = path.kind().is_some() && scope.can_see(&path);
         paths.push((id.clone(), readable.then_some(path)));
@@ -130,16 +144,69 @@ pub async fn read(
     .map_err(anyhow::Error::from)??;
 
     let tenant = scope.tenant();
-    // Link summaries come from the search catalog; plain reads don't need it.
-    let snapshot = if req.with_links {
+    // Link summaries and who cites a source come from the search catalog; plain page reads
+    // don't need it.
+    let snapshot = if req.with_links || wants_source {
         Some(tenant.snapshot().await?)
     } else {
         None
     };
+    let cited: Vec<String> = match &snapshot {
+        Some(snap) if wants_source => {
+            let names: Vec<&str> = paths
+                .iter()
+                .filter_map(|(id, _)| id.strip_prefix(SOURCE_PREFIX))
+                .filter(|name| {
+                    snap.catalog
+                        .pages
+                        .iter()
+                        .any(|p| scope.can_see(&p.path) && p.sources.iter().any(|s| s == name))
+                })
+                .collect();
+            names.into_iter().map(str::to_owned).collect()
+        }
+        _ => Vec::new(),
+    };
+    let dir = tenant.dir.clone();
+    let source_texts = tokio::task::spawn_blocking(move || {
+        cited
+            .into_iter()
+            .map(|name| sources::read(&dir, &name).map(|t| (name, t)))
+            .collect::<std::io::Result<Vec<_>>>()
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(anyhow::Error::from)?;
     let user_dir = scope.user().map(|u| u.dir.as_str());
     let mut loaded = loaded.into_iter();
     let mut out = Vec::new();
     for (id, path) in paths {
+        if let Some(name) = id.strip_prefix(SOURCE_PREFIX) {
+            let text = source_texts
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, t)| t.clone());
+            let Some(text) = text else {
+                out.push(ReadItem::error(id, "not_found"));
+                continue;
+            };
+            let already_read = req
+                .session
+                .as_deref()
+                .is_some_and(|s| tenant.reads.record(user_dir, s, &id, None));
+            out.push(ReadItem {
+                id,
+                kind: None,
+                title: None,
+                summary: None,
+                heading: None,
+                text: (!already_read).then_some(text),
+                already_read,
+                links: Vec::new(),
+                error: None,
+            });
+            continue;
+        }
         let page = match path {
             Some(_) => loaded.next().unwrap_or(Err("not_found")),
             None => Err("not_found"),

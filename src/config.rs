@@ -26,6 +26,157 @@ pub struct Config {
     pub graph: GraphConfig,
     #[serde(default)]
     pub neo4j: Neo4jConfig,
+    #[serde(default)]
+    pub librarian: LibrarianConfig,
+    #[serde(default)]
+    pub jobs: JobsConfig,
+}
+
+/// Which LLM API the librarian calls (design, "The librarian: how new content is filed").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmProvider {
+    #[default]
+    Anthropic,
+    OpenaiCompatible,
+}
+
+/// The librarian's model, from its own file, `model.conf` (next to `config.toml`; see
+/// `model.conf.example`). It is the one place to say which LLM the service calls, and it may
+/// hold the key, so it is kept out of git.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelConfig {
+    #[serde(default)]
+    pub provider: LlmProvider,
+    /// API root; required for `openai_compatible`; for `anthropic`, unset is Anthropic itself.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// The one model for every step. There is no default: until it is set the librarian is off.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The API key. When empty, the variable named by `key_env` is read instead.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Environment variable holding the key when `api_key` is empty. Defaults to
+    /// `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` by provider.
+    #[serde(default)]
+    pub key_env: Option<String>,
+}
+
+impl std::fmt::Debug for ModelConfig {
+    // The key never reaches a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelConfig")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "…"))
+            .field("key_env", &self.key_env)
+            .finish()
+    }
+}
+
+fn non_empty(s: &Option<String>) -> Option<String> {
+    s.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+impl ModelConfig {
+    pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
+        toml::from_str(text).context("parsing the model file")
+    }
+
+    /// The model's name, if one is set.
+    pub fn model(&self) -> Option<String> {
+        non_empty(&self.model)
+    }
+
+    pub fn key_env(&self) -> String {
+        non_empty(&self.key_env).unwrap_or_else(|| {
+            match self.provider {
+                LlmProvider::OpenaiCompatible => "OPENAI_API_KEY",
+                LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
+            }
+            .to_owned()
+        })
+    }
+
+    /// The key: `api_key` from the file, else the environment variable `key_env` names.
+    pub fn key(&self) -> Option<String> {
+        non_empty(&self.api_key).or_else(|| {
+            std::env::var(self.key_env())
+                .ok()
+                .map(|k| k.trim().to_owned())
+                .filter(|k| !k.is_empty())
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibrarianConfig {
+    /// The model file, relative to the config file's folder.
+    #[serde(default = "default_model_file")]
+    pub model_file: PathBuf,
+    /// Most tokens one reply may use.
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    /// Timeout of one LLM call.
+    #[serde(default = "default_llm_timeout")]
+    pub timeout_secs: u64,
+    /// How many related pages the librarian is shown (design: the best 5 to 10).
+    #[serde(default = "default_related_pages")]
+    pub related_pages: usize,
+    /// What the model file says, once read ([`Config::load_model_file`]).
+    #[serde(skip)]
+    pub llm: ModelConfig,
+    /// Where the model file is, once looked for, for telling the user where to fill it in.
+    #[serde(skip)]
+    pub llm_file: Option<PathBuf>,
+}
+
+impl LibrarianConfig {
+    /// The model file's path as shown to the user.
+    pub fn llm_file_name(&self) -> String {
+        self.llm_file
+            .as_deref()
+            .unwrap_or(&self.model_file)
+            .display()
+            .to_string()
+    }
+}
+
+impl Default for LibrarianConfig {
+    fn default() -> Self {
+        Self {
+            model_file: default_model_file(),
+            max_tokens: default_max_tokens(),
+            timeout_secs: default_llm_timeout(),
+            related_pages: default_related_pages(),
+            llm: ModelConfig::default(),
+            llm_file: None,
+        }
+    }
+}
+
+/// The per-tenant write queue.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobsConfig {
+    /// Finished jobs stay visible at `/jobs/{id}` this long.
+    #[serde(default = "default_keep_finished")]
+    pub keep_finished_minutes: u64,
+}
+
+impl Default for JobsConfig {
+    fn default() -> Self {
+        Self {
+            keep_finished_minutes: default_keep_finished(),
+        }
+    }
 }
 
 /// Where graph data lives, and the caps on walks (design, "The business graph").
@@ -303,6 +454,21 @@ fn default_neo4j_user() -> String {
 fn default_neo4j_password_env() -> String {
     "NEO4J_PASSWORD".into()
 }
+fn default_max_tokens() -> u32 {
+    16_000
+}
+fn default_llm_timeout() -> u64 {
+    300
+}
+fn default_model_file() -> PathBuf {
+    PathBuf::from("model.conf")
+}
+fn default_related_pages() -> usize {
+    8
+}
+fn default_keep_finished() -> u64 {
+    60
+}
 
 impl Config {
     pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
@@ -311,10 +477,37 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Loads a config file, then the model file it names (relative to its folder).
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;
-        Self::from_toml_str(&text)
+        let mut cfg = Self::from_toml_str(&text)?;
+        cfg.load_model_file(path.parent().unwrap_or(Path::new(".")))?;
+        Ok(cfg)
+    }
+
+    /// Reads the model file (`[librarian] model_file`, relative to `base`). A missing file is
+    /// not an error: the librarian stays off and the service says where to put it. A file that
+    /// can't be parsed is an error.
+    pub fn load_model_file(&mut self, base: &Path) -> anyhow::Result<()> {
+        let path = base.join(&self.librarian.model_file);
+        self.librarian.llm_file = Some(path.clone());
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                self.librarian.llm = ModelConfig::from_toml_str(&text)
+                    .with_context(|| format!("in {}", path.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(
+                    file = %path.display(),
+                    "no model file: copy model.conf.example to it and fill it in; the librarian is off"
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("reading {}", path.display())));
+            }
+        }
+        Ok(())
     }
 
     fn validate(&self) -> anyhow::Result<()> {
@@ -343,6 +536,12 @@ impl Config {
                 "graph.max_depth must be 1 to {} and graph.max_nodes 1 to {}",
                 crate::graph::MAX_WALK_DEPTH,
                 crate::graph::MAX_WALK_NODES
+            );
+        }
+        let l = &self.librarian;
+        if !(1..=20).contains(&l.related_pages) || l.max_tokens == 0 || l.timeout_secs == 0 {
+            anyhow::bail!(
+                "librarian.related_pages must be 1 to 20, max_tokens and timeout_secs above 0"
             );
         }
         let a = &self.search.ablation;
@@ -399,17 +598,66 @@ slots = { memories = 40, knowledge = 2, relations = 6 }
 
     #[test]
     fn unknown_sections_are_ignored() {
-        let cfg =
-            Config::from_toml_str("[server]\nport = 9000\n[librarian]\nprovider = \"anthropic\"\n")
-                .unwrap();
+        let cfg = Config::from_toml_str("[server]\nport = 9000\n[acquisition]\nenabled = false\n")
+            .unwrap();
         assert_eq!(cfg.server.port, 9000);
     }
 
     #[test]
-    fn shipped_config_file_loads() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
-        let cfg = Config::load(&path).unwrap();
+    fn librarian_defaults() {
+        let cfg = Config::from_toml_str("").unwrap();
+        assert_eq!(cfg.librarian.model_file, PathBuf::from("model.conf"));
+        assert_eq!(cfg.librarian.llm.provider, LlmProvider::Anthropic);
+        assert_eq!(cfg.librarian.llm.model(), None);
+        assert_eq!(cfg.jobs.keep_finished_minutes, 60);
+        assert!(Config::from_toml_str("[librarian]\nrelated_pages = 0\n").is_err());
+        assert!(
+            Config::from_toml_str("[librarian]\nmodel = \"x\"\n").is_err(),
+            "the model has its own file"
+        );
+        let m = ModelConfig::from_toml_str(
+            "provider = \"openai_compatible\"\nbase_url = \"http://localhost:11434/v1\"\nmodel = \" \"\napi_key = \"secret\"\n",
+        )
+        .unwrap();
+        assert_eq!(m.key_env(), "OPENAI_API_KEY");
+        assert_eq!(m.model(), None, "blank is unset");
+        assert_eq!(m.key().as_deref(), Some("secret"), "the file's key first");
+        assert!(
+            !format!("{m:?}").contains("secret"),
+            "the key never reaches a log"
+        );
+        assert!(ModelConfig::from_toml_str("modle = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn shipped_config_and_model_example_load() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut cfg =
+            Config::from_toml_str(&std::fs::read_to_string(root.join("config.toml")).unwrap())
+                .unwrap();
         assert_eq!(cfg.search.slots, crate::search::SlotSizes::default());
+        assert_eq!(cfg.librarian.model_file, PathBuf::from("model.conf"));
+        // The example is what a deployment copies to model.conf.
+        cfg.librarian.model_file = PathBuf::from("model.conf.example");
+        cfg.load_model_file(root).unwrap();
+        let m = &cfg.librarian.llm;
+        assert_eq!(
+            m.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(m.model().as_deref(), Some("deepseek-flash"));
+        assert_eq!(m.key_env(), "DEEPSEEK_API_KEY");
+        assert_eq!(m.api_key.as_deref(), Some(""), "no key in the example");
+        assert!(crate::llm::client(&cfg.librarian, Some("k".into())).is_ok());
+        // A missing model file leaves the librarian off and names the file.
+        let mut cfg = Config::from_toml_str("").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        cfg.load_model_file(dir.path()).unwrap();
+        let why = crate::llm::client(&cfg.librarian, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(why.contains("model.conf"), "{why}");
     }
 
     #[test]

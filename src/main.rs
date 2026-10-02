@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use std::io::IsTerminal;
+
 use anyhow::Context;
 use pinakes::AppState;
 use pinakes::config::Config;
@@ -24,7 +26,9 @@ async fn main() -> anyhow::Result<()> {
         Config::load(&config_path)?
     } else {
         tracing::warn!(path = %config_path.display(), "config file not found, using defaults");
-        Config::default()
+        let mut config = Config::default();
+        config.load_model_file(std::path::Path::new("."))?;
+        config
     };
 
     std::fs::create_dir_all(config.tenants_dir())
@@ -53,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let app = pinakes::router(state.clone());
+    ask_for_key(&state);
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -66,4 +71,46 @@ async fn main() -> anyhow::Result<()> {
     // Lines still queued when the server stops are written before exiting.
     tokio::task::spawn_blocking(move || state.traces.flush()).await?;
     Ok(())
+}
+
+/// The librarian is the core of every write, so when only its key is missing the service asks
+/// for it in the terminal once it is up (reads work meanwhile). A key typed here lasts until
+/// the service stops; to keep one, put it in the model file (`api_key`). Without a terminal (a
+/// container, a background run) it can't ask, and says where to put the key instead.
+fn ask_for_key(state: &AppState) {
+    let Some(why) = state.missing_key() else {
+        return;
+    };
+    if !std::io::stdin().is_terminal() {
+        tracing::warn!("the librarian is off: {why}; add the key and restart");
+        return;
+    }
+    let state = state.clone();
+    // A plain thread, not the runtime's: a pending read must not hold up shutdown.
+    std::thread::spawn(move || {
+        loop {
+            let prompt = format!(
+                "\nThe librarian (every write) is off: {why}.\nEnter the key for this run: "
+            );
+            let key = match rpassword::prompt_password(prompt) {
+                Ok(k) if !k.trim().is_empty() => k.trim().to_owned(),
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read the key");
+                    return;
+                }
+            };
+            match pinakes::llm::client(&state.config.librarian, Some(key)) {
+                Ok(llm) => {
+                    state.set_llm(llm);
+                    println!("Librarian on.");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "the librarian stays off");
+                    return;
+                }
+            }
+        }
+    });
 }

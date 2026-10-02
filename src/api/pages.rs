@@ -82,3 +82,65 @@ pub async fn get(
         body: page.body,
     }))
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutPage {
+    pub front_matter: FrontMatter,
+    pub body: String,
+}
+
+/// `PUT /pages/{path}`: a hand edit, the whole page in the shape `GET` returns. Code checks it
+/// at once (400 with the reason); then a job has the librarian verify it, and saves it or
+/// holds it as a proposal (design, "Manual edits get the same check"). Schema descriptions
+/// change through `/ingest/graph/schema`; `index` and `log` are the service's own.
+#[tracing::instrument(name = "put_page", skip_all, fields(path = tracing::field::Empty))]
+pub async fn put(
+    axum::extract::State(app): axum::extract::State<crate::AppState>,
+    scope: Scope,
+    raw: Result<Path<String>, PathRejection>,
+    body: Result<axum::Json<PutPage>, axum::extract::rejection::JsonRejection>,
+) -> Result<(axum::http::StatusCode, Json<crate::jobs::JobInfo>), ApiError> {
+    use crate::librarian::{Edit, PageAudience, Target};
+    let Path(raw) = raw?;
+    tracing::Span::current().record("path", raw.as_str());
+    let path = PagePath::parse(&raw)?;
+    if !scope.can_see(&path) {
+        return Err(ApiError::NotFound);
+    }
+    let axum::Json(req) = body?;
+    let kind = match path.kind() {
+        None => {
+            return Err(ApiError::BadRequest(
+                "index and log are written by the service".into(),
+            ));
+        }
+        Some(Kind::Graph) => {
+            return Err(ApiError::BadRequest(
+                "schema descriptions change through /ingest/graph/schema".into(),
+            ));
+        }
+        Some(k) => k,
+    };
+    let librarian = app.librarian()?;
+    let target = Target::new(kind, PageAudience::of(&path)).map_err(ApiError::BadRequest)?;
+    let edit = Edit::Replace {
+        page: path.to_string(),
+        front_matter: req.front_matter,
+        body: req.body,
+    };
+    let tenant = scope.tenant().clone();
+    crate::librarian::check_edit(&tenant, &target, &scope, &edit)
+        .await?
+        .map_err(ApiError::BadRequest)?;
+    let owner = scope.user().map(|u| u.dir.clone());
+    let writer = scope.clone();
+    let dir_name = tenant.dir_name.clone();
+    let info = app.jobs.submit(
+        &dir_name,
+        owner.as_deref(),
+        "hand_edit",
+        Box::pin(async move { librarian.review(tenant, writer, target, edit).await }),
+    );
+    Ok((axum::http::StatusCode::ACCEPTED, Json(info)))
+}

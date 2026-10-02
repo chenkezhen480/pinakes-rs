@@ -16,6 +16,12 @@ pub enum ApiError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    Unprocessable(String),
+    #[error("{0}")]
+    Unavailable(String),
+    #[error("{0}")]
+    BadGateway(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -27,6 +33,9 @@ impl ApiError {
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            ApiError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable"),
+            ApiError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+            ApiError::BadGateway(_) => (StatusCode::BAD_GATEWAY, "bad_gateway"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

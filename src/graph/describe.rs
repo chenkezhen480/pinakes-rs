@@ -4,7 +4,8 @@
 //! and `via`), copied from the stored definition, so an edit can never change what data is
 //! accepted. The descriptive fields (title, summary, aliases, what each type means in English
 //! and Chinese) come from the definition when it has them, otherwise from the page as it
-//! stands. Until the librarian arrives (M4), this is the whole description step.
+//! stands. Code writes no prose of its own: the librarian fills in what is missing and writes
+//! the body (`librarian::described_page`), and a description it can't write is an error.
 
 use serde::Serialize;
 use serde_norway::{Mapping, Value};
@@ -81,12 +82,8 @@ pub fn describe(def: &SchemaDef, current: Option<&Page>, today: &str) -> Result<
     page.path = path;
     let f = &mut page.front;
     f.kind = Some(Kind::Graph);
-    if def.title.is_some() || f.title.is_none() {
-        f.title = Some(
-            def.title
-                .clone()
-                .unwrap_or_else(|| default_title(&def.schema)),
-        );
+    if def.title.is_some() {
+        f.title.clone_from(&def.title);
     }
     if !def.aliases.is_empty() || f.aliases.is_empty() {
         let mut aliases = def.aliases.clone();
@@ -95,8 +92,8 @@ pub fn describe(def: &SchemaDef, current: Option<&Page>, today: &str) -> Result<
         }
         f.aliases = aliases;
     }
-    if def.summary.is_some() || f.summary.is_none() {
-        f.summary = Some(def.summary.clone().unwrap_or_else(|| default_summary(def)));
+    if def.summary.is_some() {
+        f.summary.clone_from(&def.summary);
     }
     f.updated = Some(today.to_owned());
 
@@ -149,71 +146,11 @@ pub fn describe(def: &SchemaDef, current: Option<&Page>, today: &str) -> Result<
     f.extra.insert("nodes".into(), Value::Mapping(nodes));
     f.extra
         .insert("relations".into(), Value::Mapping(relations));
-
-    if page.body.trim().is_empty() {
-        page.body = default_body(def, page.front.title.as_deref().unwrap_or(&def.schema));
-    }
     Ok(page)
 }
 
 fn to_value(v: &impl Serialize) -> Value {
     serde_norway::to_value(v).expect("front matter serializes")
-}
-
-fn default_title(schema: &str) -> String {
-    let mut words: Vec<String> = schema
-        .split('_')
-        .filter(|w| !w.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if let Some(first) = words.first_mut() {
-        let mut chars = first.chars();
-        if let Some(c) = chars.next() {
-            *first = c.to_uppercase().chain(chars).collect();
-        }
-    }
-    format!("{} graph", words.join(" "))
-}
-
-fn default_summary(def: &SchemaDef) -> String {
-    let nodes: Vec<&str> = def.nodes.keys().map(String::as_str).collect();
-    let rels: Vec<&str> = def.relations.keys().map(String::as_str).collect();
-    if rels.is_empty() {
-        format!("Node types: {}.", nodes.join(", "))
-    } else {
-        format!(
-            "Node types: {}. Relation types: {}.",
-            nodes.join(", "),
-            rels.join(", ")
-        )
-    }
-}
-
-fn default_body(def: &SchemaDef, title: &str) -> String {
-    let mut out = format!("# {title}\n\n## Node types\n\n");
-    for (name, n) in &def.nodes {
-        let meaning = [n.en.as_deref(), n.zh.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" / ");
-        out.push_str(&format!("- `{name}` (key `{}`)", n.key));
-        if !meaning.is_empty() {
-            out.push_str(&format!(": {meaning}"));
-        }
-        out.push('\n');
-    }
-    if !def.relations.is_empty() {
-        out.push_str("\n## Relation types\n\n");
-        for (name, r) in &def.relations {
-            out.push_str(&format!("- `{name}`: `{}` → `{}`", r.from, r.to));
-            if let Some(en) = &r.en {
-                out.push_str(&format!(", {en}"));
-            }
-            out.push('\n');
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -225,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_schema_gets_a_generated_page() {
+    fn a_new_schema_gets_its_structure_and_no_invented_prose() {
         let d = def(serde_json::json!({
             "schema": "work_orders",
             "nodes": { "ticket": { "key": "no", "en": "A ticket" } },
@@ -233,9 +170,10 @@ mod tests {
         }));
         let page = describe(&d, None, "2026-09-30").unwrap();
         assert_eq!(page.path.as_str(), "graph/work_orders");
-        assert_eq!(page.front.title.as_deref(), Some("Work orders graph"));
+        assert_eq!(page.front.title, None, "prose is the librarian's");
+        assert_eq!(page.front.summary, None);
+        assert!(page.body.is_empty());
         assert_eq!(page.front.aliases, vec!["work_orders"]);
-        assert!(page.body.contains("`ticket` (key `no`): A ticket"));
         // It parses back as a schema page.
         let again = Page::parse(page.path.clone(), &page.render()).unwrap();
         assert_eq!(

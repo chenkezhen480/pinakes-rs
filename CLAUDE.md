@@ -23,8 +23,26 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 
 - Every read and write path takes a `Scope` (tenant + user + groups); never take tenant, user or
   group ids from request bodies. Groups arrive in the `X-User-Groups` header (API key mode).
-- Until the librarian exists (M4), schema descriptions are written by code
-  (`src/graph/describe.rs`); M4 puts the librarian behind the same endpoint.
+- Schema descriptions come only from the librarian (`librarian::Librarian::describe`); code
+  adds the structure (`src/graph/describe.rs`). No description, no schema: definition and page
+  are stored together or not at all.
+- Every LLM reply is constrained by the API with a strict JSON schema (closed objects, all
+  properties required, optional values nullable): `output_config.format` on Anthropic itself, a
+  forced `reply` tool on Anthropic-compatible endpoints (DeepSeek, the shipped config), strict
+  `response_format` on OpenAI-compatible ones.
+- The librarian's model and key live only in `model.conf` (git-ignored; template
+  `model.conf.example`), never in `config.toml` or code. Never print or commit it. The live test
+  reads it: `PINAKES_TEST_LLM=1 cargo test --test librarian_live -- --nocapture` (costs money).
+- Every wiki write runs as a job on the tenant's write queue (`src/jobs.rs`) or holds the
+  tenant's `wiki_writer` lock; code, never the LLM, writes `kind`, `updated` and `sources`.
+- Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
+- Expertise documents get ids from the service (`d_…`), never from the host. A new version
+  finds the pages of earlier ones through the raw records they cite (`sources`), not by
+  similarity. Code never interprets a document's structure; the model reads it from the top
+  like a person, one concept per step (design.md "Reading like a person"); pages are the
+  librarian's condensed account, never copies of the source.
+- Write multi-line or backslash-containing edits with the Write/Edit tools or a script file:
+  Bash heredocs here turn `\n` in Python strings into real line breaks.
 - Every page has one audience — tenant, group or user — given by its folder (`groups/g_…`,
   `users/u_…`). `Kind::audiences()` and the path layout must agree. A page may anchor only to
   pages and nodes everyone who can read it can see.

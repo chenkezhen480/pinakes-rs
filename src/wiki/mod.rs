@@ -97,6 +97,33 @@ impl WikiFs {
         Ok(())
     }
 
+    /// A page file's text as it is on disk, or `None` when there is no such page.
+    pub fn read_text(&self, path: &PagePath) -> Result<Option<String>, WikiError> {
+        match std::fs::read(self.file_for(path)) {
+            Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Puts a page file back to text read with [`WikiFs::read_text`]: that text, or no file.
+    pub fn restore_text(&self, path: &PagePath, text: Option<String>) -> Result<(), WikiError> {
+        let file = self.file_for(path);
+        match text {
+            Some(t) => {
+                let tmp = file
+                    .with_extension(format!("md.tmp-{}", hex::encode(rand::random::<[u8; 8]>())));
+                std::fs::write(&tmp, t)?;
+                std::fs::rename(&tmp, &file)?;
+            }
+            None => match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
     /// Lists pages visible to a caller: `index`, `log`, every tenant-level page, the pages of the
     /// caller's own groups, and the user pages under `users/<own_user_dir>/` when a user is
     /// given. Other groups' and users' folders are never opened.
