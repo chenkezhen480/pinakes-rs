@@ -186,13 +186,9 @@ async fn new_content_updates_the_related_playbook() {
         resp["memories"]["hits"][0]["page"], "experience/partial-refund-after-shipment",
         "{resp}"
     );
-    assert!(
-        resp["memories"]["hits"][0]["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|s| s == name)
-    );
+    // Hits list sources as `/read` takes them.
+    let cited = resp["memories"]["hits"][0]["sources"].as_array().unwrap();
+    assert!(cited.iter().any(|s| s == source), "{resp}");
 
     // The raw record, unchanged, for anyone who can see a page citing it.
     let lily = Caller::new(&key).user(Some("lily"));
@@ -690,7 +686,11 @@ async fn hand_edits_are_verified() {
     );
 
     let (status, resp) = app
-        .put(wang, uri, json!({ "front_matter": front, "body": body }))
+        .put(
+            wang,
+            uri,
+            json!({ "version": page["version"], "front_matter": front, "body": body }),
+        )
         .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{resp}");
     let job = app.wait_job(wang, resp["job"].as_str().unwrap()).await;
@@ -709,6 +709,23 @@ async fn hand_edits_are_verified() {
     assert!(
         verify.contains("### expertise/shipping-sla"),
         "the page as it stands is shown"
+    );
+
+    // An edit of the page as it was before is refused: it would undo the one just saved.
+    let (status, resp) = app
+        .put(
+            lily,
+            uri,
+            json!({ "version": page["version"], "front_matter": front, "body": "# x\n" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("changed since it was read"),
+        "{resp}"
     );
 
     // Code refuses at once; the verifier never sees it.
@@ -745,7 +762,8 @@ async fn hand_edits_are_verified() {
         .put(
             lily,
             uri,
-            json!({ "front_matter": claim, "body": "# Shipping\n\nFree from 99 yuan.\n" }),
+            json!({ "version": saved["version"], "front_matter": claim,
+                    "body": "# Shipping\n\nFree from 99 yuan.\n" }),
         )
         .await;
     let job = app.wait_job(lily, resp["job"].as_str().unwrap()).await;
@@ -754,6 +772,44 @@ async fn hand_edits_are_verified() {
     assert!(now["body"].as_str().unwrap().contains("Checked by hand."));
     let (_, list) = app.get(wang, "/proposals").await;
     assert_eq!(list["proposals"][0]["edits"][0]["edit"]["op"], "replace");
+    let proposal = list["proposals"][0]["proposal"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The page changes before the held edit is approved: approving it would undo that change,
+    // so it is refused and the proposal stays held.
+    let body = format!(
+        "{}\n## Later\n\nAdded later.\n",
+        now["body"].as_str().unwrap()
+    );
+    let (_, resp) = app
+        .put(
+            wang,
+            uri,
+            json!({ "version": now["version"], "front_matter": now["front_matter"], "body": body }),
+        )
+        .await;
+    app.wait_job(wang, resp["job"].as_str().unwrap()).await;
+    let (status, resp) = app
+        .post_admin(&format!("/proposals/{proposal}/approve"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{resp}");
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("changed since it was read"),
+        "{resp}"
+    );
+    let (_, list) = app.get(wang, "/proposals").await;
+    assert_eq!(
+        list["proposals"][0]["proposal"],
+        proposal.as_str(),
+        "still held"
+    );
+    let (_, now) = app.get(wang, uri).await;
+    assert!(now["body"].as_str().unwrap().contains("Added later."));
 }
 
 /// Related pages, without an LLM: for every memory page of every scenario, a record about the

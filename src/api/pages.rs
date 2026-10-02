@@ -46,6 +46,8 @@ pub struct PageResponse {
     pub path: PagePath,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,
+    /// The page's version; a `PUT` sends it back.
+    pub version: String,
     pub front_matter: FrontMatter,
     pub body: String,
 }
@@ -66,6 +68,7 @@ pub async fn get(
     let mut page = tokio::task::spawn_blocking(move || wiki.read(&path))
         .await
         .map_err(anyhow::Error::from)??;
+    let version = page.version();
     // Anchors into pages or graph spaces the caller can't see are dropped, as in search hits.
     // Without the graph, every node anchor is dropped.
     if !page.front.about.is_empty() {
@@ -78,6 +81,7 @@ pub async fn get(
     Ok(Json(PageResponse {
         kind: page.path.kind(),
         path: page.path,
+        version,
         front_matter: page.front,
         body: page.body,
     }))
@@ -86,6 +90,9 @@ pub async fn get(
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutPage {
+    /// The `version` `GET` returned; none (or absent) for a new page.
+    #[serde(default)]
+    pub version: Option<String>,
     pub front_matter: FrontMatter,
     pub body: String,
 }
@@ -126,6 +133,7 @@ pub async fn put(
     let target = Target::new(kind, PageAudience::of(&path)).map_err(ApiError::BadRequest)?;
     let edit = Edit::Replace {
         page: path.to_string(),
+        base: req.version,
         front_matter: req.front_matter,
         body: req.body,
     };

@@ -280,6 +280,7 @@ pub struct Hit {
     pub summary: String,
     pub lines: Vec<HitLine>,
     pub about: Vec<String>,
+    /// The raw records the page cites, as `/read` ids (`sources/<name>`).
     pub sources: Vec<String>,
     pub route: Route,
     pub read: bool,
@@ -1244,7 +1245,12 @@ fn hit(
         summary: page.summary.clone(),
         lines,
         about: visible_anchors(scope, &snap.catalog, graph, vis, &page.about),
-        sources: page.sources.clone(),
+        // As `/read` takes them.
+        sources: page
+            .sources
+            .iter()
+            .map(|s| format!("{}{s}", crate::api::read::SOURCE_PREFIX))
+            .collect(),
     }
 }
 

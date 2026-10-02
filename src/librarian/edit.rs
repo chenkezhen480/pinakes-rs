@@ -60,6 +60,10 @@ pub enum Edit {
     },
     Replace {
         page: String,
+        /// The version (`Page::version`) the editor read, or none for a new page; the edit is
+        /// refused when the page is no longer at it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
         front_matter: FrontMatter,
         body: String,
     },
@@ -288,8 +292,19 @@ impl<'a> Draft<'a> {
                 Some(page) => supersede(page, claim, replacement.as_deref(), reason, r),
             },
             Edit::Replace {
-                front_matter, body, ..
-            } => replace(&path, current, front_matter, body, r, &created),
+                base,
+                front_matter,
+                body,
+                ..
+            } => replace(
+                &path,
+                current,
+                base.as_deref(),
+                front_matter,
+                body,
+                r,
+                &created,
+            ),
         };
         let page = match result {
             Ok(p) => p,
@@ -474,15 +489,14 @@ fn supersede(
     if claim.is_empty() || claim.contains('\n') {
         return Err("claim must be one line copied from the page".into());
     }
-    // Models often copy a list item with its marker; the claim is the text after it.
+    // Models often copy a list item with its marker; the claim is the text after it, and only
+    // that is struck, so a list item stays a list item.
     let bare = strip_marker(claim);
-    // The bare text is struck, so a list item stays a list item.
-    let (claim, at) = match page.body.find(bare).filter(|_| !bare.is_empty()) {
-        Some(at) => (bare, at),
-        None => match page.body.find(claim) {
-            Some(at) => (claim, at),
-            None => return Err(format!("claim {claim:?} is not on the page")),
-        },
+    let Some((at, claim)) = find_claim(&page.body, bare)
+        .map(|at| (at, bare))
+        .or_else(|| find_claim(&page.body, claim).map(|at| (at, claim)))
+    else {
+        return Err(format!("claim {claim:?} is not on the page"));
     };
     let mut marked = format!("~~{claim}~~ (superseded {}: {reason})", r.today);
     if let Some(rep) = replacement.map(str::trim).filter(|s| !s.is_empty()) {
@@ -491,6 +505,50 @@ fn supersede(
     page.body.replace_range(at..at + claim.len(), &marked);
     finish(&mut page, r)?;
     Ok(page)
+}
+
+/// Where a claim is in a body: a whole line (after its list marker) if one says exactly that,
+/// else the first place in a line that says it outside struck text. Headings and code blocks
+/// are never claims.
+fn find_claim(body: &str, claim: &str) -> Option<usize> {
+    if claim.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    let mut fence = Fence::default();
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let t = line.trim();
+        if fence.step(t) || heading_of(t).is_some() {
+            continue;
+        }
+        lines.push((start, line.trim_end_matches(['\n', '\r'])));
+    }
+    let whole = lines.iter().find_map(|(start, line)| {
+        let text = strip_marker(line).trim_end();
+        (text == claim).then(|| start + (text.as_ptr() as usize - line.as_ptr() as usize))
+    });
+    whole.or_else(|| {
+        lines.iter().find_map(|(start, line)| {
+            let struck = struck_spans(line);
+            line.match_indices(claim)
+                .map(|(i, _)| i)
+                .find(|&i| !struck.iter().any(|&(a, b)| i < b && i + claim.len() > a))
+                .map(|i| start + i)
+        })
+    })
+}
+
+/// The byte ranges of `~~struck~~` text in a line.
+fn struck_spans(line: &str) -> Vec<(usize, usize)> {
+    let marks: Vec<usize> = line.match_indices("~~").map(|(i, _)| i).collect();
+    marks
+        .chunks(2)
+        .filter(|c| c.len() == 2)
+        .map(|c| (c[0], c[1] + 2))
+        .collect()
 }
 
 /// A line without a leading list marker (`- `, `* `, `+ `, `1. `).
@@ -513,11 +571,24 @@ fn strip_marker(line: &str) -> &str {
 fn replace(
     path: &PagePath,
     current: Option<Page>,
+    base: Option<&str>,
     front: &FrontMatter,
     body: &str,
     r: &Rules,
     created: &HashSet<PagePath>,
 ) -> Result<Page, String> {
+    match (&current, base) {
+        (Some(c), Some(b)) if c.version() == b => {}
+        (None, None) => {}
+        (Some(c), _) => {
+            return Err(format!(
+                "{path} changed since it was read (now at version {}); read it again and \
+                 redo the edit",
+                c.version()
+            ));
+        }
+        (None, Some(_)) => return Err(format!("{path} no longer exists")),
+    }
     let mut page = Page::new(path.clone());
     page.front = front.clone();
     page.body = body.to_owned();
@@ -814,6 +885,22 @@ mod tests {
         assert!(page.body.contains(
             "~~The rate is 13%.~~ (superseded 2026-10-01: new law) The rate is 9% from 2026-10-01."
         ));
+    }
+
+    #[test]
+    fn supersede_finds_the_live_claim() {
+        let body = "# The rate is 13%.\n\n\
+                    - ~~The rate is 13%.~~ (superseded 2026-09-01: x) The rate is 9%.\n\
+                    - Shops say the rate is 13%. for food\n\
+                    - The rate is 13%.\n";
+        // The whole line, not the heading, the struck text or a longer line.
+        let at = find_claim(body, "The rate is 13%.").unwrap();
+        assert_eq!(&body[at - 2..at], "- ");
+        assert!(body[at..].starts_with("The rate is 13%.\n"));
+        // Part of a line, outside struck text.
+        let at = find_claim(body, "rate is 13%. for").unwrap();
+        assert!(body[..at].ends_with("Shops say the "));
+        assert_eq!(find_claim("~~a b~~ (superseded)\n", "a b"), None);
     }
 
     #[test]

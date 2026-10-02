@@ -21,7 +21,7 @@ use crate::wiki::{Page, PagePath, WikiError};
 
 const MAX_IDS: usize = 20;
 /// Source ids are `sources/<name>`; a `heading` doesn't apply to them.
-const SOURCE_PREFIX: &str = "sources/";
+pub(crate) const SOURCE_PREFIX: &str = "sources/";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

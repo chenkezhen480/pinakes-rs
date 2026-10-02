@@ -355,6 +355,7 @@ impl Librarian {
             .await?;
         }
         if units.is_empty() {
+            let _writer = tenant.wiki_writer.lock().await;
             record_log(
                 &tenant,
                 &format!(
@@ -413,7 +414,9 @@ impl Librarian {
             )
             .await?;
         let snap = tenant.snapshot().await?;
-        let graph = tenant.graph_or_empty().await;
+        // Node anchors are checked against the graph: without it the job fails rather than
+        // having every node anchor refused.
+        let graph = tenant.graph().await.context("anchors need the graph")?;
         let anchors = anchor_options(
             target,
             &job.writer,
@@ -1292,8 +1295,12 @@ pub async fn check_edit(
     Ok(checked.results.into_iter().next().unwrap_or(Ok(())))
 }
 
+/// How an approval that would write nothing fails; the proposal stays held.
+pub const NO_LONGER_APPLIES: &str = "none of the proposal's edits applies to the wiki as it is now";
+
 /// Applies an approved proposal's edits through the code checks, then marks it approved. No
-/// LLM is involved, so approving works without a librarian.
+/// LLM is involved, so approving works without a librarian. When none of them applies any
+/// more, it fails with `NO_LONGER_APPLIES` and the proposal stays held.
 #[tracing::instrument(name = "approve_proposal", skip_all, fields(tenant = %tenant.dir_name))]
 pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Result<JobResult> {
     let today = today();
@@ -1317,7 +1324,7 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         proposal.user.clone(),
         proposal.groups.clone(),
     );
-    apply_and_record(
+    let wrote = apply_and_record(
         &tenant,
         &target,
         &writer,
@@ -1328,6 +1335,16 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         &format!("approve {}", proposal.id),
     )
     .await?;
+    // Nothing applies any more (the pages changed or went away): the proposal stays held, so
+    // it can be rejected or redone, and the caller learns why.
+    if !wrote {
+        let reasons: Vec<String> = result
+            .rejected
+            .iter()
+            .map(|r| format!("{}: {}", r.page, r.reason))
+            .collect();
+        anyhow::bail!("{NO_LONGER_APPLIES}: {}", reasons.join("; "));
+    }
     proposal.status = ProposalStatus::Approved;
     tenant.store.put_proposal(&proposal).await?;
     tenant
@@ -1749,7 +1766,8 @@ async fn check(
     from_plan: bool,
 ) -> anyhow::Result<Checked> {
     let snap = tenant.snapshot().await?;
-    let graph = tenant.graph_or_empty().await;
+    // Without the graph every node anchor would be refused as unknown; the job fails instead.
+    let graph = tenant.graph().await.context("anchors need the graph")?;
     let (wiki, target, writer, source, today, edits) = (
         tenant.wiki(),
         target.clone(),
@@ -1865,7 +1883,8 @@ async fn hold(
 }
 
 /// Step 5 and 6: checks the edits again on the wiki as it is now, writes what passes and
-/// records the job. Callers hold the tenant's wiki writer lock.
+/// records the job; says whether any page was written. Callers hold the tenant's wiki writer
+/// lock.
 #[allow(clippy::too_many_arguments)]
 async fn apply_and_record(
     tenant: &Arc<Tenant>,
@@ -1876,10 +1895,12 @@ async fn apply_and_record(
     edits: &[Edit],
     result: &mut JobResult,
     what: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let checked = check(tenant, target, writer, source, today, edits, false).await?;
+    let mut rejected = 0;
     for (e, r) in edits.iter().zip(&checked.results) {
         if let Err(reason) = r {
+            rejected += 1;
             result.rejected.push(Rejected {
                 page: e.page(),
                 reason: reason.clone(),
@@ -1887,38 +1908,30 @@ async fn apply_and_record(
         }
     }
     let pages = checked.pages;
-    for (page, created) in &pages {
-        let list = if *created {
-            &mut result.pages_created
-        } else {
-            &mut result.pages_updated
-        };
-        list.push(page.path.to_string());
+    // This call's pages; `result` gathers a whole job's, which may run several calls.
+    let (mut created, mut updated) = (Vec::new(), Vec::new());
+    for (page, new) in &pages {
+        if *new { &mut created } else { &mut updated }.push(page.path.to_string());
     }
     let wiki = tenant.wiki();
     tokio::task::spawn_blocking(move || pages.iter().try_for_each(|(p, _)| wiki.write(p)))
         .await
         .context("writing pages panicked")??;
     let mut line = format!("{what}: ");
-    let changed: Vec<&String> = result
-        .pages_created
-        .iter()
-        .chain(&result.pages_updated)
-        .collect();
     if target.audience == PageAudience::Tenant {
         let _ = write!(
             line,
             "created [{}]; updated [{}]",
-            result.pages_created.join(", "),
-            result.pages_updated.join(", ")
+            created.join(", "),
+            updated.join(", ")
         );
     } else {
         // Group and user pages stay out of the tenant-wide log by name.
         let _ = write!(
             line,
             "{} created, {} updated ({} pages)",
-            result.pages_created.len(),
-            result.pages_updated.len(),
+            created.len(),
+            updated.len(),
             match target.audience {
                 PageAudience::Group(_) => "group",
                 _ => "user",
@@ -1928,16 +1941,19 @@ async fn apply_and_record(
     if let Some(p) = &result.proposal {
         let _ = write!(line, "; held as {p}");
     }
-    if !result.rejected.is_empty() {
-        let _ = write!(line, "; {} edits rejected", result.rejected.len());
+    if rejected > 0 {
+        let _ = write!(line, "; {rejected} edits rejected");
     }
-    if !changed.is_empty() {
+    let changed = !created.is_empty() || !updated.is_empty();
+    result.pages_created.extend(created);
+    result.pages_updated.extend(updated);
+    if changed {
         tenant.reindex().await?;
         write_index(tenant).await?;
     }
     record_log(tenant, &line).await?;
     tenant.store.audit(&actor(writer), what, &line).await?;
-    Ok(())
+    Ok(changed)
 }
 
 /// The description page for a definition with the librarian's text: the definition's own

@@ -115,6 +115,13 @@ impl Page {
         format!("---\n{yaml}---\n\n{}", self.body)
     }
 
+    /// A short hash of the page as stored. `GET /pages` returns it and `PUT /pages` sends it
+    /// back, so a hand edit can't overwrite a page that changed since it was read.
+    pub fn version(&self) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(&Sha256::digest(self.render().as_bytes())[..8])
+    }
+
     pub fn summary(&self) -> PageSummary {
         PageSummary {
             path: self.path.to_string(),

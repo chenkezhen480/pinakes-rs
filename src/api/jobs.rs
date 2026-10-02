@@ -107,9 +107,12 @@ pub async fn approve(
                 "proposal {id} is already approved"
             )));
         }
+        let error = job.error.as_deref().unwrap_or("unknown error");
+        if error.starts_with(librarian::NO_LONGER_APPLIES) {
+            return Err(ApiError::Conflict(format!("proposal {id}: {error}")));
+        }
         return Err(ApiError::Internal(anyhow::anyhow!(
-            "approving {id} failed: {}",
-            job.error.as_deref().unwrap_or("unknown error")
+            "approving {id} failed: {error}"
         )));
     }
     tracing::info!(proposal = %id, "proposal approved");

@@ -6,7 +6,7 @@ mod ingest;
 mod insert;
 mod jobs;
 mod pages;
-mod read;
+pub(crate) mod read;
 mod search;
 
 use axum::Router;

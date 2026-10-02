@@ -42,21 +42,12 @@ pub async fn schema(
     def.validate().map_err(ApiError::BadRequest)?;
     let librarian = app.librarian()?;
     let tenant = scope.tenant();
-    let _writer = tenant.graph_writer.lock().await;
+    // The librarian is called without the graph writer lock, which would hold back every
+    // graph write of the tenant for as long as the model takes; under the lock the schema is
+    // checked to be still as it was described.
     let graph = tenant.graph().await?;
-    if graph.space(&def.schema).is_some() {
-        return Err(ApiError::Conflict(format!(
-            "{:?} is already a space name; schema and space names must differ",
-            def.schema
-        )));
-    }
-    let created = !graph.schemas.contains_key(&def.schema);
-    let stored = match graph.schemas.get(&def.schema) {
-        Some(old) => def
-            .apply_change(old, graph.as_ref())
-            .map_err(ApiError::BadRequest)?,
-        None => def,
-    };
+    let (stored, created) = schema_to_store(&graph, &def)?;
+    let before_described = graph.schemas.get(&def.schema).cloned();
 
     let wiki = tenant.wiki();
     let path = describe::page_path(&stored.schema)?;
@@ -78,6 +69,16 @@ pub async fn schema(
             DescribeError::Llm(_) => ApiError::BadGateway(e.to_string()),
             DescribeError::Rejected(_) => ApiError::Unprocessable(e.to_string()),
         })?;
+
+    let _writer = tenant.graph_writer.lock().await;
+    let graph = tenant.graph().await?;
+    if graph.schemas.get(&def.schema) != before_described.as_ref() {
+        return Err(ApiError::Conflict(format!(
+            "schema {:?} changed while it was being described; send it again",
+            def.schema
+        )));
+    }
+    schema_to_store(&graph, &def)?;
 
     // The page and the definition are stored together: if the definition can't be stored,
     // the page goes back to what it was.
@@ -130,6 +131,24 @@ pub async fn schema(
         schema: stored.schema,
         created,
     }))
+}
+
+/// The definition a schema request stores, and whether it creates the schema: the request as
+/// it is for a new schema, or its change applied to the stored one.
+fn schema_to_store(graph: &GraphSnapshot, def: &SchemaDef) -> Result<(SchemaDef, bool), ApiError> {
+    if graph.space(&def.schema).is_some() {
+        return Err(ApiError::Conflict(format!(
+            "{:?} is already a space name; schema and space names must differ",
+            def.schema
+        )));
+    }
+    match graph.schemas.get(&def.schema) {
+        Some(old) => Ok((
+            def.apply_change(old, graph).map_err(ApiError::BadRequest)?,
+            false,
+        )),
+        None => Ok((def.clone(), true)),
+    }
 }
 
 #[derive(Debug, Serialize)]
