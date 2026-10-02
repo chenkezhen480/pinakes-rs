@@ -143,15 +143,13 @@ fn librarian_for(config: &Config, llm: llm::Llm) -> Arc<librarian::Librarian> {
 pub const PERSONAL_KEY_FILE: &str = "personal-api-key.txt";
 
 impl AppState {
-    /// Startup work before serving. With the Neo4j backend, connects to Neo4j (retrying while
-    /// it starts) and creates its constraints. In a personal deployment, creates the default
+    /// Startup work before serving. With the Neo4j backend, connects to Neo4j (once) and
+    /// creates its constraints. In a personal deployment, creates the default
     /// tenant on first start and writes its API key to [`PERSONAL_KEY_FILE`] in the data
     /// folder. Returns the key when it was just created, so it can be shown once.
     pub async fn prepare(&self) -> anyhow::Result<Option<String>> {
         if let graph::GraphBackend::Neo4j(client) = self.tenants.graph() {
-            client
-                .connect_with_retries(30, std::time::Duration::from_secs(2))
-                .await?;
+            client.connect().await?;
             tracing::info!(uri = %self.config.neo4j.uri, "Neo4j reachable");
         }
         let id = &self.config.identity;

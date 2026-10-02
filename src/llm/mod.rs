@@ -73,7 +73,8 @@ pub fn client(cfg: &LibrarianConfig, key: Option<String>) -> Result<Llm, Missing
 }
 
 /// Retries for one HTTP call: rate limits, overload, server errors and dropped connections.
-pub(crate) const RETRIES: u32 = 2;
+/// Three, like every retry in the service; then the call fails.
+pub(crate) const RETRIES: u32 = 3;
 
 /// How long to wait before retry `attempt` (1-based): `retry-after` when the server sent one
 /// (capped at a minute), otherwise 2, 4, ... seconds.

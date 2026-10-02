@@ -9,7 +9,7 @@ The message gives you:
 - the new content, as a JSON record,
 - the related pages already in the wiki, in full,
 - the anchors you may use,
-- on a second attempt, why the first plan was rejected.
+- on a later attempt, why the last plan was rejected.
 
 Reply with one JSON object of this shape (the reply format is enforced; every field is
 present, and a field you don't use is `null` or `[]`):

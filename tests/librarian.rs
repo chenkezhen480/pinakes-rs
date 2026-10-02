@@ -215,7 +215,7 @@ async fn new_content_updates_the_related_playbook() {
 }
 
 /// A memory page without an anchor, or with one the page may not use, is refused by code and
-/// sent back once with the reasons; the second plan is filed.
+/// sent back with the reasons, up to three times; what still fails then is refused.
 #[tokio::test]
 async fn every_memory_is_anchored() {
     let llm = model(|msg, n| {
@@ -224,7 +224,9 @@ async fn every_memory_is_anchored() {
             0 => &[],
             _ => {
                 assert!(msg.contains("Why the last plan was rejected"), "{msg}");
-                assert!(msg.contains("needs at least one anchor"), "{msg}");
+                if n == 1 {
+                    assert!(msg.contains("needs at least one anchor"), "{msg}");
+                }
                 assert!(msg.contains("no such node"), "{msg}");
                 &["commerce:order"]
             }
@@ -250,13 +252,17 @@ async fn every_memory_is_anchored() {
         json!({ "task": "coupon refund on cancel", "outcome": "Coupons returned only on full cancellation." }),
     )
     .await;
-    assert_eq!(llm.calls(Step::Plan).len(), 2);
+    assert_eq!(
+        llm.calls(Step::Plan).len(),
+        4,
+        "the first plan and three retries"
+    );
     let r = &job["result"];
     assert_eq!(
         r["pages_created"],
         json!(["experience/coupon-refund-on-cancel"])
     );
-    // The bad anchor on the other page was refused twice, so that edit is dropped.
+    // The bad anchor on the other page was refused in every try, so that edit is dropped.
     assert_eq!(
         r["rejected"][0]["page"],
         "experience/coupon-stacking-errors"
@@ -305,8 +311,8 @@ async fn unsupported_edits_are_held_for_review() {
     )
     .await;
     let plans = llm.calls(Step::Plan);
-    assert_eq!(plans.len(), 2, "sent back once");
-    assert!(plans[1].contains("the record does not say the threshold is 99 yuan"));
+    assert_eq!(plans.len(), 4, "sent back three times");
+    assert!(plans[3].contains("the record does not say the threshold is 99 yuan"));
     let r = &job["result"];
     assert_eq!(r["pages_created"], json!([]));
     let proposal = r["proposal"].as_str().unwrap().to_owned();
@@ -644,8 +650,8 @@ async fn schema_descriptions_come_from_the_librarian() {
             .iter()
             .filter(|m| m.contains("\"schema\": \"held\""))
             .count()
-            == 2,
-        "sent back once"
+            == 4,
+        "sent back three times"
     );
     let (_, list) = app.get(c, "/proposals").await;
     assert_eq!(list["proposals"], json!([]), "a description is never held");

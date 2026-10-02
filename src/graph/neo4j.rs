@@ -11,7 +11,6 @@
 //! within its tenant, space and type; code validates the rest.
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -74,27 +73,19 @@ impl Neo4jClient {
             .await
     }
 
-    /// Connects at startup, retrying while Neo4j comes up (Compose only orders the start). A
-    /// missing password is a configuration error and fails at once.
-    pub async fn connect_with_retries(&self, attempts: u32, delay: Duration) -> anyhow::Result<()> {
+    /// Connects at startup, once: if Neo4j can't be reached the service doesn't start, with one
+    /// error saying why. A missing password is a configuration error.
+    pub async fn connect(&self) -> anyhow::Result<()> {
         if std::env::var_os(&self.cfg.password_env).is_none() {
             anyhow::bail!(
                 "graph.backend is \"neo4j\" but ${} (the Neo4j password) is not set; set it, or use backend = \"sqlite\" to run without Neo4j",
                 self.cfg.password_env
             );
         }
-        let mut last = None;
-        for attempt in 1..=attempts.max(1) {
-            match self.graph().await {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    tracing::warn!(attempt, error = %format!("{e:#}"), "Neo4j not reachable yet");
-                    last = Some(e);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-        Err(last.expect("at least one attempt"))
+        self.graph()
+            .await
+            .map(|_| ())
+            .context("Neo4j can't be reached")
     }
 }
 

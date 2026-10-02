@@ -22,7 +22,7 @@ use serde_json::json;
 
 use super::documents::{self, Changes, LedgerStep, Reading, ReadingState};
 use super::{
-    CHANGES_CHARS, DocumentIn, DocumentMatch, Ingest, Librarian, MAX_QUERY_CHARS, Unit,
+    ATTEMPTS, CHANGES_CHARS, DocumentIn, DocumentMatch, Ingest, Librarian, MAX_QUERY_CHARS, Unit,
     apply_and_record, hold, nullable_string, object, page_id, parse_json, prompts, record_log,
     sources, strings,
 };
@@ -438,7 +438,8 @@ impl Librarian {
     }
 
     /// One read from the cursor: asked until the answer can be used, with a wider window when
-    /// the concept runs past it, and once more with the reason when it can't be used.
+    /// the concept runs past it, and again with the reason when it can't be used, up to
+    /// `ATTEMPTS` tries.
     async fn read_step(
         &self,
         target: &Target,
@@ -514,9 +515,10 @@ impl Librarian {
                 }
             };
             rejected += 1;
-            if rejected == 2 {
+            if rejected == ATTEMPTS {
                 anyhow::bail!(
-                    "the librarian's reading from line {cursor} could not be used twice: {problem}"
+                    "the librarian's reading from line {cursor} could not be used in {ATTEMPTS} \
+                     tries: {problem}"
                 );
             }
             tracing::info!(cursor, %problem, "read rejected; asking again");

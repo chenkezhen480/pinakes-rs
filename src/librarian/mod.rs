@@ -53,6 +53,9 @@ const MAX_QUERIES: usize = 10;
 const CHANGES_CHARS: usize = 20_000;
 /// Most pages of a document's versions shown with each concept.
 const MAX_DOC_PAGES: usize = 20;
+/// Tries for one step whose answer can't be used (a reply that can't be read, a plan refused,
+/// a read out of bounds): the first and three retries, each told why; then the step fails.
+const ATTEMPTS: usize = 4;
 /// Documents shown to the model when recognizing an upload, and what is shown of each.
 const MATCH_CANDIDATES: usize = 3;
 const MATCH_PAGES: usize = 5;
@@ -353,7 +356,7 @@ impl Librarian {
         );
         let mut feedback: Vec<String> = Vec::new();
         let mut last = None;
-        for attempt in 1..=2 {
+        for attempt in 1..=ATTEMPTS {
             let user = plan_message(
                 rules,
                 target,
@@ -372,13 +375,15 @@ impl Librarian {
                 .context("planning the edits")?;
             let edits = match parse_plan(&reply) {
                 Ok(e) => e,
-                Err(e) if attempt == 1 => {
+                Err(e) if attempt < ATTEMPTS => {
                     feedback = vec![format!(
                         "Your reply was not one JSON object of the required shape: {e}"
                     )];
                     continue;
                 }
-                Err(e) => anyhow::bail!("the librarian's plan could not be read twice: {e}"),
+                Err(e) => {
+                    anyhow::bail!("the librarian's plan could not be read in {ATTEMPTS} tries: {e}")
+                }
             };
             let checked =
                 check(tenant, target, &job.writer, Some(cite), today, &edits, true).await?;
@@ -408,7 +413,7 @@ impl Librarian {
                     ))
                 })
                 .collect();
-            let done = failures.is_empty() || attempt == 2;
+            let done = failures.is_empty() || attempt == ATTEMPTS;
             last = Some((edits, checked, verdicts));
             if done {
                 break;
@@ -576,13 +581,20 @@ impl Librarian {
             ids.push((*id).to_owned());
         }
         let prompt = self.prompt(prompts::MATCH, msg, match_schema(&ids));
-        let reply = self
-            .llm
-            .complete(&prompt)
-            .await
-            .context("recognizing the document")?;
-        let answer = parse_json::<MatchReply>(&reply)
-            .map_err(|e| anyhow::anyhow!("the librarian's answer could not be read: {e}"))?;
+        let mut answer = Err(String::new());
+        for _ in 0..ATTEMPTS {
+            let reply = self
+                .llm
+                .complete(&prompt)
+                .await
+                .context("recognizing the document")?;
+            answer = parse_json::<MatchReply>(&reply);
+            if answer.is_ok() {
+                break;
+            }
+        }
+        let answer =
+            answer.map_err(|e| anyhow::anyhow!("the librarian's answer could not be read: {e}"))?;
         match answer.document.filter(|id| ids.contains(id)) {
             Some(id) => {
                 let mut doc = filed
@@ -810,7 +822,7 @@ impl Librarian {
     async fn ask_verdicts(&self, msg: String) -> anyhow::Result<Vec<Verdict>> {
         let prompt = self.prompt(prompts::VERIFY, msg, verdicts_schema());
         let mut last_err = None;
-        for _ in 0..2 {
+        for _ in 0..ATTEMPTS {
             let reply = self
                 .llm
                 .complete(&prompt)
@@ -829,7 +841,7 @@ impl Librarian {
 
     /// Writes a schema's description (design, "The business graph"): the librarian writes the
     /// prose, code the structure from the definition. There is no fallback: when the model
-    /// can't be reached, or the verifier rejects the description twice, this fails and the
+    /// can't be reached, or the description is rejected in every try, this fails and the
     /// caller stores nothing.
     #[tracing::instrument(name = "librarian_describe", skip_all, fields(schema = %def.schema))]
     pub async fn describe(
@@ -858,7 +870,7 @@ impl Librarian {
         let schema = description_schema(def);
         let mut feedback = String::new();
         let mut reason = String::new();
-        for _ in 0..2 {
+        for _ in 0..ATTEMPTS {
             let prompt = self.prompt(
                 prompts::DESCRIBE,
                 format!("{msg}{feedback}"),
@@ -898,7 +910,7 @@ impl Librarian {
     async fn ask_ok(&self, system: &str, msg: String) -> anyhow::Result<Result<(), String>> {
         let prompt = self.prompt(system, msg, verdict_schema());
         let mut last_err = String::new();
-        for _ in 0..2 {
+        for _ in 0..ATTEMPTS {
             let reply = self.llm.complete(&prompt).await?;
             match parse_json::<Verdict>(&reply) {
                 Ok(v) if v.ok => return Ok(Ok(())),
