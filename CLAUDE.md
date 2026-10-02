@@ -7,7 +7,8 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 
 - Build one milestone at a time (M1…M9 in "Build milestones"). Each milestone ends with its
   "done when" check, backed by tests.
-- Reply to the user in Chinese. Code, comments, commit messages and docs stay in English.
+- Reply to the user in Chinese. Code, comments and docs stay in English; commit messages may be
+  in Chinese (identifiers, test names and error strings as in the code).
 - Before calling a task done, run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - On this Windows machine cargo lives in `%USERPROFILE%\.cargo\bin`; in Git Bash prefix commands
   with `export PATH="$HOME/.cargo/bin:$PATH";` if `cargo` is not found.
