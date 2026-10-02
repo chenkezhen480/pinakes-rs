@@ -1,16 +1,17 @@
-//! Reading a document like a person, one concept at a time (design, "Reading like a person,
-//! one concept at a time" and "The reading is a loop code runs, not an agent").
+//! Reading a document like a person (design, "Reading like a person, one concept at a time",
+//! "The reading is a loop code runs, not an agent" and "Filing in batches, the text read once").
 //!
-//! Code numbers the lines and runs the loop; the model decides only what each concept is, where
-//! it ends and how its page reads. Each turn: read from the cursor (one structured call), check
-//! the answer (the end line lies within what was shown, at or after the cursor), file the
-//! concept (plan, code checks, verify, write), save where the reading is, and move the cursor
-//! past the concept. Every line is part of a concept or skipped, so none is left unread; the
-//! cursor only moves forward and each read is asked again once at most, so the loop ends.
+//! Code numbers the lines and runs the loop; the model decides what the concepts are, where
+//! each ends, and what each says. Each turn reads one window from the cursor (one structured
+//! call): every complete concept in it, with its extract, and the lines to skip. Code checks the
+//! answer (steps in order, within what was shown, numbers in each extract found in its lines),
+//! files the window's concepts as one batch from their extracts, saves where the reading is,
+//! and moves the cursor past the last complete concept. Every line is part of a concept or
+//! skipped, so none is left unread; the cursor only moves forward and each read is asked again
+//! three times at most, so the loop ends.
 //!
 //! A new version keeps, without asking the model, every earlier step whose lines didn't change,
-//! and reads again from each step the changes touch until it is back in step with the earlier
-//! reading.
+//! and reads again only up to the next step it can keep.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -20,11 +21,11 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::batch::Item;
 use super::documents::{self, Changes, LedgerStep, Reading, ReadingState};
 use super::{
-    ATTEMPTS, Document, DocumentIn, DocumentMatch, Ingest, Librarian, Opening, Unit,
-    apply_and_record, hold, nullable_string, object, page_id, parse_json, prompts, record_log,
-    sources, strings,
+    ATTEMPTS, Document, DocumentIn, DocumentMatch, Ingest, Librarian, Opening, nullable_string,
+    object, page_id, parse_json, prompts, record_log, sources, strings,
 };
 use crate::identity::Scope;
 use crate::jobs::JobResult;
@@ -32,6 +33,10 @@ use crate::librarian::edit::Target;
 use crate::tenants::Tenant;
 use crate::wiki::PagePath;
 
+/// The window of the first read of an upload without an id, which recognizes it: enough for
+/// its main thread and first concept. If the upload is a new version, this read is dropped,
+/// so it is kept small; if it is a new document, it is the reading's first window.
+const OPENING_WINDOW_TOKENS: usize = 2_000;
 /// The smallest read window, in tokens, whatever the config says.
 const MIN_WINDOW_TOKENS: usize = 500;
 /// How many times the read window may grow, at most, for one long concept: by default up to
@@ -43,44 +48,104 @@ const MAX_LEDGER_LINES: usize = 60;
 /// Earlier steps shown on each side of the ones a read's lines were in.
 const EARLIER_STEPS_AROUND: usize = 2;
 
-/// The reply to one read.
+/// The reply to one read: the steps of the window, in order.
 #[derive(Deserialize)]
 struct ReadReply {
+    #[serde(default)]
+    steps: Vec<StepReply>,
+    #[serde(default)]
+    more: bool,
+    thread: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StepReply {
     action: String,
     end_line: i64,
     title: Option<String>,
     page: Option<String>,
     #[serde(default)]
     keywords: Vec<String>,
+    extract: Option<String>,
+}
+
+/// One window read, checked: its steps in order, and any new main thread.
+struct Read {
+    steps: Vec<ReadStep>,
     thread: Option<String>,
 }
 
-/// One read, checked: the last line it takes, and the concept, or none when skipped.
-struct Read {
+/// One step: the last line it takes, and its concept, or none when skipped.
+struct ReadStep {
     end: usize,
     concept: Option<Concept>,
-    thread: Option<String>,
 }
 
 struct Concept {
     title: String,
     page: String,
     keywords: Vec<String>,
+    /// What the lines say, in the librarian's words, with numbers as the lines have them.
+    extract: String,
 }
 
 /// The shape of a read's reply.
 pub fn read_schema() -> serde_json::Value {
-    object(&[
+    let step = object(&[
         (
             "action",
-            json!({ "type": "string", "enum": ["concept", "skip", "more"] }),
+            json!({ "type": "string", "enum": ["concept", "skip"] }),
         ),
         ("end_line", json!({ "type": "integer" })),
         ("title", nullable_string()),
         ("page", nullable_string()),
         ("keywords", strings()),
+        ("extract", nullable_string()),
+    ]);
+    object(&[
+        ("steps", json!({ "type": "array", "items": step })),
+        ("more", json!({ "type": "boolean" })),
         ("thread", nullable_string()),
     ])
+}
+
+/// The numbers in a text: digit runs, with decimals, thousands separators dropped and leading
+/// zeros ignored.
+fn numbers(text: &str) -> Vec<String> {
+    let text = text.replace([',', '，'], "");
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() || (c == '.' && !cur.is_empty()) {
+            cur.push(c);
+        } else if !cur.is_empty() {
+            // 1.50 is 1.5, and 007 is 7.
+            let mut n = cur.trim_end_matches('.');
+            if n.contains('.') {
+                n = n.trim_end_matches('0').trim_end_matches('.');
+            }
+            let n = n.trim_start_matches('0');
+            let n = if n.is_empty() || n.starts_with('.') {
+                format!("0{n}")
+            } else {
+                n.to_owned()
+            };
+            if !out.contains(&n) {
+                out.push(n);
+            }
+            cur.clear();
+        }
+    }
+    out
+}
+
+/// The numbers an extract has that the text it was read from doesn't.
+fn numbers_missing(extract: &str, lines: &str) -> Vec<String> {
+    let source = numbers(lines);
+    numbers(extract)
+        .into_iter()
+        .filter(|n| !source.contains(n))
+        .collect()
 }
 
 /// The version before the one being read, and how it differs.
@@ -142,6 +207,14 @@ impl Earlier {
             page: s.page.clone(),
             cites: s.cites.clone(),
         })
+    }
+
+    /// The last line to read from `cursor` before a step that can be kept as it is; the last
+    /// line of the text when none follows.
+    fn read_up_to(&self, cursor: usize, last: usize) -> usize {
+        (cursor + 1..=last)
+            .find(|&l| self.kept_at(l).is_some())
+            .map_or(last, |l| l - 1)
     }
 
     /// The earlier steps (by index, in order) that held new lines `from..=to` or the lines
@@ -249,8 +322,9 @@ fn version_note(doc: &documents::Document, version: u32) -> String {
 }
 
 impl Librarian {
-    /// Files a document (expertise) by reading it, one concept per step; each concept goes
-    /// through steps 2 to 6 like a record. Resumes an unfinished reading of the same text.
+    /// Files a document (expertise) by reading it, window by window; the concepts each window
+    /// holds are filed as one batch from their extracts. Resumes an unfinished reading of the
+    /// same text.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_document(
         &self,
@@ -264,7 +338,8 @@ impl Librarian {
     ) -> anyhow::Result<()> {
         let target = &job.target;
         let hash = documents::content_hash(&d.content);
-        // The first read of an upload recognized by it, when it is new: the reading's first step.
+        let lines: Vec<&str> = d.content.lines().collect();
+        // The first read of an upload recognized by it, when it is new: the reading's first turn.
         let mut first: Option<Read> = None;
         let unfinished = tenant
             .store
@@ -302,18 +377,27 @@ impl Librarian {
                     None => {
                         // Read first: what the first read says the document is recognizes it,
                         // never cut pieces of its text. For a new document that read is the
-                        // reading's first step.
-                        let lines: Vec<&str> = d.content.lines().collect();
-                        let read = self.read_step(target, &s, &lines, None).await?;
+                        // reading's first turn.
+                        let read = self
+                            .read_window(
+                                target,
+                                &s,
+                                &lines,
+                                lines.len(),
+                                None,
+                                OPENING_WINDOW_TOKENS.min(self.cfg.read_window_tokens),
+                            )
+                            .await?;
                         let mut terms = Vec::new();
-                        if let Some(c) = &read.concept {
+                        if let Some(c) = read.steps.iter().find_map(|s| s.concept.as_ref()) {
                             terms.push(c.title.clone());
                             terms.extend(c.keywords.iter().cloned());
                         }
+                        let last = read.steps.last().map_or(0, |s| s.end);
                         let opening = Opening {
                             thread: read.thread.clone().unwrap_or_default(),
                             terms,
-                            text: lines[..read.end].join("\n"),
+                            text: lines[..last].join("\n"),
                         };
                         let new = s.document.clone();
                         let (found, how) = self
@@ -369,7 +453,6 @@ impl Librarian {
             }
         }
 
-        let lines: Vec<&str> = d.content.lines().collect();
         let mut first_sources = earlier_sources.clone();
         first_sources.push(state.source.clone());
         while state.cursor <= lines.len() {
@@ -378,11 +461,21 @@ impl Librarian {
                 state.reading.steps.push(kept);
                 continue;
             }
+            let limit = earlier
+                .as_ref()
+                .map_or(lines.len(), |e| e.read_up_to(state.cursor, lines.len()));
             let read = match first.take() {
                 Some(read) => read,
                 None => {
-                    self.read_step(target, &state, &lines, earlier.as_ref())
-                        .await?
+                    self.read_window(
+                        target,
+                        &state,
+                        &lines,
+                        limit,
+                        earlier.as_ref(),
+                        self.cfg.read_window_tokens,
+                    )
+                    .await?
                 }
             };
             if let Some(t) = read
@@ -392,55 +485,85 @@ impl Librarian {
             {
                 state.reading.thread = t;
             }
-            let (from, to) = (state.cursor, read.end);
-            let step = match read.concept {
-                None => LedgerStep {
-                    from,
-                    to,
-                    concept: None,
-                    page: None,
-                    cites: None,
-                },
-                Some(c) => {
-                    let cite = documents::cite(&state.source, from, to);
-                    let filed = self
-                        .file_concept(
-                            tenant,
-                            job,
-                            reader,
-                            rules,
-                            today,
-                            &state,
-                            &lines,
-                            (from, to),
-                            &c,
-                            &cite,
-                            earlier.as_ref(),
-                            &first_sources,
-                            result,
-                        )
-                        .await?;
-                    // A page whose edits were all held or refused isn't in the wiki: the
-                    // ledger doesn't offer it to later steps to link to or continue.
-                    LedgerStep {
+
+            // The window's concepts, filed as one batch from their extracts.
+            let note = document_note(&state, earlier.as_ref());
+            let mut spans = Vec::new();
+            let mut from = state.cursor;
+            for step in &read.steps {
+                spans.push((from, step.end));
+                from = step.end + 1;
+            }
+            let mut items = Vec::new();
+            let mut item_of_step = Vec::new();
+            for (step, &(from, to)) in read.steps.iter().zip(&spans) {
+                item_of_step.push(step.concept.as_ref().map(|c| {
+                    items.push(concept_item(job, &state, earlier.as_ref(), (from, to), c));
+                    items.len() - 1
+                }));
+            }
+            let filed = if items.is_empty() {
+                Vec::new()
+            } else {
+                self.file_batch(
+                    tenant,
+                    target,
+                    &job.writer,
+                    reader,
+                    rules,
+                    today,
+                    Some(&note),
+                    &first_sources,
+                    &items,
+                )
+                .await?
+            };
+            let catalog = tenant.snapshot().await?;
+            for f in &filed {
+                result.pages_created.extend(f.created.iter().cloned());
+                result.pages_updated.extend(f.updated.iter().cloned());
+                result.rejected.extend(f.rejected.iter().cloned());
+                if let Some(p) = &f.proposal {
+                    // The job's first proposal; `GET /proposals` lists them all.
+                    result.proposal.get_or_insert(p.clone());
+                }
+            }
+            for ((step, &(from, to)), item) in read.steps.into_iter().zip(&spans).zip(item_of_step)
+            {
+                let ledger_step = match (step.concept, item) {
+                    (Some(c), Some(i)) => {
+                        // Filed: its page is in the wiki and none of its edits to that page was
+                        // held or refused. Otherwise the ledger keeps it without a page, so
+                        // later steps don't link to it and the next version files it again.
+                        let filed = catalog.catalog.get(&c.page).is_some()
+                            && !filed[i].not_written.contains(&page_id(&c.page));
+                        LedgerStep {
+                            from,
+                            to,
+                            concept: Some(c.title),
+                            page: filed.then_some(c.page),
+                            cites: Some(documents::cite(&state.source, from, to)),
+                        }
+                    }
+                    _ => LedgerStep {
                         from,
                         to,
-                        concept: Some(c.title),
-                        page: filed.then_some(c.page),
-                        cites: Some(cite),
-                    }
-                }
-            };
-            tracing::info!(
-                from,
-                to,
-                concept = step.concept.as_deref().unwrap_or("(skipped)"),
-                page = step.page.as_deref().unwrap_or(""),
-                "read a step"
-            );
-            state.reading.steps.push(step);
-            state.cursor = to + 1;
-            // Saved after every step, so a job that stops here resumes from the next line.
+                        concept: None,
+                        page: None,
+                        cites: None,
+                    },
+                };
+                tracing::info!(
+                    from,
+                    to,
+                    concept = ledger_step.concept.as_deref().unwrap_or("(skipped)"),
+                    page = ledger_step.page.as_deref().unwrap_or(""),
+                    "read a step"
+                );
+                state.reading.steps.push(ledger_step);
+                state.cursor = to + 1;
+            }
+            // Saved after every window, so a job that stops here resumes from the next line.
             tenant.store.put_reading_state(&state).await?;
         }
 
@@ -474,24 +597,47 @@ impl Librarian {
         Ok(Some(Earlier::new(version, &old, content, reading)))
     }
 
-    /// One read from the cursor: asked until the answer can be used, with a wider window when
-    /// the concept runs past it, and again with the reason when it can't be used, up to
-    /// `ATTEMPTS` tries.
-    async fn read_step(
+    /// One read from the cursor, up to line `limit` at most: asked until the answer can be
+    /// used, with a wider window when not even one concept ends within it, and again with the
+    /// reasons when it can't be used, up to `ATTEMPTS` tries.
+    async fn read_window(
         &self,
         target: &Target,
         state: &ReadingState,
         lines: &[&str],
+        limit: usize,
         earlier: Option<&Earlier>,
+        window: usize,
     ) -> anyhow::Result<Read> {
         let cursor = state.cursor;
-        let mut budget = self.cfg.read_window_tokens.max(MIN_WINDOW_TOKENS);
-        let most = budget.saturating_mul(WINDOW_GROWTH);
+        let mut budget = window.max(MIN_WINDOW_TOKENS);
+        let most = self
+            .cfg
+            .read_window_tokens
+            .max(MIN_WINDOW_TOKENS)
+            .saturating_mul(WINDOW_GROWTH);
         let mut feedback: Option<String> = None;
         let mut rejected = 0;
         loop {
-            let end = window_end(lines, cursor, budget);
-            let msg = read_message(target, state, lines, end, earlier, feedback.as_deref());
+            let end = window_end(lines, cursor, budget).min(limit);
+            let msg = read_message(
+                target,
+                state,
+                lines,
+                end,
+                limit,
+                earlier,
+                feedback.as_deref(),
+            );
+            // What an extract's numbers may come from besides the lines: the main thread, and
+            // for a new version what changed (an extract says what a rule was before).
+            let context = format!(
+                "{}\n{}",
+                state.reading.thread,
+                earlier
+                    .and_then(|e| e.changes_text(cursor, end))
+                    .unwrap_or_default()
+            );
             let reply = self
                 .llm
                 .complete(&self.prompt(prompts::READ, msg, read_schema()))
@@ -500,54 +646,24 @@ impl Librarian {
             let problem = match parse_json::<ReadReply>(&reply) {
                 Err(e) => format!("the reply was not one JSON object of the required shape: {e}"),
                 Ok(r) => {
-                    let in_window = usize::try_from(r.end_line)
-                        .ok()
-                        .filter(|l| (cursor..=end).contains(l));
-                    match (r.action.as_str(), in_window) {
-                        ("more", _) if end < lines.len() && budget < most => {
-                            // The concept goes on: the same read, with more of the text.
+                    match check_read(target, lines, &context, cursor, end, limit, r) {
+                        Ok(Some(read)) => return Ok(read),
+                        // Not one concept ends in the window: the same read, with more text.
+                        Ok(None) if end < limit && budget < most => {
                             budget = budget.saturating_mul(2).min(most);
                             continue;
                         }
-                        ("more", _) if end < lines.len() => "this is as much text as one read \
-                                                              can show: end the concept at the \
-                                                              best break within the lines shown; \
-                                                              its rest is read next"
-                            .to_owned(),
-                        ("more", _) => format!(
-                            "the text shown reaches the end of the document (line {end}), so \
-                             there is no more to show: end the concept at or before it"
-                        ),
-                        ("skip" | "concept", None) => format!(
-                            "end_line {} is not one of the lines shown ({cursor} to {end})",
-                            r.end_line
-                        ),
-                        ("skip", Some(end)) => {
-                            return Ok(Read {
-                                end,
-                                concept: None,
-                                thread: r.thread,
-                            });
+                        Ok(None) if end < limit => {
+                            "this is as much text as one read can show: end \
+                                                a concept at the best break within the lines \
+                                                shown; its rest is read next"
+                                .to_owned()
                         }
-                        ("concept", Some(end)) => {
-                            let title = r.title.as_deref().map(str::trim).unwrap_or_default();
-                            match concept_page(target, r.page.as_deref()) {
-                                Ok(_) if title.is_empty() => "a concept needs its title".into(),
-                                Ok(page) => {
-                                    return Ok(Read {
-                                        end,
-                                        concept: Some(Concept {
-                                            title: title.to_owned(),
-                                            page,
-                                            keywords: r.keywords,
-                                        }),
-                                        thread: r.thread,
-                                    });
-                                }
-                                Err(e) => e,
-                            }
-                        }
-                        (other, _) => format!("action {other:?} is not concept, skip or more"),
+                        Ok(None) => format!(
+                            "the lines shown reach line {end}, the last one to read now, so there \
+                         is no more to show: end your last step at line {end}"
+                        ),
+                        Err(p) => p,
                     }
                 }
             };
@@ -562,168 +678,178 @@ impl Librarian {
             feedback = Some(problem);
         }
     }
+}
 
-    /// Files one concept: steps 2 to 6 for its lines, with the document's main thread and
-    /// ledger. Edits the verifier objects to are held at once, one proposal per concept citing
-    /// its lines. Returns whether the concept's page is in the wiki afterwards.
-    #[allow(clippy::too_many_arguments)]
-    async fn file_concept(
-        &self,
-        tenant: &Arc<Tenant>,
-        job: &Ingest,
-        reader: &Scope,
-        rules: &str,
-        today: &str,
-        state: &ReadingState,
-        lines: &[&str],
-        (from, to): (usize, usize),
-        concept: &Concept,
-        cite: &str,
-        earlier: Option<&Earlier>,
-        first_sources: &[String],
-        result: &mut JobResult,
-    ) -> anyhow::Result<bool> {
-        let doc = &state.document;
-        let text = lines[from - 1..to].join("\n");
-        // What the caller sent (source_url, date, entities…), with this concept's lines in place
-        // of the whole content.
-        let mut rec = job.record.clone();
-        if let Some(o) = rec.as_object_mut() {
-            o.remove("content");
-        }
-        rec["document"] = json!(doc.id);
-        rec["title"] = json!(doc.title);
-        rec["version"] = json!(state.version);
-        rec["lines"] = json!(format!("{from}-{to}"));
-        rec["concept"] = json!(concept.title);
-        rec["text"] = json!(text);
-        let record = serde_json::to_string_pretty(&rec)?;
-        let mut note = format!(
-            "Document {} ({}), version {}, is read one concept at a time; this call files the \
-             concept in lines {from}-{to}.\n\nMain thread: {}\n\nRead so far (lines → concept \
-             → page):\n\n{}\n\n",
-            doc.id,
-            doc.title,
-            state.version,
-            if state.reading.thread.is_empty() {
-                "(none yet)"
-            } else {
-                &state.reading.thread
-            },
-            if state.reading.steps.is_empty() {
-                "Nothing yet: this is the first concept.".to_owned()
-            } else {
-                state.reading.ledger_lines(MAX_LEDGER_LINES).join("\n")
-            }
-        );
-        let mut first_pages = vec![concept.page.clone()];
-        if let Some(e) = earlier {
-            note.push_str(&version_note(doc, state.version));
-            note.push_str("\n\n");
-            match e.changes_text(from, to) {
-                Some(c) => {
-                    let _ = write!(
-                        note,
-                        "What changed in these lines since version {}: {c}\n\n",
-                        e.version
-                    );
-                }
-                None => {
-                    let _ = write!(
-                        note,
-                        "None of these lines changed since version {}: keep what their pages \
-                         say, unless they disagree with the lines.\n\n",
-                        e.version
-                    );
-                }
-            }
-            for p in e.pages_for(from, to) {
-                if !first_pages.contains(&p) {
-                    first_pages.push(p);
-                }
-            }
-        }
-        let focus = format!(
-            "File the concept \"{}\" (lines {from}-{to}) as `{}`: update that page if it \
-             exists, create it if not. Write a condensed account of these lines, never a copy. \
-             Every line given must reach the wiki: if some of them belong to another concept, \
-             file them too, on that concept's page (one in the ledger, or a new one). The rest \
-             of the document is filed in steps of its own; link to the ledger's pages where this \
-             concept refers to them.",
-            concept.title, concept.page
-        );
-        let mut keywords = vec![concept.title.clone()];
-        keywords.extend(concept.keywords.iter().take(10).cloned());
-        let unit = Unit {
-            record,
-            // Searched by what the read says the concept is, never by pieces of its text.
-            queries: vec![format!("{} {}", concept.title, concept.keywords.join(" "))],
-            keywords,
-            note: Some(note),
-            focus: Some(focus),
-            first_pages,
+/// A read's reply checked against the window it was shown (lines `cursor..=end`, reading up to
+/// `limit`): `None` when it asks for more text.
+#[allow(clippy::too_many_arguments)]
+fn check_read(
+    target: &Target,
+    lines: &[&str],
+    context: &str,
+    cursor: usize,
+    end: usize,
+    limit: usize,
+    r: ReadReply,
+) -> Result<Option<Read>, String> {
+    if r.steps.is_empty() {
+        return if r.more {
+            Ok(None)
+        } else {
+            Err("give the window's steps, or `more` when not even one concept ends in it".into())
         };
-        let rejected_before = result.rejected.len();
-        let (pass, held) = self
-            .plan_unit(
-                tenant,
-                job,
-                reader,
-                rules,
-                today,
-                &unit,
-                first_sources,
-                cite,
-                result,
-            )
-            .await?;
-        let _writer = tenant.wiki_writer.lock().await;
-        apply_and_record(
-            tenant,
-            &job.target,
-            &job.writer,
-            Some(cite),
-            today,
-            &pass,
-            result,
-            &format!("ingest {}", job.target.kind.as_str()),
-        )
-        .await?;
-        // Filed: its page is in the wiki and none of the concept's edits to it were held or
-        // refused (a plan with nothing to add to an existing page files it too).
-        let untouched = held.iter().all(|h| page_id(&h.edit.page()) != concept.page)
-            && result.rejected[rejected_before..]
-                .iter()
-                .all(|r| page_id(&r.page) != concept.page);
-        // Held at once, as one proposal per concept citing its lines.
-        if !held.is_empty() {
-            let target = &job.target;
-            let id = hold(tenant, target, &job.writer, Some(cite), held).await?;
-            record_log(
-                tenant,
-                &format!("ingest {}: held as {id}", target.kind.as_str()),
-            )
-            .await?;
-            // The job's first proposal; `GET /proposals` lists them all.
-            result.proposal.get_or_insert(id);
+    }
+    let read_text = format!(
+        "{}\n{}\n{}",
+        lines[cursor - 1..end].join("\n"),
+        context,
+        r.thread.as_deref().unwrap_or("")
+    );
+    let mut from = cursor;
+    let mut steps = Vec::new();
+    for (n, s) in r.steps.into_iter().enumerate() {
+        let n = n + 1;
+        let to = usize::try_from(s.end_line)
+            .ok()
+            .filter(|l| (from..=end).contains(l))
+            .ok_or_else(|| {
+                format!(
+                    "step {n}: end_line {} is not between {from} and {end} (steps come in \
+                     order, each after the last)",
+                    s.end_line
+                )
+            })?;
+        let concept = match s.action.as_str() {
+            "skip" => None,
+            "concept" => {
+                let title = s.title.as_deref().map(str::trim).unwrap_or_default();
+                if title.is_empty() {
+                    return Err(format!("step {n}: a concept needs its title"));
+                }
+                let page = concept_page(target, s.page.as_deref())
+                    .map_err(|e| format!("step {n}: {e}"))?;
+                let extract = s.extract.as_deref().map(str::trim).unwrap_or_default();
+                if extract.is_empty() {
+                    return Err(format!("step {n}: a concept needs its extract"));
+                }
+                // Its numbers come from the text read (a date the document gives once is used
+                // for every concept), never from nowhere.
+                let missing = numbers_missing(extract, &read_text);
+                if !missing.is_empty() {
+                    return Err(format!(
+                        "step {n}: the extract has {}, which the text shown doesn't; numbers, \
+                         dates and amounts are written as the lines have them",
+                        missing.join(", ")
+                    ));
+                }
+                Some(Concept {
+                    title: title.to_owned(),
+                    page,
+                    keywords: s.keywords,
+                    extract: extract.to_owned(),
+                })
+            }
+            other => return Err(format!("step {n}: action {other:?} is not concept or skip")),
+        };
+        steps.push(ReadStep { end: to, concept });
+        from = to + 1;
+    }
+    if end == limit && from <= limit {
+        return Err(format!(
+            "every line up to {limit} is read now: lines {from}-{limit} are in no step"
+        ));
+    }
+    Ok(Some(Read {
+        steps,
+        thread: r.thread,
+    }))
+}
+
+/// What every item of a window shares: the document, its main thread and ledger, and for a new
+/// version how to file changes.
+fn document_note(state: &ReadingState, earlier: Option<&Earlier>) -> String {
+    let doc = &state.document;
+    let mut note = format!(
+        "Document {} ({}), version {}, is read window by window; its items are the concepts \
+         read in this window, each with its extract.\n\nMain thread: {}\n\nRead so far (lines \
+         → concept → page):\n\n{}\n\n",
+        doc.id,
+        doc.title,
+        state.version,
+        if state.reading.thread.is_empty() {
+            "(none yet)"
+        } else {
+            &state.reading.thread
+        },
+        if state.reading.steps.is_empty() {
+            "Nothing yet: these are the first concepts.".to_owned()
+        } else {
+            state.reading.ledger_lines(MAX_LEDGER_LINES).join("\n")
         }
-        let exists = tenant
-            .snapshot()
-            .await?
-            .catalog
-            .get(&concept.page)
-            .is_some();
-        Ok(exists && untouched)
+    );
+    if earlier.is_some() {
+        note.push_str(&version_note(doc, state.version));
+        note.push('\n');
+    }
+    note
+}
+
+/// One concept as an item: the caller's record (source_url, date, entities…) without its
+/// content, and the concept's extract in place of its lines.
+fn concept_item(
+    job: &Ingest,
+    state: &ReadingState,
+    earlier: Option<&Earlier>,
+    (from, to): (usize, usize),
+    c: &Concept,
+) -> Item {
+    let mut rec = job.record.clone();
+    if let Some(o) = rec.as_object_mut() {
+        o.remove("content");
+    }
+    rec["document"] = json!(state.document.id);
+    rec["title"] = json!(state.document.title);
+    rec["version"] = json!(state.version);
+    rec["lines"] = json!(format!("{from}-{to}"));
+    rec["concept"] = json!(c.title);
+    rec["extract"] = json!(c.extract);
+    let mut first_pages = vec![c.page.clone()];
+    if let Some(e) = earlier {
+        for p in e.pages_for(from, to) {
+            if !first_pages.contains(&p) {
+                first_pages.push(p);
+            }
+        }
+    }
+    let mut keywords = vec![c.title.clone()];
+    keywords.extend(c.keywords.iter().take(10).cloned());
+    Item {
+        content: rec,
+        // Searched by what the read says the concept is, never by pieces of its text.
+        queries: vec![format!("{} {}", c.title, c.keywords.join(" "))],
+        keywords,
+        entities: job.entities.clone(),
+        first_pages,
+        task: Some(format!(
+            "File the concept \"{}\" (lines {from}-{to}) as `{}`: update that page if it exists, \
+             create it if not, from its extract. If the extract holds something that belongs to \
+             another concept, file that on that concept's page too: nothing in it is left out. \
+             Link to the ledger's pages where this concept refers to them.",
+            c.title, c.page
+        )),
+        page: Some(c.page.clone()),
+        cite: documents::cite(&state.source, from, to),
     }
 }
 
 /// The message for one read: the document, its main thread and ledger, for a new version how
-/// the earlier one was read and what changed, and the numbered text from the cursor.
+/// the earlier one read these lines and what changed, and the numbered text from the cursor.
 fn read_message(
     target: &Target,
     state: &ReadingState,
     lines: &[&str],
     end: usize,
+    limit: usize,
     earlier: Option<&Earlier>,
     feedback: Option<&str>,
 ) -> String {
@@ -771,15 +897,20 @@ fn read_message(
          `{0}/<name>`, a short lowercase name of letters, digits and `-`.\n\n",
         target.folder()
     );
+    let after = if end == lines.len() {
+        "this is the end of the document".to_owned()
+    } else if end == limit {
+        format!(
+            "the lines after {end} haven't changed and are kept as read before, so your last \
+             step ends at line {end}"
+        )
+    } else {
+        format!("the document goes on after line {end}")
+    };
     let _ = write!(
         msg,
-        "## Text from line {cursor}\n\nLines {cursor} to {end} of {}; {}.\n\n```text\n",
-        lines.len(),
-        if end < lines.len() {
-            format!("the document goes on after line {end}")
-        } else {
-            "this is the end of the document".to_owned()
-        }
+        "## Text from line {cursor}\n\nLines {cursor} to {end} of {}; {after}.\n\n```text\n",
+        lines.len()
     );
     for (i, line) in lines[cursor - 1..end].iter().enumerate() {
         let _ = writeln!(msg, "{}| {line}", cursor + i);
@@ -853,6 +984,28 @@ mod tests {
             page: Some(format!("expertise/{page}")),
             cites: Some(documents::cite("v1.json", from, to)),
         }
+    }
+
+    #[test]
+    fn extracts_keep_the_numbers_of_their_lines() {
+        let lines = "运费险赔付寄回运费，上限 25 元；5,000 元以上需复核，费率 1.50%。";
+        assert!(numbers_missing("上限 25 元，5000 元以上复核，费率 1.5%", lines).is_empty());
+        assert_eq!(numbers_missing("上限 20 元", lines), vec!["20"]);
+        assert_eq!(numbers("2026-11-01 起 7 天"), vec!["2026", "11", "1", "7"]);
+    }
+
+    #[test]
+    fn a_new_version_reads_up_to_the_next_step_it_keeps() {
+        let old = "a\nb\nc\nd\ne\nf\n";
+        let new = "a\nB\nc\nd\ne\nf\n";
+        let reading = Reading {
+            thread: String::new(),
+            steps: vec![step(1, 2, "one"), step(3, 4, "two"), step(5, 6, "three")],
+        };
+        let e = Earlier::new(1, old, new, Some(reading));
+        assert!(e.kept_at(1).is_none());
+        assert_eq!(e.read_up_to(1, 6), 2, "the step from line 3 is kept");
+        assert_eq!(e.read_up_to(5, 6), 6);
     }
 
     #[test]

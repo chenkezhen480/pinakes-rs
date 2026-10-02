@@ -14,6 +14,7 @@
 //! The librarian never writes graph data. Schema descriptions go through [`Librarian::describe`];
 //! structural fields come from the stored definition, never from the LLM.
 
+mod batch;
 pub mod documents;
 pub mod edit;
 pub mod prompts;
@@ -181,23 +182,6 @@ struct Opening {
     text: String,
 }
 
-/// One plan's worth of content: a whole record, or one concept of a document with its lines.
-struct Unit {
-    /// The record as the librarian is shown it; for a concept, its lines.
-    record: String,
-    /// What to search related pages with.
-    queries: Vec<String>,
-    keywords: Vec<String>,
-    /// What the librarian should know about the document: its main thread, the ledger, and
-    /// for a new version what changed.
-    note: Option<String>,
-    /// What this one call is for: one concept of the document.
-    focus: Option<String>,
-    /// Pages shown first: the concept's page, and the pages an earlier version filed its
-    /// lines into.
-    first_pages: Vec<String>,
-}
-
 /// Pages a search found, best first, with their kind and score, and the entities it named.
 struct Found {
     pages: Vec<(String, Kind, f32)>,
@@ -217,6 +201,15 @@ pub struct Librarian {
     llm: Llm,
     cfg: LibrarianConfig,
     search: SearchConfig,
+    /// Records waiting to be filed, by batch key (`batch::batch_key`): a record job files every
+    /// record already waiting with the same key in one batch.
+    inbox: std::sync::Mutex<HashMap<String, Vec<Waiting>>>,
+}
+
+/// A record waiting in the inbox, and where its job's result goes.
+struct Waiting {
+    job: Ingest,
+    done: tokio::sync::oneshot::Sender<Result<JobResult, String>>,
 }
 
 /// The pages related to new content, and the entities its search named.
@@ -235,7 +228,12 @@ struct Checked {
 
 impl Librarian {
     pub fn new(llm: Llm, cfg: LibrarianConfig, search: SearchConfig) -> Self {
-        Self { llm, cfg, search }
+        Self {
+            llm,
+            cfg,
+            search,
+            inbox: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     fn prompt(&self, system: &str, user: String, schema: serde_json::Value) -> Prompt {
@@ -247,12 +245,19 @@ impl Librarian {
         }
     }
 
-    /// Files one record: steps 2 to 6. The record was saved before the job was queued.
+    /// Files one record or document: steps 2 to 6. The record was saved before the job was
+    /// queued.
     ///
-    /// A document (expertise) is read like a person reads it, one concept at a time, each
-    /// concept filed as it is read (see `reading`); a record is the one-step case.
+    /// A document (expertise) is read like a person reads it, window by window, and the
+    /// concepts each window holds are filed as one batch (see `reading`); a record is filed as
+    /// a batch of one. Record jobs from the queue go through [`Librarian::queue_record`], which
+    /// batches the records waiting together.
     #[tracing::instrument(name = "librarian_ingest", skip_all, fields(tenant = %tenant.dir_name, kind = job.target.kind.as_str()))]
     pub async fn ingest(&self, tenant: Arc<Tenant>, job: Ingest) -> anyhow::Result<JobResult> {
+        let Some(d) = &job.document else {
+            let mut results = self.file_records(&tenant, vec![job]).await?;
+            return Ok(results.remove(0));
+        };
         let target = &job.target;
         let reader = reader_scope(&tenant, &target.audience, &job.writer);
         let rules = prompts::rules(&tenant.dir, target.kind);
@@ -261,202 +266,97 @@ impl Librarian {
             source: Some(format!("sources/{}", job.source)),
             ..JobResult::default()
         };
-        if let Some(d) = &job.document {
-            self.read_document(&tenant, &job, d, &reader, &rules, &today, &mut result)
-                .await?;
-            dedup_pages(&mut result);
-            return Ok(result);
-        }
-
-        let unit = Unit {
-            record: serde_json::to_string_pretty(&job.record)?,
-            queries: vec![job.query.clone()],
-            keywords: job.keywords.clone(),
-            note: None,
-            focus: None,
-            first_pages: Vec::new(),
-        };
-        let (pass, held) = self
-            .plan_unit(
-                &tenant,
-                &job,
-                &reader,
-                &rules,
-                &today,
-                &unit,
-                std::slice::from_ref(&job.source),
-                &job.source,
-                &mut result,
-            )
+        self.read_document(&tenant, &job, d, &reader, &rules, &today, &mut result)
             .await?;
-        let _writer = tenant.wiki_writer.lock().await;
-        apply_and_record(
-            &tenant,
-            target,
-            &job.writer,
-            Some(&job.source),
-            &today,
-            &pass,
-            &mut result,
-            &format!("ingest {}", target.kind.as_str()),
-        )
-        .await?;
-        if !held.is_empty() {
-            let id = hold(&tenant, target, &job.writer, Some(&job.source), held).await?;
-            record_log(
-                &tenant,
-                &format!("ingest {}: held as {id}", target.kind.as_str()),
-            )
-            .await?;
-            result.proposal = Some(id);
-        }
+        dedup_pages(&mut result);
         Ok(result)
     }
 
-    /// Steps 2 to 4 for one unit (the whole record, or one concept of a document): related pages,
-    /// the plan, the code checks and the verdicts, with one retry. `cite` is what the pages
-    /// cite for it (the record, or the concept's lines in it). Returns the edits to apply and
-    /// the edits to hold; code-refused edits go into `result.rejected`.
-    #[allow(clippy::too_many_arguments)]
-    async fn plan_unit(
+    /// The job's work for a record (not a document): the record waits in the inbox, and the
+    /// first job of its batch key to run files every record waiting with that key, its own
+    /// included, as one batch; the others' jobs then only collect their results.
+    pub fn queue_record(self: &Arc<Self>, tenant: Arc<Tenant>, job: Ingest) -> crate::jobs::Work {
+        let key = batch::batch_key(&tenant.dir_name, &job.target, &job.writer);
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.inbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.clone())
+            .or_default()
+            .push(Waiting { job, done });
+        let me = self.clone();
+        Box::pin(async move {
+            let waiting = me
+                .inbox
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key)
+                .unwrap_or_default();
+            if !waiting.is_empty() {
+                let (jobs, done): (Vec<Ingest>, Vec<_>) =
+                    waiting.into_iter().map(|w| (w.job, w.done)).unzip();
+                match me.file_records(&tenant, jobs).await {
+                    Ok(results) => {
+                        for (d, r) in done.into_iter().zip(results) {
+                            let _ = d.send(Ok(r));
+                        }
+                    }
+                    Err(e) => {
+                        let why = format!("{e:#}");
+                        for d in done {
+                            let _ = d.send(Err(why.clone()));
+                        }
+                    }
+                }
+            }
+            result
+                .await
+                .map_err(|_| anyhow::anyhow!("the batch filing this record stopped"))?
+                .map_err(anyhow::Error::msg)
+        })
+    }
+
+    /// Files records of one tenant, kind, audience and writer as one batch; one result each.
+    #[tracing::instrument(name = "librarian_records", skip_all, fields(tenant = %tenant.dir_name, records = jobs.len()))]
+    async fn file_records(
         &self,
         tenant: &Arc<Tenant>,
-        job: &Ingest,
-        reader: &Scope,
-        rules: &str,
-        today: &str,
-        unit: &Unit,
-        doc_sources: &[String],
-        cite: &str,
-        result: &mut JobResult,
-    ) -> anyhow::Result<(Vec<Edit>, Vec<HeldEdit>)> {
-        let target = &job.target;
-        let related = self
-            .related(
+        jobs: Vec<Ingest>,
+    ) -> anyhow::Result<Vec<JobResult>> {
+        let first = jobs.first().context("no record")?;
+        let (target, writer) = (&first.target, &first.writer);
+        let reader = reader_scope(tenant, &target.audience, writer);
+        let rules = prompts::rules(&tenant.dir, target.kind);
+        let items: Vec<batch::Item> = jobs
+            .iter()
+            .map(|j| batch::record_item(&j.record, &j.query, &j.keywords, &j.entities, &j.source))
+            .collect();
+        let sources: Vec<String> = jobs.iter().map(|j| j.source.clone()).collect();
+        let filed = self
+            .file_batch(
                 tenant,
                 target,
-                reader,
-                &unit.queries,
-                &unit.keywords,
-                &job.entities,
-                doc_sources,
-                &unit.first_pages,
+                writer,
+                &reader,
+                &rules,
+                &today(),
+                None,
+                &sources,
+                &items,
             )
             .await?;
-        let snap = tenant.snapshot().await?;
-        // Node anchors are checked against the graph: without it the job fails rather than
-        // having every node anchor refused.
-        let graph = tenant.graph().await.context("anchors need the graph")?;
-        let anchors = anchor_options(
-            target,
-            &job.writer,
-            &related,
-            &job.entities,
-            &snap.catalog,
-            &graph,
-        );
-        let mut feedback: Vec<String> = Vec::new();
-        let mut last = None;
-        for attempt in 1..=ATTEMPTS {
-            let user = plan_message(
-                rules,
-                target,
-                today,
-                &unit.record,
-                unit.note.as_deref(),
-                unit.focus.as_deref(),
-                &related.pages,
-                &anchors,
-                &feedback,
-            );
-            let reply = self
-                .llm
-                .complete(&self.prompt(prompts::INGEST, user, plan_schema()))
-                .await
-                .context("planning the edits")?;
-            let edits = match parse_plan(&reply) {
-                Ok(e) => e,
-                Err(e) if attempt < ATTEMPTS => {
-                    feedback = vec![format!(
-                        "Your reply was not one JSON object of the required shape: {e}"
-                    )];
-                    continue;
-                }
-                Err(e) => {
-                    anyhow::bail!("the librarian's plan could not be read in {ATTEMPTS} tries: {e}")
-                }
-            };
-            let checked =
-                check(tenant, target, &job.writer, Some(cite), today, &edits, true).await?;
-            let verdicts = self
-                .verify(
-                    rules,
-                    target,
-                    &unit.record,
-                    unit.note.as_deref(),
-                    &related.pages,
-                    &edits,
-                    &checked,
-                )
-                .await?;
-            let failures: Vec<String> = edits
-                .iter()
-                .enumerate()
-                .filter_map(|(i, e)| {
-                    let reason = match (&checked.results[i], verdicts.get(&i)) {
-                        (Err(r), _) | (Ok(()), Some(Err(r))) => r,
-                        _ => return None,
-                    };
-                    Some(format!(
-                        "- edit {i} ({} {}): {reason}",
-                        op_name(e),
-                        e.page()
-                    ))
-                })
-                .collect();
-            let done = failures.is_empty() || attempt == ATTEMPTS;
-            last = Some((edits, checked, verdicts));
-            if done {
-                break;
-            }
-            tracing::info!(reasons = ?failures, "plan rejected; asking again");
-            feedback = failures;
-        }
-        let (edits, checked, verdicts) = last.context("no plan")?;
-        let mut pass = Vec::new();
-        let mut held = Vec::new();
-        let hold_it = |edit: Edit, reason: String| HeldEdit { edit, reason };
-        for (i, e) in edits.into_iter().enumerate() {
-            match (&checked.results[i], verdicts.get(&i)) {
-                (Err(r), _) => result.rejected.push(Rejected {
-                    page: e.page(),
-                    reason: r.clone(),
-                }),
-                (Ok(()), Some(Err(r))) => held.push(hold_it(e, r.clone())),
-                (Ok(()), _) => pass.push(e),
-            }
-        }
-        // An edit of, linking to or anchored to a page whose creation is held would fail
-        // without it: it is held with that page, and so on for edits that depend on it.
-        loop {
-            let held_pages: HashSet<String> = held
-                .iter()
-                .filter(|h| matches!(h.edit, Edit::Create { .. }))
-                .map(|h| page_id(&h.edit.page()))
-                .collect();
-            let Some(i) = pass.iter().position(|e| {
-                held_pages.contains(&page_id(&e.page()))
-                    || added_links(e)
-                        .iter()
-                        .any(|l| held_pages.contains(&page_id(l)))
-            }) else {
-                break;
-            };
-            let e = pass.remove(i);
-            let reason = "it depends on a page whose creation is held for review".to_owned();
-            held.push(hold_it(e, reason));
-        }
-        Ok((pass, held))
+        Ok(jobs
+            .iter()
+            .zip(filed)
+            .map(|(j, f)| JobResult {
+                pages_created: f.created,
+                pages_updated: f.updated,
+                rejected: f.rejected,
+                proposal: f.proposal,
+                source: Some(format!("sources/{}", j.source)),
+                ..JobResult::default()
+            })
+            .collect())
     }
 
     /// Which document a new upload is, when the caller didn't say, from what its first read
@@ -742,16 +642,18 @@ impl Librarian {
     }
 
     /// Step 4: a verdict for each edit that passed the code checks. Edits that failed them get
-    /// no verdict. A reply that can't be read is asked for once more.
+    /// no verdict. `content` is the prompt section with what is filed (the items, or the new
+    /// content); `labels`, when given, says which item each edit files.
     #[allow(clippy::too_many_arguments)]
     async fn verify(
         &self,
         rules: &str,
         target: &Target,
-        record: &str,
+        content: &str,
         note: Option<&str>,
         related: &[Page],
         edits: &[Edit],
+        labels: &[String],
         checked: &Checked,
     ) -> anyhow::Result<HashMap<usize, Result<(), String>>> {
         let todo: Vec<usize> = (0..edits.len())
@@ -760,21 +662,23 @@ impl Librarian {
         if todo.is_empty() {
             return Ok(HashMap::new());
         }
-        let mut msg = format!(
-            "## Rules for {} pages\n\n{rules}\n\n## New content\n\n```json\n{record}\n```\n\n",
-            target.kind.as_str()
-        );
+        let mut msg = format!("## Rules for {} pages\n\n{rules}\n\n", target.kind.as_str());
         if let Some(note) = note {
             // The document's main thread and ledger: links to the ledger's pages are expected.
             let _ = write!(msg, "## This document\n\n{note}\n\n");
         }
-        push_pages(&mut msg, "Related pages, as they stand", related);
+        batch::push_shown_pages(&mut msg, "Related pages, as they stand", related, target);
+        msg.push_str(content);
         msg.push_str("## Edits to check\n\n");
         for &i in &todo {
             let e = &edits[i];
+            let label = labels
+                .get(i)
+                .map(|l| format!(" (item {l})"))
+                .unwrap_or_default();
             let _ = write!(
                 msg,
-                "### Edit {i}\n\n```json\n{}\n```\n\n",
+                "### Edit {i}{label}\n\n```json\n{}\n```\n\n",
                 serde_json::to_string_pretty(e)?
             );
             if let Some(before) = &checked.before[i] {
@@ -932,6 +836,7 @@ impl Librarian {
             &target,
             &writer,
             None,
+            &[],
             &today,
             std::slice::from_ref(&edit),
             false,
@@ -970,14 +875,16 @@ impl Librarian {
         let record = serde_json::to_string_pretty(&json!({
             "hand_edit": "A person edited this page by hand; the edit below is the whole new page. Check it against the pages shown."
         }))?;
+        let content = format!("## New content\n\n```json\n{record}\n```\n\n");
         let verdicts = self
             .verify(
                 &rules,
                 &target,
-                &record,
+                &content,
                 None,
                 &related.pages,
                 std::slice::from_ref(&edit),
+                &[],
                 &checked,
             )
             .await?;
@@ -1009,6 +916,7 @@ impl Librarian {
                     &target,
                     &writer,
                     None,
+                    &[],
                     &today,
                     &[edit],
                     &mut result,
@@ -1034,6 +942,7 @@ pub async fn check_edit(
         target,
         writer,
         None,
+        &[],
         &today(),
         std::slice::from_ref(edit),
         false,
@@ -1076,6 +985,7 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         &target,
         &writer,
         proposal.source.as_deref(),
+        &[],
         &today,
         &edits,
         &mut result,
@@ -1248,73 +1158,6 @@ fn anchor_options(
     ]
 }
 
-fn push_pages(msg: &mut String, title: &str, pages: &[Page]) {
-    let _ = write!(msg, "## {title}\n\n");
-    if pages.is_empty() {
-        msg.push_str("None: no page in the wiki is related yet.\n\n");
-    }
-    for page in pages {
-        let mut text = page.render();
-        if text.chars().count() > MAX_PAGE_CHARS {
-            text = text.chars().take(MAX_PAGE_CHARS).collect();
-            text.push_str("\n[… the rest of the page is left out]");
-        }
-        let _ = write!(msg, "### {}\n\n```markdown\n{text}\n```\n\n", page.path);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn plan_message(
-    rules: &str,
-    target: &Target,
-    today: &str,
-    record: &str,
-    note: Option<&str>,
-    focus: Option<&str>,
-    related: &[Page],
-    anchors: &[String],
-    feedback: &[String],
-) -> String {
-    let mut msg = format!(
-        "## Rules for {} pages\n\n{rules}\n\n## Where to write\n\n",
-        target.kind.as_str()
-    );
-    if target.kind == Kind::Preference {
-        let _ = writeln!(
-            msg,
-            "The only page this job may write is `{}` (create it if it doesn't exist yet).",
-            target.folder()
-        );
-    } else {
-        let _ = writeln!(
-            msg,
-            "Pages of this job are in `{0}/`: a new page's id is `{0}/<name>`. Only pages in \
-             that folder may be created or changed.",
-            target.folder()
-        );
-    }
-    let _ = write!(
-        msg,
-        "Today is {today}.\n\n## New content\n\n```json\n{record}\n```\n\n"
-    );
-    if let Some(note) = note {
-        let _ = write!(msg, "## This document\n\n{note}\n\n");
-    }
-    push_pages(&mut msg, "Related pages", related);
-    let _ = write!(msg, "## Allowed anchors\n\n{}\n\n", anchors.join("\n"));
-    if let Some(focus) = focus {
-        let _ = write!(msg, "## This call\n\n{focus}\n\n");
-    }
-    if !feedback.is_empty() {
-        let _ = write!(
-            msg,
-            "## Why the last plan was rejected\n\nSend a whole new plan that fixes these:\n\n{}\n",
-            feedback.join("\n")
-        );
-    }
-    msg
-}
-
 /// A page id as code writes it (`expertise/x.md` is `expertise/x`); anything else as it is.
 fn page_id(page: &str) -> String {
     PagePath::parse(page).map_or_else(|_| page.to_owned(), |p| p.to_string())
@@ -1475,12 +1318,6 @@ pub fn description_schema(def: &SchemaDef) -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
-struct Plan {
-    #[serde(default)]
-    edits: Vec<Edit>,
-}
-
-#[derive(Deserialize)]
 struct Verdicts {
     #[serde(default)]
     verdicts: Vec<Verdict>,
@@ -1505,10 +1342,7 @@ fn parse_json<T: serde::de::DeserializeOwned>(reply: &str) -> Result<T, String> 
     serde_json::from_str(&reply[start..=end]).map_err(|e| e.to_string())
 }
 
-fn parse_plan(reply: &str) -> Result<Vec<Edit>, String> {
-    parse_json::<Plan>(reply).map(|p| p.edits)
-}
-
+#[allow(clippy::too_many_arguments)]
 /// Runs the code checks over a list of edits, off the async threads. `from_plan` refuses the
 /// edit only a person may make (`replace`).
 async fn check(
@@ -1516,6 +1350,7 @@ async fn check(
     target: &Target,
     writer: &Scope,
     source: Option<&str>,
+    each: &[Option<String>],
     today: &str,
     edits: &[Edit],
     from_plan: bool,
@@ -1523,11 +1358,12 @@ async fn check(
     let snap = tenant.snapshot().await?;
     // Without the graph every node anchor would be refused as unknown; the job fails instead.
     let graph = tenant.graph().await.context("anchors need the graph")?;
-    let (wiki, target, writer, source, today, edits) = (
+    let (wiki, target, writer, source, each, today, edits) = (
         tenant.wiki(),
         target.clone(),
         writer.clone(),
         source.map(str::to_owned),
+        each.to_vec(),
         today.to_owned(),
         edits.to_vec(),
     );
@@ -1539,6 +1375,7 @@ async fn check(
             &target,
             &writer,
             source.as_deref(),
+            &each,
             &today,
             &edits,
             from_plan,
@@ -1556,29 +1393,45 @@ fn check_blocking(
     target: &Target,
     writer: &Scope,
     source: Option<&str>,
+    each: &[Option<String>],
     today: &str,
     edits: &[Edit],
     from_plan: bool,
 ) -> anyhow::Result<Checked> {
-    let anchor = |a: &str, page: &PagePath, created: &HashSet<PagePath>| {
-        check_anchor(a, page, created, &snap.catalog, graph, writer)
+    // A plan's own new pages may be linked from any of its edits, before or after the one that
+    // creates them: a batch's items link to each other's pages. If a creation then fails, the
+    // edits that need it go with it (`batch`).
+    let planned: HashSet<PagePath> = if from_plan {
+        edits
+            .iter()
+            .filter(|e| matches!(e, Edit::Create { .. }))
+            .filter_map(|e| PagePath::parse(&e.page()).ok())
+            .collect()
+    } else {
+        HashSet::new()
     };
-    let rules = Rules {
-        target,
-        today,
-        source,
-        anchor: &anchor,
-        links: from_plan,
+    let anchor = |a: &str, page: &PagePath, created: &HashSet<PagePath>| {
+        let mut known = created.clone();
+        known.extend(planned.iter().cloned());
+        check_anchor(a, page, &known, &snap.catalog, graph, writer)
     };
     let mut draft = Draft::new(wiki);
     let mut results = Vec::new();
     let mut before = Vec::new();
-    for e in edits {
+    for (i, e) in edits.iter().enumerate() {
         before.push(section_before(wiki, e));
         if from_plan && matches!(e, Edit::Replace { .. }) {
             results.push(Err("replace is not an edit the librarian may make".into()));
             continue;
         }
+        // Each edit cites its own item's source (a record, or a concept's lines) when given.
+        let rules = Rules {
+            target,
+            today,
+            source: each.get(i).and_then(|s| s.as_deref()).or(source),
+            anchor: &anchor,
+            links: from_plan,
+        };
         results.push(draft.apply(e, &rules)?.map(|_| ()));
     }
     Ok(Checked {
@@ -1639,20 +1492,21 @@ async fn hold(
 }
 
 /// Step 5 and 6: checks the edits again on the wiki as it is now, writes what passes and
-/// records the job; says whether any page was written. Callers hold the tenant's wiki writer
-/// lock.
+/// records the job; says whether any page was written. The pages cite `source`, or for an
+/// edit with an entry in `each`, that. Callers hold the tenant's wiki writer lock.
 #[allow(clippy::too_many_arguments)]
 async fn apply_and_record(
     tenant: &Arc<Tenant>,
     target: &Target,
     writer: &Scope,
     source: Option<&str>,
+    each: &[Option<String>],
     today: &str,
     edits: &[Edit],
     result: &mut JobResult,
     what: &str,
 ) -> anyhow::Result<bool> {
-    let checked = check(tenant, target, writer, source, today, edits, false).await?;
+    let checked = check(tenant, target, writer, source, each, today, edits, false).await?;
     let mut rejected = 0;
     for (e, r) in edits.iter().zip(&checked.results) {
         if let Err(reason) = r {
@@ -1854,6 +1708,12 @@ mod tests {
 
     #[test]
     fn replies_are_read_leniently() {
+        #[derive(Deserialize)]
+        struct Plan {
+            #[serde(default)]
+            edits: Vec<Edit>,
+        }
+        let parse_plan = |reply: &str| parse_json::<Plan>(reply).map(|p| p.edits);
         let plan = parse_plan(
             "Here is the plan:\n```json\n{\"edits\": [{\"op\": \"update\", \"page\": \"experience/x\", \"add_about\": [\"commerce:order\"], \"note\": \"extra fields are ignored\"}]}\n```",
         )

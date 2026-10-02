@@ -381,12 +381,15 @@ async fn insert(
     };
     let owner = scope.user().map(|u| u.dir.clone());
     let dir_name = tenant.dir_name.clone();
-    let info = app.jobs.submit(
-        &dir_name,
-        owner.as_deref(),
-        kind.as_str(),
-        Box::pin(async move { librarian.ingest(tenant, job).await }),
-    );
+    // A record waits to be filed with the records queued alongside it; a document is read.
+    let work: crate::jobs::Work = if job.document.is_some() {
+        Box::pin(async move { librarian.ingest(tenant, job).await })
+    } else {
+        librarian.queue_record(tenant, job)
+    };
+    let info = app
+        .jobs
+        .submit(&dir_name, owner.as_deref(), kind.as_str(), work);
     let info = JobInfo {
         document: echo,
         ..info

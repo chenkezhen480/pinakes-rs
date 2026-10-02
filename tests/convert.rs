@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use common::app::{Caller, TestApp};
 use common::llm::{
     FakeLlm, NOT_THE_SAME, OK, Step, all_ok, create, describe_from_definition, folder, read_reply,
-    record_of, shown,
+    read_step, read_steps, record_of, shown,
 };
 use serde_json::{Value, json};
 
@@ -29,12 +29,25 @@ fn librarian() -> Arc<FakeLlm> {
             }
             let page = format!("{}/benefits", common::llm::read_folder(msg));
             let end = lines.last().unwrap().0;
-            read_reply("concept", end, Some("会员权益"), Some(&page), None)
+            // The extract: the lines themselves, which hold every number they have.
+            let extract: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+            let step = read_step(
+                end,
+                Some((
+                    "会员权益",
+                    &page,
+                    &extract.join(
+                        "
+",
+                    ),
+                )),
+            );
+            read_steps(vec![step], None)
         }
         Step::Plan => {
             let rec = record_of(msg);
             let page = format!("{}/benefits", folder(msg));
-            let body = format!("# 会员权益\n\n{}", rec["text"].as_str().unwrap());
+            let body = format!("# 会员权益\n\n{}", rec["extract"].as_str().unwrap());
             json!({ "edits": [create(&page, "会员权益", "会员等级与权益。", &[], &body)] })
                 .to_string()
         }
@@ -121,7 +134,7 @@ async fn uploaded_files_are_filed_as_markdown() {
         plan["title"], "会员权益说明",
         "the title is the file's name"
     );
-    assert!(plan["text"].as_str().unwrap().contains("2 张免运费券"));
+    assert!(plan["extract"].as_str().unwrap().contains("2 张免运费券"));
     assert_eq!(plan["source_url"], "https://example.com/benefits");
     let (rec, dir) = record(&app, result);
     // The converter's Markdown, kept as it came.

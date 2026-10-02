@@ -329,7 +329,7 @@ impl<'a> Draft<'a> {
             if let Err(e) = (r.anchor)(&link, &path, &created) {
                 return Ok(Err(format!(
                     "link [[{link}]]: {e}; link only to pages that exist (the related pages, \
-                     the ledger's pages, or one an earlier edit of this plan creates)"
+                     the ledger's pages, or one this plan creates)"
                 )));
             }
         }

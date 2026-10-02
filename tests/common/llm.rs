@@ -85,8 +85,19 @@ impl LlmClient for FakeLlm {
         if reply == UNREACHABLE {
             anyhow::bail!("connection refused");
         }
-        let value: Value = serde_json::from_str(&reply)
+        let mut value: Value = serde_json::from_str(&reply)
             .map_err(|e| anyhow::anyhow!("the scripted reply is not JSON: {e}: {reply}"))?;
+        // Scripts written for one item may leave its edits untagged.
+        if step == Step::Plan {
+            let ids: Vec<String> = items(&prompt.user).into_iter().map(|i| i.id).collect();
+            for e in value["edits"].as_array_mut().into_iter().flatten() {
+                if e.get("item").is_none() {
+                    assert_eq!(ids.len(), 1, "untagged edits in a plan for {ids:?}");
+                    e["item"] = json!(ids[0]);
+                }
+            }
+        }
+        let reply = value.to_string();
         if let Err(e) = fits(&prompt.schema, &value, "$") {
             panic!("the scripted {step:?} reply doesn't fit the prompt's schema: {e}\n{reply}");
         }
@@ -188,28 +199,66 @@ pub fn update(page: &str, heading: Option<&str>, text: Option<&str>) -> Value {
             "add_aliases": [], "add_keywords": [], "add_about": [] })
 }
 
-/// The page ids listed under "Related pages" in a plan message (page bodies, in code blocks,
-/// may have headings of their own).
-pub fn related_pages(msg: &str) -> Vec<String> {
-    let section = msg
-        .split("## Related pages")
-        .nth(1)
-        .and_then(|s| s.split("\n## Allowed anchors").next())
-        .unwrap_or("");
-    let mut fenced = false;
-    let mut out = Vec::new();
-    for line in section.lines() {
-        if line.starts_with("```") {
-            fenced = !fenced;
-        } else if !fenced && let Some(p) = line.strip_prefix("### ") {
-            out.push(p.to_owned());
-        }
-    }
-    out
+/// One item of a plan or verify message.
+pub struct ShownItem {
+    pub id: String,
+    pub content: Value,
+    pub task: Option<String>,
+    pub related: Vec<String>,
 }
 
-/// The record a plan or verify message shows (`## New content`).
+/// The items a plan or verify message shows, in order.
+pub fn items(msg: &str) -> Vec<ShownItem> {
+    let Some(section) = msg.split("\n## Items\n\n").nth(1) else {
+        return Vec::new();
+    };
+    let section = section
+        .split("\n## Edits to check")
+        .next()
+        .unwrap_or(section);
+    section
+        .split("### Item ")
+        .skip(1)
+        .map(|part| {
+            let id = part.lines().next().unwrap_or("").trim().to_owned();
+            let block = part
+                .split("```json\n")
+                .nth(1)
+                .and_then(|s| s.split("\n```").next())
+                .expect("an item's content");
+            let line = |label: &str| {
+                part.lines()
+                    .find_map(|l| l.strip_prefix(label))
+                    .map(str::to_owned)
+            };
+            let related = line("Related pages: ")
+                .filter(|r| r != "none")
+                .map(|r| r.split(", ").map(str::to_owned).collect())
+                .unwrap_or_default();
+            ShownItem {
+                id,
+                content: serde_json::from_str(block).unwrap(),
+                task: line("Task: "),
+                related,
+            }
+        })
+        .collect()
+}
+
+/// The related pages of a plan message's first item, most related first.
+pub fn related_pages(msg: &str) -> Vec<String> {
+    items(msg)
+        .into_iter()
+        .next()
+        .map(|i| i.related)
+        .unwrap_or_default()
+}
+
+/// The content a plan or verify message shows: its first item, or a hand edit's new content.
 pub fn record_of(msg: &str) -> Value {
+    if let Some(i) = items(msg).into_iter().next() {
+        return i.content;
+    }
     let block = msg
         .split("## New content\n\n```json\n")
         .nth(1)
@@ -358,7 +407,27 @@ pub fn read_folder(msg: &str) -> String {
         .to_owned()
 }
 
-/// A read reply.
+/// One step of a read reply.
+pub fn read_step(end: usize, concept: Option<(&str, &str, &str)>) -> Value {
+    match concept {
+        Some((title, page, extract)) => json!({ "action": "concept", "end_line": end,
+            "title": title, "page": page, "keywords": [title], "extract": extract }),
+        None => json!({ "action": "skip", "end_line": end, "title": null, "page": null,
+            "keywords": [], "extract": null }),
+    }
+}
+
+/// A read reply of these steps.
+pub fn read_steps(steps: Vec<Value>, thread: Option<&str>) -> String {
+    json!({ "steps": steps, "more": false, "thread": thread }).to_string()
+}
+
+/// A read reply asking for more of the text.
+pub fn read_more() -> String {
+    json!({ "steps": [], "more": true, "thread": null }).to_string()
+}
+
+/// A read reply with one step: `concept` (its extract is its title), `skip` or `more`.
 pub fn read_reply(
     action: &str,
     end: usize,
@@ -366,25 +435,30 @@ pub fn read_reply(
     page: Option<&str>,
     thread: Option<&str>,
 ) -> String {
-    json!({ "action": action, "end_line": end, "title": title, "page": page,
-            "keywords": title.into_iter().collect::<Vec<_>>(), "thread": thread })
-    .to_string()
+    match action {
+        "more" => read_more(),
+        "concept" => {
+            let t = title.unwrap_or("");
+            read_steps(
+                vec![read_step(end, Some((t, page.unwrap_or(""), t)))],
+                thread,
+            )
+        }
+        _ => read_steps(vec![read_step(end, None)], thread),
+    }
 }
 
 /// A reader that skips everything it is shown, as a model that finds nothing to file would.
 pub fn skip_to_end(msg: &str) -> String {
-    let (lines, end) = shown(msg);
-    if end {
-        read_reply("skip", lines.last().unwrap().0, None, None, None)
-    } else {
-        read_reply("more", 0, None, None, None)
-    }
+    let (lines, _) = shown(msg);
+    read_reply("skip", lines.last().unwrap().0, None, None, None)
 }
 
 /// A reader that takes each concept to start at a line `starts` says, and to run to the line
-/// before the next one: one concept per read, `more` when the next start isn't shown yet.
-/// Lines before the first start are skipped. `name` gives a concept's title and page name from
-/// its first line.
+/// before the next one, and answers every concept that ends within the window (one the window
+/// cuts off is left for the next read; `more` when none ends in it). Lines before the first
+/// start are skipped. `name` gives a concept's title and page name from its first line; its
+/// extract is its lines.
 pub fn reader(
     msg: &str,
     starts: impl Fn(&str) -> bool,
@@ -392,32 +466,47 @@ pub fn reader(
     thread: Option<&str>,
 ) -> String {
     let (lines, at_end) = shown(msg);
-    let first = &lines[0];
-    let next = lines[1..]
-        .iter()
-        .position(|(_, l)| starts(l))
-        .map(|i| lines[i].0);
-    if !starts(&first.1) {
-        let Some(before) = lines.iter().position(|(_, l)| starts(l)) else {
-            return skip_to_end(msg);
-        };
-        return read_reply("skip", lines[before - 1].0, None, None, thread);
+    // The last line this read must reach: the end of the text shown when it is the end of
+    // what is read now.
+    let must_end = at_end || msg.contains("your last step ends at line");
+    let folder = read_folder(msg);
+    let begins: Vec<usize> = (0..lines.len()).filter(|&i| starts(&lines[i].1)).collect();
+    let mut steps = Vec::new();
+    if begins.first() != Some(&0) {
+        match begins.first() {
+            Some(&b) => steps.push(read_step(lines[b - 1].0, None)),
+            None if must_end => steps.push(read_step(lines.last().unwrap().0, None)),
+            None => return read_more(),
+        }
     }
-    let end = match next {
-        Some(end) => end,
-        None if at_end => lines.last().unwrap().0,
-        None => return read_reply("more", 0, None, None, None),
-    };
-    let (title, page) = name(&first.1);
-    let page = format!("{}/{page}", read_folder(msg));
-    read_reply("concept", end, Some(&title), Some(&page), thread)
+    for (k, &b) in begins.iter().enumerate() {
+        let last = match begins.get(k + 1) {
+            Some(&next) => next - 1,
+            None if must_end => lines.len() - 1,
+            None => break,
+        };
+        let (title, page) = name(&lines[b].1);
+        let extract: Vec<&str> = lines[b..=last].iter().map(|(_, l)| l.as_str()).collect();
+        let page = format!("{folder}/{page}");
+        steps.push(read_step(
+            lines[last].0,
+            Some((&title, &page, &extract.join("\n"))),
+        ));
+    }
+    if steps.is_empty() {
+        return read_more();
+    }
+    read_steps(steps, thread)
 }
 
-/// The concept a plan message's "This call" is about.
+/// The concept a task is about (`File the concept "…"`).
+pub fn task_title(task: &str) -> Option<String> {
+    task.split('"').nth(1).map(str::to_owned)
+}
+
+/// The concept a plan message's first item is about.
 pub fn focus_title(msg: &str) -> Option<String> {
-    let after = msg.split("## This call").nth(1)?;
-    let quoted = after.split('"').nth(1)?;
-    Some(quoted.to_owned())
+    task_title(&items(msg).into_iter().next()?.task?)
 }
 
 /// A match answer: none of the candidates.

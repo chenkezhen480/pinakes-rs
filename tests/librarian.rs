@@ -15,7 +15,7 @@ use axum::http::StatusCode;
 use common::app::{Caller, TestApp};
 use common::llm::{
     FakeLlm, NO_EDITS, OK, Step, UNREACHABLE, all_ok, all_rejected, create,
-    describe_from_definition, folder, related_pages, update,
+    describe_from_definition, folder, items, related_pages, update,
 };
 use common::testset;
 use pinakes::tenants::{group_dir_name, user_dir_name};
@@ -223,7 +223,7 @@ async fn every_memory_is_anchored() {
         let about: &[&str] = match n {
             0 => &[],
             _ => {
-                assert!(msg.contains("Why the last plan was rejected"), "{msg}");
+                assert!(msg.contains("Why its last edits were rejected"), "{msg}");
                 if n == 1 {
                     assert!(msg.contains("needs at least one anchor"), "{msg}");
                 }
@@ -956,4 +956,81 @@ fn collect(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>)
             );
         }
     }
+}
+
+/// Records that arrive while the tenant's queue is busy wait together and are filed as one
+/// batch: one plan and one verify call for all of them, while each job still answers with its
+/// own result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn records_arriving_together_are_filed_as_one_batch() {
+    let llm = model(|msg, n| {
+        if n == 0 {
+            // The first batch is slow, so the next records queue up meanwhile.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        let edits: Vec<Value> = items(msg)
+            .iter()
+            .map(|it| {
+                let task = it.content["task"].as_str().unwrap();
+                let page = format!("{}/{}", folder(msg), task.replace(' ', "-"));
+                let mut e = create(
+                    &page,
+                    task,
+                    "A task.",
+                    &["commerce:order"],
+                    "# Task\n\nDone.",
+                );
+                e["item"] = json!(it.id);
+                e
+            })
+            .collect();
+        json!({ "edits": edits })
+    });
+    let (app, key) = shopline(&llm).await;
+    let c = Caller::new(&key);
+    let post = |task: &'static str| {
+        let app = &app;
+        async move {
+            let (status, resp) = app
+                .post(
+                    c,
+                    "/ingest/experience",
+                    json!({ "task": task, "outcome": "Done." }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{resp}");
+            resp["job"].as_str().unwrap().to_owned()
+        }
+    };
+    let first = post("batch task a").await;
+    // Let the first job start (and take what is waiting: only itself) before the others come.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let jobs = [
+        first,
+        post("batch task b").await,
+        post("batch task c").await,
+    ];
+    let mut pages = Vec::new();
+    for job in &jobs {
+        let done = app.wait_job(c, job).await;
+        assert_eq!(done["status"], "done", "{done}");
+        pages.push(done["result"]["pages_created"].clone());
+    }
+    assert_eq!(
+        pages,
+        vec![
+            json!(["experience/batch-task-a"]),
+            json!(["experience/batch-task-b"]),
+            json!(["experience/batch-task-c"]),
+        ],
+        "each job answers with its own record's pages"
+    );
+    let plans = llm.calls(Step::Plan);
+    assert_eq!(
+        plans.len(),
+        2,
+        "the first record alone, then the two that waited together"
+    );
+    assert_eq!(items(&plans[1]).len(), 2);
+    assert_eq!(llm.calls(Step::Verify).len(), 2);
 }

@@ -12,8 +12,8 @@ use axum::http::StatusCode;
 use common::app::{Caller, TestApp};
 use common::llm::{
     FakeLlm, NOT_THE_SAME, OK, Step, UNREACHABLE, all_ok, candidates, create, cursor_of,
-    describe_from_definition, focus_title, folder, line_after, read_reply, reader, record_of,
-    related_pages, same_as, shown, update,
+    describe_from_definition, focus_title, folder, items, line_after, read_reply, reader,
+    record_of, related_pages, same_as, shown, task_title, update,
 };
 use serde_json::{Value, json};
 
@@ -77,25 +77,34 @@ fn librarian(answer: impl Fn(&str) -> String + Send + Sync + 'static) -> Arc<Fak
             )
         }
         Step::Plan => {
-            let rec = record_of(msg);
-            let title = focus_title(msg).expect("one concept per call");
-            let page = format!("{}/{}", folder(msg), page_of(&title));
-            let text = rec["text"].as_str().unwrap();
-            if rec["version"] == 1 {
-                let body = match title.as_str() {
-                    "跨境商品退货" => format!("# 跨境商品退货\n\n## 规则\n\n{V1}"),
-                    t => format!("# {t}\n\n内容。"),
-                };
-                return json!({ "edits": [create(&page, &title, "一条规则。", &[], &body)] })
-                    .to_string();
-            }
-            let rule = text.lines().last().unwrap();
-            if related_pages(msg).first() == Some(&page) {
-                json!({ "edits": [update(&page, Some("规则"), Some(rule))] })
-            } else {
-                json!({ "edits": [create(&format!("{page}-again"), "跨境退货", "重复。", &[], rule)] })
-            }
-            .to_string()
+            let dir = folder(msg);
+            let edits: Vec<Value> = items(msg)
+                .into_iter()
+                .map(|it| {
+                    let title = task_title(it.task.as_deref().unwrap()).unwrap();
+                    let page = format!("{dir}/{}", page_of(&title));
+                    let rec = &it.content;
+                    let mut edit = if rec["version"] == 1 {
+                        let body = match title.as_str() {
+                            "跨境商品退货" => format!("# 跨境商品退货\n\n## 规则\n\n{V1}"),
+                            t => format!("# {t}\n\n内容。"),
+                        };
+                        create(&page, &title, "一条规则。", &[], &body)
+                    } else {
+                        let extract = rec["extract"].as_str().unwrap();
+                        let rule = extract.lines().last().unwrap();
+                        if it.related.first() == Some(&page) {
+                            update(&page, Some("规则"), Some(rule))
+                        } else {
+                            let again = format!("{page}-again");
+                            create(&again, "跨境退货", "重复。", &[], rule)
+                        }
+                    };
+                    edit["item"] = json!(it.id);
+                    edit
+                })
+                .collect();
+            json!({ "edits": edits }).to_string()
         }
         Step::Verify => all_ok(msg),
         Step::Describe => describe_from_definition(msg),
@@ -139,18 +148,27 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     let id = r["document"].as_str().unwrap().to_owned();
     assert!(id.starts_with("d_") && id.len() == 18, "{id}");
     assert_eq!(r["pages_created"].as_array().unwrap().len(), 3, "{r}");
-    assert_eq!(llm.calls(Step::Read).len(), 4, "a skip and three concepts");
-    let plans = llm.calls(Step::Plan);
-    assert_eq!(plans.len(), 3);
-    // Each concept is filed from its own lines, not the whole document.
-    let freight = record_of(&plans[1]);
-    assert_eq!(freight["concept"], "运费险");
-    assert!(freight["text"].as_str().unwrap().contains("上限 25 元"));
-    assert!(!freight["text"].as_str().unwrap().contains("七天内"));
+    // Sent without an id, its first read takes a small opening window (to recognize it, and,
+    // as it is new, as its first window); the next read takes the rest. Each window's concepts
+    // are filed as one batch, from their extracts.
+    let reads = llm.calls(Step::Read);
+    assert_eq!(reads.len(), 2);
+    let opening_end = shown(&reads[0]).0.last().unwrap().0;
     assert!(
-        plans[2].contains("→ [[expertise/shipping-insurance]]"),
-        "the ledger, with each concept's page, is shown"
+        !reads[0].contains("this is the end of the document"),
+        "a small opening"
     );
+    assert!(cursor_of(&reads[1]) > 1 && cursor_of(&reads[1]) <= opening_end + 1);
+    let plans = llm.calls(Step::Plan);
+    assert_eq!(plans.len(), 2);
+    let filed: Vec<_> = plans.iter().flat_map(|p| items(p)).collect();
+    assert_eq!(filed.len(), 3);
+    // Each concept is filed from its own extract, never the text again.
+    let freight = &filed[1].content;
+    assert_eq!(freight["concept"], "运费险");
+    assert!(freight["extract"].as_str().unwrap().contains("上限 25 元"));
+    assert!(!freight["extract"].as_str().unwrap().contains("七天内"));
+    assert!(freight.get("content").is_none() && freight.get("text").is_none());
     assert_eq!(
         llm.calls(Step::Match).len(),
         0,
@@ -198,7 +216,12 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
         );
     }
     assert!(plans[0].contains(&format!("version 2 of document {id}")));
-    assert!(plans[0].contains(&format!("- {V1}")) && plans[0].contains(&format!("+ {V2}")));
+    assert!(
+        record_of(&plans[0])["extract"]
+            .as_str()
+            .unwrap()
+            .contains(V2)
+    );
     let (_, page) = app.get(c, "/pages/expertise/crossborder-returns").await;
     assert!(page["body"].as_str().unwrap().contains("7 天"));
     assert_eq!(page["front_matter"]["sources"].as_array().unwrap().len(), 2);
@@ -334,6 +357,35 @@ fn rules_text(names: &[&str]) -> String {
         .join("\n")
 }
 
+/// A plan filing every item of a rules text as its own page; `fail` makes the call fail, as an
+/// unreachable model does, when it says so for a batch's titles.
+fn rule_plan(msg: &str, fail: impl Fn(&[String]) -> bool) -> String {
+    let dir = folder(msg);
+    let shown = items(msg);
+    let titles: Vec<String> = shown
+        .iter()
+        .map(|it| task_title(it.task.as_deref().unwrap()).unwrap())
+        .collect();
+    if fail(&titles) {
+        return UNREACHABLE.into();
+    }
+    let edits: Vec<Value> = shown
+        .iter()
+        .zip(&titles)
+        .map(|(it, title)| {
+            let page = format!("{dir}/{}", rule_name(&format!("【{title}】")).1);
+            let body = format!(
+                "# {title}\n\n{}规定的概括。",
+                it.content["concept"].as_str().unwrap()
+            );
+            let mut e = create(&page, title, "一条规定。", &[], &body);
+            e["item"] = json!(it.id);
+            e
+        })
+        .collect();
+    json!({ "edits": edits }).to_string()
+}
+
 fn rule_name(line: &str) -> (String, String) {
     let name = line
         .trim_start_matches('【')
@@ -366,16 +418,7 @@ async fn documents_are_read_one_concept_at_a_time() {
             rule_name,
             (cursor_of(msg) == 1).then_some("大手册：四条规定，适用于全体商家。"),
         ),
-        Step::Plan => {
-            let rec = record_of(msg);
-            let title = focus_title(msg).unwrap();
-            let page = format!("{}/{}", folder(msg), rule_name(&format!("【{title}】")).1);
-            let body = format!(
-                "# {title}\n\n{}规定的概括。",
-                rec["concept"].as_str().unwrap()
-            );
-            json!({ "edits": [create(&page, &title, "一条规定。", &[], &body)] }).to_string()
-        }
+        Step::Plan => rule_plan(msg, |_| false),
         Step::Verify => all_ok(msg),
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => OK.into(),
@@ -391,7 +434,7 @@ async fn documents_are_read_one_concept_at_a_time() {
     let reads = llm.calls(Step::Read);
     assert!(
         reads[1].contains("## Why the last answer was rejected")
-            && reads[1].contains("end_line 9999 is not one of the lines shown"),
+            && reads[1].contains("end_line 9999 is not between"),
         "{}",
         reads[1]
     );
@@ -464,21 +507,16 @@ async fn a_stopped_reading_resumes_where_it_stopped() {
     let flag = down.clone();
     let llm = FakeLlm::new(move |step, msg, _| match step {
         Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
-        Step::Plan => {
-            let title = focus_title(msg).unwrap();
-            if title == "丙" && flag.swap(false, Ordering::SeqCst) {
-                return UNREACHABLE.into();
-            }
-            let page = format!("{}/{}", folder(msg), rule_name(&format!("【{title}】")).1);
-            json!({ "edits": [create(&page, &title, "一条规定。", &[], "# 规定\n\n概括。")] })
-                .to_string()
-        }
+        Step::Plan => rule_plan(msg, |titles| {
+            titles.iter().any(|t| t == "丙") && flag.swap(false, Ordering::SeqCst)
+        }),
         Step::Verify => all_ok(msg),
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => OK.into(),
         Step::Match => NOT_THE_SAME.into(),
     });
-    let app = TestApp::with_llm(llm.llm());
+    // A small window: one rule per read, so the reading stops between them.
+    let app = TestApp::with_llm_and_config(llm.llm(), "[librarian]\nread_window_tokens = 600\n");
     let key = app.create_tenant("acme").await;
     let c = Caller::new(&key);
     let body = json!({ "title": "规定", "content": rules_text(&["甲", "乙", "丙", "丁"]) });
@@ -587,4 +625,87 @@ async fn edits_linking_to_a_held_page_are_held_with_it() {
     }
     let (_, b) = app.get(c, "/pages/expertise/rule-b").await;
     assert!(b["body"].as_str().unwrap().contains("一条补充。"));
+}
+
+/// The concepts of one window are filed as one batch, and each is retried on its own: the one
+/// the verifier objects to is sent again alone, with why, while the other is written at once.
+#[tokio::test]
+async fn items_are_retried_on_their_own() {
+    let llm = FakeLlm::new(|step, msg, n| match step {
+        Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, Some("规定两条。")),
+        Step::Plan => rule_plan(msg, |_| false),
+        Step::Verify => {
+            // The first time, the second rule's edit is objected to.
+            let v: Vec<Value> = common::llm::asked_edits(msg)
+                .into_iter()
+                .map(|k| {
+                    let second = msg.contains(&format!("### Edit {k} (item i2)"));
+                    let ok = n > 0 || !second;
+                    json!({ "edit": k, "ok": ok, "reason": (!ok).then_some("not in the extract") })
+                })
+                .collect();
+            json!({ "verdicts": v }).to_string()
+        }
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => NOT_THE_SAME.into(),
+    });
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let (_, r) = file(
+        &app,
+        c,
+        json!({ "title": "两条规定", "content": rules_text(&["甲", "乙"]) }),
+    )
+    .await;
+    assert_eq!(
+        r["pages_created"],
+        json!(["expertise/rule-1", "expertise/rule-2"]),
+        "{r}"
+    );
+    let plans = llm.calls(Step::Plan);
+    assert_eq!(plans.len(), 2);
+    let ids = |m: &str| items(m).into_iter().map(|i| i.id).collect::<Vec<_>>();
+    assert_eq!(ids(&plans[0]), vec!["i1", "i2"], "one batch");
+    assert_eq!(ids(&plans[1]), vec!["i2"], "only the refused item, again");
+    assert!(plans[1].contains("not in the extract"));
+    assert_eq!(llm.calls(Step::Read).len(), 1, "the text read once");
+}
+
+/// A concept is filed as the page its read named, which the ledger records: a plan that puts it
+/// under another name is sent back.
+#[tokio::test]
+async fn a_concept_goes_to_the_page_its_read_named() {
+    let llm = FakeLlm::new(|step, msg, n| match step {
+        Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
+        Step::Plan if n == 0 => {
+            let edit = create(
+                "expertise/some-other-name",
+                "甲",
+                "一条规定。",
+                &[],
+                "# 甲\n\n概括。",
+            );
+            json!({ "edits": [edit] }).to_string()
+        }
+        Step::Plan => rule_plan(msg, |_| false),
+        Step::Verify => all_ok(msg),
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => NOT_THE_SAME.into(),
+    });
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let (_, r) = file(
+        &app,
+        c,
+        json!({ "title": "规定", "content": rules_text(&["甲"]) }),
+    )
+    .await;
+    assert_eq!(r["pages_created"], json!(["expertise/rule-1"]), "{r}");
+    let plans = llm.calls(Step::Plan);
+    assert_eq!(plans.len(), 2);
+    assert!(plans[1].contains("the concept is filed as `expertise/rule-1`"));
 }
