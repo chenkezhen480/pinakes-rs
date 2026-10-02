@@ -835,7 +835,6 @@ impl Librarian {
             &tenant,
             &target,
             &writer,
-            None,
             &[],
             &today,
             std::slice::from_ref(&edit),
@@ -915,7 +914,6 @@ impl Librarian {
                     &tenant,
                     &target,
                     &writer,
-                    None,
                     &[],
                     &today,
                     &[edit],
@@ -941,7 +939,6 @@ pub async fn check_edit(
         tenant,
         target,
         writer,
-        None,
         &[],
         &today(),
         std::slice::from_ref(edit),
@@ -980,12 +977,12 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         proposal.groups.clone(),
     );
     let edits: Vec<Edit> = proposal.edits.iter().map(|h| h.edit.clone()).collect();
+    let cites = vec![proposal.source.clone(); edits.len()];
     let wrote = apply_and_record(
         &tenant,
         &target,
         &writer,
-        proposal.source.as_deref(),
-        &[],
+        &cites,
         &today,
         &edits,
         &mut result,
@@ -1342,14 +1339,12 @@ fn parse_json<T: serde::de::DeserializeOwned>(reply: &str) -> Result<T, String> 
     serde_json::from_str(&reply[start..=end]).map_err(|e| e.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Runs the code checks over a list of edits, off the async threads. `from_plan` refuses the
 /// edit only a person may make (`replace`).
 async fn check(
     tenant: &Arc<Tenant>,
     target: &Target,
     writer: &Scope,
-    source: Option<&str>,
     each: &[Option<String>],
     today: &str,
     edits: &[Edit],
@@ -1358,27 +1353,17 @@ async fn check(
     let snap = tenant.snapshot().await?;
     // Without the graph every node anchor would be refused as unknown; the job fails instead.
     let graph = tenant.graph().await.context("anchors need the graph")?;
-    let (wiki, target, writer, source, each, today, edits) = (
+    let (wiki, target, writer, each, today, edits) = (
         tenant.wiki(),
         target.clone(),
         writer.clone(),
-        source.map(str::to_owned),
         each.to_vec(),
         today.to_owned(),
         edits.to_vec(),
     );
     tokio::task::spawn_blocking(move || {
         check_blocking(
-            &wiki,
-            &snap,
-            &graph,
-            &target,
-            &writer,
-            source.as_deref(),
-            &each,
-            &today,
-            &edits,
-            from_plan,
+            &wiki, &snap, &graph, &target, &writer, &each, &today, &edits, from_plan,
         )
     })
     .await
@@ -1392,24 +1377,20 @@ fn check_blocking(
     graph: &GraphSnapshot,
     target: &Target,
     writer: &Scope,
-    source: Option<&str>,
     each: &[Option<String>],
     today: &str,
     edits: &[Edit],
     from_plan: bool,
 ) -> anyhow::Result<Checked> {
-    // A plan's own new pages may be linked from any of its edits, before or after the one that
-    // creates them: a batch's items link to each other's pages. If a creation then fails, the
-    // edits that need it go with it (`batch`).
-    let planned: HashSet<PagePath> = if from_plan {
-        edits
-            .iter()
-            .filter(|e| matches!(e, Edit::Create { .. }))
-            .filter_map(|e| PagePath::parse(&e.page()).ok())
-            .collect()
-    } else {
-        HashSet::new()
-    };
+    // A plan's own new pages may be linked and anchored to from any of its edits, before or
+    // after the one that creates them: a batch's items link to each other's pages. If a creation
+    // then fails, the edits that need it go with it (`batch`). The same holds when the edits are
+    // written, checked again here.
+    let planned: HashSet<PagePath> = edits
+        .iter()
+        .filter(|e| matches!(e, Edit::Create { .. }))
+        .filter_map(|e| PagePath::parse(&e.page()).ok())
+        .collect();
     let anchor = |a: &str, page: &PagePath, created: &HashSet<PagePath>| {
         let mut known = created.clone();
         known.extend(planned.iter().cloned());
@@ -1424,11 +1405,11 @@ fn check_blocking(
             results.push(Err("replace is not an edit the librarian may make".into()));
             continue;
         }
-        // Each edit cites its own item's source (a record, or a concept's lines) when given.
+        // Each edit cites its own source (a record, or a concept's lines) when given.
         let rules = Rules {
             target,
             today,
-            source: each.get(i).and_then(|s| s.as_deref()).or(source),
+            source: each.get(i).and_then(|s| s.as_deref()),
             anchor: &anchor,
             links: from_plan,
         };
@@ -1492,21 +1473,20 @@ async fn hold(
 }
 
 /// Step 5 and 6: checks the edits again on the wiki as it is now, writes what passes and
-/// records the job; says whether any page was written. The pages cite `source`, or for an
-/// edit with an entry in `each`, that. Callers hold the tenant's wiki writer lock.
+/// records the job; says whether any page was written. Each edit's pages cite its entry in
+/// `each`, if it has one. Callers hold the tenant's wiki writer lock.
 #[allow(clippy::too_many_arguments)]
 async fn apply_and_record(
     tenant: &Arc<Tenant>,
     target: &Target,
     writer: &Scope,
-    source: Option<&str>,
     each: &[Option<String>],
     today: &str,
     edits: &[Edit],
     result: &mut JobResult,
     what: &str,
 ) -> anyhow::Result<bool> {
-    let checked = check(tenant, target, writer, source, each, today, edits, false).await?;
+    let checked = check(tenant, target, writer, each, today, edits, false).await?;
     let mut rejected = 0;
     for (e, r) in edits.iter().zip(&checked.results) {
         if let Err(reason) = r {

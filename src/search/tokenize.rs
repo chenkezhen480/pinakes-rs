@@ -23,11 +23,6 @@ use super::text::{RunKind, all_cjk, runs, word_parts};
 static JIEBA: LazyLock<Jieba> = LazyLock::new(Jieba::new);
 static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::English));
 
-/// Loads the shared jieba dictionary now instead of on the first search.
-pub fn warm_up() {
-    LazyLock::force(&JIEBA);
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tok {
     pub text: String,

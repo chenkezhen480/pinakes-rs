@@ -202,18 +202,6 @@ impl Store for SqliteStore {
         .await
     }
 
-    async fn add_api_key(&self, key_hash: &str, label: &str) -> anyhow::Result<()> {
-        let (hash, label) = (key_hash.to_owned(), label.to_owned());
-        self.with_conn(move |c| {
-            c.execute(
-                "INSERT INTO api_keys (hash, label) VALUES (?1, ?2)",
-                params![hash, label],
-            )
-            .map(|_| ())
-        })
-        .await
-    }
-
     async fn api_key_hashes(&self) -> anyhow::Result<Vec<String>> {
         self.with_conn(|c| {
             let mut stmt = c.prepare("SELECT hash FROM api_keys")?;
@@ -590,10 +578,7 @@ mod tests {
         SqliteStore::create_for_tenant(&path, "acme", "abc123", "initial").unwrap();
         let store = SqliteStore::open_existing(&path).unwrap();
         assert_eq!(store.tenant_id().await.unwrap().as_deref(), Some("acme"));
-        store.add_api_key("def456", "second").await.unwrap();
-        let mut keys = store.api_key_hashes().await.unwrap();
-        keys.sort();
-        assert_eq!(keys, vec!["abc123", "def456"]);
+        assert_eq!(store.api_key_hashes().await.unwrap(), vec!["abc123"]);
         store.audit("admin", "key.create", "second").await.unwrap();
         let log = store.audit_log(10).await.unwrap();
         assert_eq!(log.len(), 2);

@@ -1034,3 +1034,46 @@ async fn records_arriving_together_are_filed_as_one_batch() {
     assert_eq!(items(&plans[1]).len(), 2);
     assert_eq!(llm.calls(Step::Verify).len(), 2);
 }
+
+/// A page may anchor to a page its plan creates after it: checked again when written, the
+/// anchor still finds that page.
+#[tokio::test]
+async fn a_page_anchors_to_one_its_plan_creates_later() {
+    let llm = model(|msg, _| {
+        let dir = folder(msg);
+        json!({ "edits": [
+            create(
+                &format!("{dir}/anchor-first"),
+                "First",
+                "Rests on the second.",
+                &[&format!("{dir}/anchor-second")],
+                "# First\n\nSee the second.",
+            ),
+            create(
+                &format!("{dir}/anchor-second"),
+                "Second",
+                "About orders.",
+                &["commerce:order"],
+                "# Second\n\nOrders.",
+            ),
+        ]})
+    });
+    let (app, key) = shopline(&llm).await;
+    let c = Caller::new(&key);
+    let (status, resp) = app
+        .post(
+            c,
+            "/ingest/experience",
+            json!({ "task": "anchor order", "outcome": "Done." }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{resp}");
+    let done = app.wait_job(c, resp["job"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(
+        done["result"]["pages_created"],
+        json!(["experience/anchor-first", "experience/anchor-second"]),
+        "{done}"
+    );
+    assert_eq!(done["result"]["rejected"], json!([]), "{done}");
+}

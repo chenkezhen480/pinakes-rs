@@ -682,7 +682,6 @@ impl Librarian {
 
 /// A read's reply checked against the window it was shown (lines `cursor..=end`, reading up to
 /// `limit`): `None` when it asks for more text.
-#[allow(clippy::too_many_arguments)]
 fn check_read(
     target: &Target,
     lines: &[&str],

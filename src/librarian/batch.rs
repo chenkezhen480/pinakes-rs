@@ -15,7 +15,7 @@ use serde_json::json;
 use super::edit::Target;
 use super::{
     ATTEMPTS, Checked, Edit, HeldEdit, Librarian, MAX_PAGE_CHARS, Related, added_links,
-    anchor_options, apply_and_record, check, hold, op_name, page_id, parse_json, plan_schema,
+    anchor_options, apply_and_record, check, cut, hold, op_name, page_id, parse_json, plan_schema,
     prompts, record_log,
 };
 use crate::identity::Scope;
@@ -103,7 +103,7 @@ enum Outcome {
     /// Every edit passed the checks and the verifier (or there were none).
     Passed,
     /// Waits for an item it depends on (it updates, links to or anchors to a page that item
-    /// creates), which failed this round.
+    /// creates), which is held back this round.
     Waiting(usize),
     /// Why it was refused: by code (`true`) or by the verifier.
     Failed(Vec<Refusal>),
@@ -209,7 +209,7 @@ impl Librarian {
                 owner.iter().map(|&i| Some(items[i].cite.clone())).collect();
 
             // Step 4: the code checks and the verdicts, for the round at once.
-            let checked = check(tenant, target, writer, None, &cites, today, &edits, true).await?;
+            let checked = check(tenant, target, writer, &cites, today, &edits, true).await?;
             let shown = items_section(items, &round);
             let labels: Vec<String> = owner.iter().map(|&i| id_of(i)).collect();
             let verdicts = self
@@ -241,13 +241,19 @@ impl Librarian {
                     Outcome::Missed(why) => {
                         tries[i] += 1;
                         if tries[i] >= ATTEMPTS {
-                            // Turned back: nothing of it is written.
+                            // Turned back: nothing of it is written, and what needs its pages
+                            // goes with it.
                             let page = items[i].page.clone().unwrap_or_default();
                             out[i].not_written.insert(page_id(&page));
                             out[i].rejected.push(Rejected {
                                 page,
                                 reason: why.clone(),
                             });
+                            let mine = (0..edits.len())
+                                .filter(|&k| owner[k] == i)
+                                .map(|k| (k, true, why.clone()))
+                                .collect();
+                            finals.push((i, mine));
                             finished.push(i);
                         } else {
                             feedback[i] = vec![format!("- {why}")];
@@ -274,30 +280,18 @@ impl Librarian {
                     }
                 }
             }
-            // An item waiting on one turned back now goes with it: held if that one is held.
-            for (&i, outcome) in round.iter().zip(&outcomes) {
-                if let Outcome::Waiting(on) = outcome
-                    && let Some((_, why)) = finals.iter().find(|(f, _)| f == on)
-                {
-                    let held_by_verifier = why.iter().any(|(_, by_code, _)| !by_code);
-                    let mine: Vec<Refusal> = (0..edits.len())
-                        .filter(|&k| owner[k] == i)
-                        .map(|k| {
-                            (
-                                k,
-                                !held_by_verifier,
-                                format!("it depends on {}, which was turned back", id_of(*on)),
-                            )
-                        })
-                        .collect();
-                    finals.push((i, mine));
-                    pass.push(i);
-                    finished.push(i);
-                }
+            // An item waiting on one turned back is written now too, and so on down the chain;
+            // its edits that need what was turned back go with it, below.
+            while let Some(i) = round.iter().zip(&outcomes).find_map(|(&i, o)| match o {
+                Outcome::Waiting(on) if finished.contains(on) && !finished.contains(&i) => Some(i),
+                _ => None,
+            }) {
+                pass.push(i);
+                finished.push(i);
             }
             // An edit that needs a page whose creation was turned back (it updates, links to or
             // anchors to it) goes with it: held if that creation is held, refused if refused.
-            loop {
+            let refused = loop {
                 let gone: HashMap<String, bool> = finals
                     .iter()
                     .flat_map(|(_, why)| why.iter())
@@ -318,7 +312,7 @@ impl Librarian {
                         .map(|by_code| (k, by_code))
                 });
                 let Some((k, by_code)) = next else {
-                    break;
+                    break refused;
                 };
                 let reason = if by_code {
                     "it depends on a page whose creation was refused"
@@ -330,11 +324,7 @@ impl Librarian {
                     Some((_, why)) => why.push(entry),
                     None => finals.push((owner[k], vec![entry])),
                 }
-            }
-            let refused: HashSet<usize> = finals
-                .iter()
-                .flat_map(|(_, why)| why.iter().map(|(k, _, _)| *k))
-                .collect();
+            };
             let to_write: Vec<usize> = (0..edits.len())
                 .filter(|&k| pass.contains(&owner[k]) && !refused.contains(&k))
                 .collect();
@@ -348,7 +338,6 @@ impl Librarian {
                     tenant,
                     target,
                     writer,
-                    None,
                     &round_cites,
                     today,
                     &round_edits,
@@ -422,49 +411,60 @@ fn settle_round(
     verdicts: &HashMap<usize, Result<(), String>>,
     must_write: &dyn Fn(usize) -> Option<String>,
 ) -> Vec<Outcome> {
-    let mut failed: HashMap<usize, Vec<Refusal>> = HashMap::new();
+    let mut outcome: HashMap<usize, Outcome> = HashMap::new();
     for (k, (result, &item)) in checked.results.iter().zip(owner).enumerate() {
         let why = match (result, verdicts.get(&k)) {
-            (Err(r), _) => Some((k, true, r.clone())),
-            (Ok(()), Some(Err(r))) => Some((k, false, r.clone())),
-            _ => None,
+            (Err(r), _) => (k, true, r.clone()),
+            (Ok(()), Some(Err(r))) => (k, false, r.clone()),
+            _ => continue,
         };
-        if let Some(w) = why {
-            failed.entry(item).or_default().push(w);
+        match outcome
+            .entry(item)
+            .or_insert_with(|| Outcome::Failed(Vec::new()))
+        {
+            Outcome::Failed(all) => all.push(why),
+            _ => unreachable!("only failures so far"),
         }
     }
-    // The pages failed items create, and which item creates each.
-    let mut created_by: HashMap<String, usize> = HashMap::new();
-    for (k, e) in edits.iter().enumerate() {
-        if matches!(e, Edit::Create { .. }) && failed.contains_key(&owner[k]) {
-            created_by.insert(page_id(&e.page()), owner[k]);
+    for &i in round {
+        if let Some(page) = must_write(i)
+            && !outcome.contains_key(&i)
+            && !(0..edits.len()).any(|k| owner[k] == i && page_id(&edits[k].page()) == page)
+        {
+            outcome.insert(
+                i,
+                Outcome::Missed(format!(
+                    "the concept is filed as `{page}`, as its task says: create that page \
+                     (link to it from other pages, never under another name)"
+                )),
+            );
         }
+    }
+    // An item that needs a page an item held back creates waits too, and so on down the chain.
+    loop {
+        let created_by: HashMap<String, usize> = (0..edits.len())
+            .filter(|&k| matches!(edits[k], Edit::Create { .. }) && outcome.contains_key(&owner[k]))
+            .map(|k| (page_id(&edits[k].page()), owner[k]))
+            .collect();
+        let next = round
+            .iter()
+            .filter(|i| !outcome.contains_key(i))
+            .find_map(|&i| {
+                (0..edits.len()).filter(|&k| owner[k] == i).find_map(|k| {
+                    std::iter::once(edits[k].page())
+                        .chain(added_links(&edits[k]))
+                        .find_map(|p| created_by.get(&page_id(&p)).copied())
+                        .map(|on| (i, on))
+                })
+            });
+        let Some((i, on)) = next else {
+            break;
+        };
+        outcome.insert(i, Outcome::Waiting(on));
     }
     round
         .iter()
-        .map(|i| {
-            if let Some(why) = failed.remove(i) {
-                return Outcome::Failed(why);
-            }
-            if let Some(page) = must_write(*i)
-                && !(0..edits.len()).any(|k| owner[k] == *i && page_id(&edits[k].page()) == page)
-            {
-                return Outcome::Missed(format!(
-                    "the concept is filed as `{page}`, as its task says: create that page \
-                     (link to it from other pages, never under another name)"
-                ));
-            }
-            let needs = (0..edits.len()).filter(|&k| owner[k] == *i).find_map(|k| {
-                std::iter::once(edits[k].page())
-                    .chain(added_links(&edits[k]))
-                    .find_map(|p| created_by.get(&page_id(&p)).copied())
-                    .filter(|on| on != i)
-            });
-            match needs {
-                Some(on) => Outcome::Waiting(on),
-                None => Outcome::Passed,
-            }
-        })
+        .map(|i| outcome.remove(i).unwrap_or(Outcome::Passed))
         .collect()
 }
 
@@ -486,13 +486,18 @@ fn pages_of<'a>(related: impl Iterator<Item = &'a Related>) -> Vec<Page> {
 fn items_section(items: &[Item], round: &[usize]) -> String {
     let mut msg = String::from("## Items\n\n");
     for &i in round {
-        let content = serde_json::to_string_pretty(&items[i].content).unwrap_or_default();
-        let _ = write!(msg, "### Item {}\n\n```json\n{content}\n```\n\n", id_of(i));
-        if let Some(task) = &items[i].task {
-            let _ = write!(msg, "Task: {task}\n\n");
-        }
+        push_item(&mut msg, items, i);
     }
     msg
+}
+
+/// One item: its id, content and task.
+fn push_item(msg: &mut String, items: &[Item], i: usize) {
+    let content = serde_json::to_string_pretty(&items[i].content).unwrap_or_default();
+    let _ = write!(msg, "### Item {}\n\n```json\n{content}\n```\n\n", id_of(i));
+    if let Some(task) = &items[i].task {
+        let _ = write!(msg, "Task: {task}\n\n");
+    }
 }
 
 /// The pages shown: in full those of the job's kind and audience, which edits may change; the
@@ -505,11 +510,7 @@ pub(super) fn push_shown_pages(msg: &mut String, title: &str, pages: &[Page], ta
     }
     for page in pages {
         if target.allows(&page.path) {
-            let mut text = page.render();
-            if text.chars().count() > MAX_PAGE_CHARS {
-                text = text.chars().take(MAX_PAGE_CHARS).collect();
-                text.push_str("\n[… the rest of the page is left out]");
-            }
+            let text = cut(&page.render(), MAX_PAGE_CHARS);
             let _ = write!(msg, "### {}\n\n```markdown\n{text}\n```\n\n", page.path);
         } else {
             let _ = write!(
@@ -564,11 +565,7 @@ fn write_message(
     push_shown_pages(&mut msg, "Pages", pages, target);
     msg.push_str("## Items\n\n");
     for &i in round {
-        let content = serde_json::to_string_pretty(&items[i].content).unwrap_or_default();
-        let _ = write!(msg, "### Item {}\n\n```json\n{content}\n```\n\n", id_of(i));
-        if let Some(task) = &items[i].task {
-            let _ = write!(msg, "Task: {task}\n\n");
-        }
+        push_item(&mut msg, items, i);
         let related_ids: Vec<&str> = related[i].pages.iter().map(|p| p.path.as_str()).collect();
         let _ = write!(
             msg,
@@ -638,5 +635,46 @@ mod tests {
             assert_eq!(edit["properties"]["item"]["enum"], json!(["i1", "i2"]));
             assert_eq!(edit["required"][0], "item");
         }
+    }
+
+    fn create(page: &str, about: &str) -> Edit {
+        Edit::Create {
+            page: page.into(),
+            title: "T".into(),
+            summary: "S".into(),
+            aliases: Vec::new(),
+            keywords: Vec::new(),
+            about: vec![about.into()],
+            body: "# T".into(),
+        }
+    }
+
+    /// An item that missed its page holds back what needs its other pages, down the chain.
+    #[test]
+    fn what_needs_a_missed_items_pages_waits() {
+        let edits = [
+            create("expertise/wrong-name", "commerce:order"),
+            create("expertise/b", "expertise/wrong-name"),
+            create("expertise/c", "expertise/b"),
+            create("expertise/d", "commerce:order"),
+        ];
+        let checked = Checked {
+            results: vec![Ok(()); 4],
+            pages: Vec::new(),
+            before: Vec::new(),
+        };
+        let must_write = |i: usize| (i == 0).then(|| "expertise/right".to_owned());
+        let outcomes = settle_round(
+            &[0, 1, 2, 3],
+            &edits,
+            &[0, 1, 2, 3],
+            &checked,
+            &HashMap::new(),
+            &must_write,
+        );
+        assert!(matches!(outcomes[0], Outcome::Missed(_)));
+        assert!(matches!(outcomes[1], Outcome::Waiting(0)));
+        assert!(matches!(outcomes[2], Outcome::Waiting(1)));
+        assert!(matches!(outcomes[3], Outcome::Passed));
     }
 }

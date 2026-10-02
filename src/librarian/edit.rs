@@ -177,9 +177,9 @@ pub struct Rules<'a> {
     pub today: &'a str,
     pub source: Option<&'a str>,
     pub anchor: &'a AnchorCheck<'a>,
-    /// Whether links an edit adds must lead to pages that exist: for the librarian's plans,
-    /// which file a document one concept at a time and would otherwise link ahead under ids
-    /// guessed before those pages are written. A person's hand edit isn't held to it.
+    /// Whether links an edit adds must lead to pages that exist (or that the plan creates): for
+    /// the librarian's plans, which would otherwise link ahead under ids guessed for pages a
+    /// later window writes. A person's hand edit isn't held to it.
     pub links: bool,
 }
 
