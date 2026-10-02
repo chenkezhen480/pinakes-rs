@@ -19,6 +19,10 @@ pub enum ApiError {
     #[error("{0}")]
     Unprocessable(String),
     #[error("{0}")]
+    UnsupportedMediaType(String),
+    #[error("{0}")]
+    TooLarge(String),
+    #[error("{0}")]
     Unavailable(String),
     #[error("{0}")]
     BadGateway(String),
@@ -34,6 +38,10 @@ impl ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable"),
+            ApiError::UnsupportedMediaType(_) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
+            }
+            ApiError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
             ApiError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             ApiError::BadGateway(_) => (StatusCode::BAD_GATEWAY, "bad_gateway"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -62,7 +70,11 @@ impl IntoResponse for ApiError {
 // axum's own extractor failures (bad JSON, unknown query values) use the same error shape.
 impl From<JsonRejection> for ApiError {
     fn from(r: JsonRejection) -> Self {
-        ApiError::BadRequest(r.body_text())
+        match r.status() {
+            StatusCode::PAYLOAD_TOO_LARGE => ApiError::TooLarge(r.body_text()),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => ApiError::UnsupportedMediaType(r.body_text()),
+            _ => ApiError::BadRequest(r.body_text()),
+        }
     }
 }
 

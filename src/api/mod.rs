@@ -28,7 +28,8 @@ pub fn router(state: AppState) -> Router {
         // A document can be long.
         .route(
             "/ingest/expertise",
-            post(insert::expertise).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)),
+            // Room for an uploaded file (the converter takes up to 20 MB).
+            post(insert::expertise).layer(axum::extract::DefaultBodyLimit::max(21 * 1024 * 1024)),
         )
         .route("/ingest/preference", post(insert::preference))
         .route("/jobs/{id}", get(jobs::get))

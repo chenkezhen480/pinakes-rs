@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod config;
+pub mod convert;
 pub mod error;
 pub mod graph;
 pub mod identity;
@@ -40,6 +41,8 @@ pub struct AppInner {
     pub search_fingerprint: String,
     /// The per-tenant write queues.
     pub jobs: jobs::Jobs,
+    /// Turns uploaded files into Markdown.
+    pub converter: convert::Converter,
     /// The librarian, or why it is off. Set at startup; turned on later when the key is
     /// entered at the prompt (`main.rs`).
     librarian: std::sync::RwLock<Result<Arc<librarian::Librarian>, llm::Missing>>,
@@ -87,7 +90,10 @@ impl AppState {
             (config.trace.retention_days > 0).then_some(config.trace.retention_days),
         );
         let librarian = llm.map(|llm| librarian_for(&config, llm));
+        let converter =
+            convert::Converter::new(&config.converter).expect("an HTTP client for the converter");
         Self(Arc::new(AppInner {
+            converter,
             jobs: jobs::Jobs::new(std::time::Duration::from_secs(
                 config.jobs.keep_finished_minutes.saturating_mul(60),
             )),

@@ -37,6 +37,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Every wiki write runs as a job on the tenant's write queue (`src/jobs.rs`) or holds the
   tenant's `wiki_writer` lock; code, never the LLM, writes `kind`, `updated` and `sources`.
 - Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
+- Uploaded files go through the converter container (`converter/`, MarkItDown); the service
+  never parses Word, PDF or HTML itself. Start it with `NEO4J_PASSWORD=... docker compose up -d
+  --build converter`; `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test convert`
+  runs a real Word file through it (skipped without the variable).
 - Expertise documents get ids from the service (`d_…`), never from the host. A new version
   finds the pages of earlier ones through the raw records they cite (`sources`), not by
   similarity. Code never interprets a document's structure; the model reads it from the top

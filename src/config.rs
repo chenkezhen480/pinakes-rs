@@ -30,6 +30,34 @@ pub struct Config {
     pub librarian: LibrarianConfig,
     #[serde(default)]
     pub jobs: JobsConfig,
+    #[serde(default)]
+    pub converter: ConverterConfig,
+}
+
+/// The document converter (design, "Files are turned into Markdown first").
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConverterConfig {
+    /// Where it answers `POST /convert`, such as `http://127.0.0.1:8090`. Unset, only Markdown
+    /// and text files can be uploaded.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Timeout of one conversion.
+    #[serde(default = "default_convert_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for ConverterConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            timeout_secs: default_convert_timeout(),
+        }
+    }
+}
+
+fn default_convert_timeout() -> u64 {
+    120
 }
 
 /// Which LLM API the librarian calls (design, "The librarian: how new content is filed").

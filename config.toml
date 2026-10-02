@@ -38,6 +38,10 @@ timeout_secs = 300             # per call
 related_pages = 8              # related pages the librarian is shown (5 to 10 in the design)
 read_window_tokens = 20000     # how much of a document one read sees; grows for a long concept
 
+[converter]                    # files to Markdown: `docker compose up -d --build converter`
+url = "http://127.0.0.1:8090"  # unset: only Markdown and text files can be uploaded
+timeout_secs = 120
+
 [search]                       # (M2)
 slots = { memories = 3, knowledge = 3, relations = 5 }   # hits per slot by default, max 20
 session_idle_minutes = 30      # read-tracker sessions expire after this idle time

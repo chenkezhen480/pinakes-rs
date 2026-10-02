@@ -18,11 +18,10 @@ pub fn new_name(kind: Kind, today: &str) -> String {
     )
 }
 
-/// Whether a name can be a record's file name: letters, digits, `-`, `_` and `.`, ending in
-/// `.json`, never starting with a dot. Nothing else is ever joined onto the folder.
-pub fn valid_name(name: &str) -> bool {
+/// Whether a name can be a file in `sources/`: letters, digits, `-`, `_` and `.`, never starting
+/// with a dot or holding `..`. Nothing else is ever joined onto the folder.
+fn safe_name(name: &str) -> bool {
     name.len() <= MAX_NAME
-        && name.ends_with(".json")
         && !name.starts_with('.')
         && !name.contains("..")
         && name
@@ -30,9 +29,14 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-/// Saves a record under a new name; fails rather than overwrite one.
-pub fn save(tenant_dir: &Path, name: &str, record: &serde_json::Value) -> io::Result<()> {
-    if !valid_name(name) {
+/// Whether a name can be a record's file name: a safe name ending in `.json`.
+pub fn valid_name(name: &str) -> bool {
+    safe_name(name) && name.ends_with(".json")
+}
+
+/// Writes a new file in `sources/`; fails rather than overwrite one.
+fn write_new(tenant_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    if !safe_name(name) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "bad source name",
@@ -44,10 +48,26 @@ pub fn save(tenant_dir: &Path, name: &str, record: &serde_json::Value) -> io::Re
         .write(true)
         .create_new(true)
         .open(dir.join(name))?;
-    let text = serde_json::to_string_pretty(record).map_err(io::Error::other)?;
-    file.write_all(text.as_bytes())?;
-    file.write_all(b"\n")?;
+    file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// Saves a record under a new name.
+pub fn save(tenant_dir: &Path, name: &str, record: &serde_json::Value) -> io::Result<()> {
+    if !valid_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bad source name",
+        ));
+    }
+    let mut text = serde_json::to_string_pretty(record).map_err(io::Error::other)?;
+    text.push('\n');
+    write_new(tenant_dir, name, text.as_bytes())
+}
+
+/// Saves an uploaded file next to its record (`<record>.<ext>`).
+pub fn save_file(tenant_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    write_new(tenant_dir, name, bytes)
 }
 
 /// A record's text; `None` when there is no such record.

@@ -275,3 +275,42 @@ async fn a_real_model_reads_a_transcript_without_headings() {
         text.chars().count()
     );
 }
+
+/// A Word file end to end: the converter (`PINAKES_TEST_CONVERTER`) turns it into Markdown,
+/// table included, and the model reads and files it; the table's numbers reach the pages.
+#[tokio::test]
+async fn a_real_model_files_a_word_file() {
+    let (Some(llm), Ok(url)) = (live_llm(), std::env::var("PINAKES_TEST_CONVERTER")) else {
+        eprintln!("PINAKES_TEST_LLM or PINAKES_TEST_CONVERTER is not set; skipping");
+        return;
+    };
+    let app = TestApp::with_llm_and_config(llm, &format!("[converter]\nurl = \"{url}\"\n"));
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let docx = include_bytes!("fixtures/member-benefits.docx");
+    let (status, queued) = app
+        .post_form(
+            c,
+            "/ingest/expertise",
+            &[],
+            Some(("会员权益说明.docx", docx)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
+    eprintln!("{}", serde_json::to_string_pretty(&job).unwrap());
+    assert_eq!(job["status"], "done", "{job}");
+    let mut all = String::new();
+    for page in job["result"]["pages_created"].as_array().unwrap() {
+        let (_, p) = app
+            .get(c, &format!("/pages/{}", page.as_str().unwrap()))
+            .await;
+        eprintln!("--- {page}\n{}", p["body"].as_str().unwrap());
+        all.push_str(p["body"].as_str().unwrap());
+    }
+    assert!(
+        all.contains("1.5"),
+        "the table's multiplier for gold members"
+    );
+    assert!(all.contains("5000"), "a threshold from the table");
+}

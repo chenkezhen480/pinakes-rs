@@ -9,13 +9,15 @@
 //! tenant, and decisions and preferences for the calling user.
 
 use axum::Json;
-use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{FromRequest, Multipart, Request, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::json;
 
 use crate::AppState;
+use crate::convert::Converted;
 use crate::error::ApiError;
 use crate::identity::Scope;
 use crate::jobs::JobInfo;
@@ -281,14 +283,24 @@ fn audience(kind: Kind, scope: &Scope, asked: Option<&str>) -> Result<Target, Ap
     Target::new(kind, audience).map_err(ApiError::BadRequest)
 }
 
+/// An uploaded file, already turned into the record's `content`.
+struct Upload {
+    /// The name it was sent with, only ever kept as text.
+    name: String,
+    ext: String,
+    bytes: axum::body::Bytes,
+    converted: Converted,
+}
+
 async fn insert(
     app: AppState,
     scope: Scope,
     headers: HeaderMap,
     kind: Kind,
     body: Result<Json<serde_json::Value>, JsonRejection>,
+    upload: Option<Upload>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    let Json(record) = body?;
+    let Json(mut record) = body?;
     if !record.is_object() {
         return Err(ApiError::BadRequest(
             "the body must be a JSON object".into(),
@@ -329,14 +341,33 @@ async fn insert(
         content,
     });
 
-    // Step 1: the raw record is kept unchanged before anything else happens.
+    // Step 1: the raw record is kept unchanged before anything else happens; an uploaded file
+    // is kept too, next to it, and the record says what it was and what converted it.
     let today = crate::trace::now_rfc3339()[..10].to_owned();
     let source = sources::new_name(kind, &today);
+    let original = match &upload {
+        None => None,
+        Some(u) => {
+            let original = format!("{}.{}", source.trim_end_matches(".json"), u.ext);
+            record["file"] = json!({
+                "name": u.name,
+                "original": original,
+                "converter": u.converted.converter,
+                "version": u.converted.version,
+            });
+            Some((original, u.bytes.clone()))
+        }
+    };
     let (dir, name, rec) = (tenant.dir.clone(), source.clone(), record.clone());
-    tokio::task::spawn_blocking(move || sources::save(&dir, &name, &rec))
-        .await
-        .map_err(anyhow::Error::from)?
-        .map_err(anyhow::Error::from)?;
+    tokio::task::spawn_blocking(move || {
+        if let Some((original, bytes)) = original {
+            sources::save_file(&dir, &original, &bytes)?;
+        }
+        sources::save(&dir, &name, &rec)
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(anyhow::Error::from)?;
 
     let job = Ingest {
         target,
@@ -371,7 +402,7 @@ pub async fn experience(
     headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, headers, Kind::Experience, body).await
+    insert(app, scope, headers, Kind::Experience, body, None).await
 }
 
 #[tracing::instrument(name = "ingest_decision", skip_all)]
@@ -381,17 +412,111 @@ pub async fn decision(
     headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, headers, Kind::Decision, body).await
+    insert(app, scope, headers, Kind::Decision, body, None).await
 }
 
+/// `POST /ingest/expertise`: a document as JSON (`title`, `content`, …), or as a file
+/// (`multipart/form-data`: the `file` and the same fields as text, `entities` repeated; the
+/// title defaults to the file name). A file is turned into Markdown first.
 #[tracing::instrument(name = "ingest_expertise", skip_all)]
 pub async fn expertise(
     State(app): State<AppState>,
     scope: Scope,
     headers: HeaderMap,
-    body: Result<Json<serde_json::Value>, JsonRejection>,
+    request: Request,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, headers, Kind::Expertise, body).await
+    let multipart = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().starts_with("multipart/form-data"));
+    if !multipart {
+        let body = Json::from_request(request, &app).await;
+        return insert(app, scope, headers, Kind::Expertise, body, None).await;
+    }
+    // Checked before converting, so a file isn't converted for nothing.
+    app.librarian()?;
+    let form = Multipart::from_request(request, &app)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.body_text()))?;
+    let (record, upload) = read_upload(&app, form).await?;
+    insert(
+        app,
+        scope,
+        headers,
+        Kind::Expertise,
+        Ok(Json(record)),
+        Some(upload),
+    )
+    .await
+}
+
+/// The record a file upload stands for, and the file, converted.
+async fn read_upload(
+    app: &AppState,
+    mut form: Multipart,
+) -> Result<(serde_json::Value, Upload), ApiError> {
+    let bad = |e: axum::extract::multipart::MultipartError| match e.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => ApiError::TooLarge(e.body_text()),
+        _ => ApiError::BadRequest(e.body_text()),
+    };
+    let mut record = serde_json::Map::new();
+    let mut entities = Vec::new();
+    let mut file = None;
+    while let Some(field) = form.next_field().await.map_err(bad)? {
+        let name = field.name().unwrap_or_default().to_owned();
+        match name.as_str() {
+            "file" => {
+                let file_name = field.file_name().unwrap_or_default().to_owned();
+                file = Some((file_name, field.bytes().await.map_err(bad)?));
+            }
+            // A form's blank inputs arrive empty: left out, as a JSON caller would.
+            "title" | "document" | "source_url" | "date" => {
+                let text = field.text().await.map_err(bad)?;
+                if !text.trim().is_empty() {
+                    record.insert(name, json!(text));
+                }
+            }
+            "entities" => {
+                let text = field.text().await.map_err(bad)?;
+                if !text.trim().is_empty() {
+                    entities.push(text);
+                }
+            }
+            other => {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown field {other:?}; a file upload takes file, title, document, \
+                     source_url, date and entities"
+                )));
+            }
+        }
+    }
+    let (name, bytes) = file.ok_or_else(|| ApiError::BadRequest("no file was sent".into()))?;
+    if bytes.is_empty() {
+        return Err(ApiError::BadRequest("the file is empty".into()));
+    }
+    // The extension is taken before a long name is shortened, so it is never cut off.
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
+    let ext = ext.to_ascii_lowercase();
+    let stem: String = stem.chars().take(200).collect();
+    let name = format!("{stem}.{ext}");
+    if ext.is_empty() || ext.len() > 10 || !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(ApiError::UnsupportedMediaType(
+            "the file's name needs an extension that says its format, such as .docx".into(),
+        ));
+    }
+    if !record.contains_key("title") && !stem.trim().is_empty() {
+        record.insert("title".into(), json!(stem.trim()));
+    }
+    let converted = app.converter.convert(&ext, bytes.clone()).await?;
+    record.insert("content".into(), json!(converted.markdown));
+    record.insert("entities".into(), json!(entities));
+    let upload = Upload {
+        name,
+        ext,
+        bytes,
+        converted,
+    };
+    Ok((serde_json::Value::Object(record), upload))
 }
 
 #[tracing::instrument(name = "ingest_preference", skip_all)]
@@ -401,5 +526,5 @@ pub async fn preference(
     headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, headers, Kind::Preference, body).await
+    insert(app, scope, headers, Kind::Preference, body, None).await
 }

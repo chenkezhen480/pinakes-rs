@@ -1,5 +1,7 @@
 # Neo4j for development and the M3 graph tests: `NEO4J_PASSWORD=... docker compose up -d neo4j`.
-# The pinakes service itself joins this file in M7. Ports are bound to 127.0.0.1 only.
+# The document converter: `docker compose up -d --build converter` ([converter] url in
+# config.toml). The pinakes service itself joins this file in M7. Ports are bound to 127.0.0.1
+# only.
 services:
   neo4j:
     # Pinned: the version the neo4rs driver (0.9.0-rc.10) is tested against here.
@@ -10,6 +12,21 @@ services:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
     volumes: ["neo4j-data:/data"]
+
+  converter:
+    # Uploads are untrusted: no root, nothing writable but a small /tmp, no capabilities,
+    # bounded memory and processes. Network egress is cut in M7, when the service joins this
+    # file and the converter moves to an internal network with it.
+    build: ./converter
+    ports:
+      - "127.0.0.1:8090:8090"
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 64
+    restart: unless-stopped
 
 volumes:
   neo4j-data:

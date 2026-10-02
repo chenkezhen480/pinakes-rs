@@ -161,15 +161,7 @@ impl TestApp {
         let mut req = Request::post(uri)
             .header("Authorization", format!("Bearer {}", caller.key))
             .header("Content-Type", "application/json");
-        if let Some(u) = caller.user {
-            req = req.header("X-User-Id", u);
-        }
-        if !caller.groups.is_empty() {
-            req = req.header("X-User-Groups", caller.groups.join(","));
-        }
-        if let Some(a) = caller.audience {
-            req = req.header("X-Audience", a);
-        }
+        req = with_caller(req, caller);
         self.send(req.body(Body::from(body.to_string())).unwrap())
             .await
     }
@@ -179,15 +171,7 @@ impl TestApp {
         let mut req = Request::put(uri)
             .header("Authorization", format!("Bearer {}", caller.key))
             .header("Content-Type", "application/json");
-        if let Some(u) = caller.user {
-            req = req.header("X-User-Id", u);
-        }
-        if !caller.groups.is_empty() {
-            req = req.header("X-User-Groups", caller.groups.join(","));
-        }
-        if let Some(a) = caller.audience {
-            req = req.header("X-Audience", a);
-        }
+        req = with_caller(req, caller);
         self.send(req.body(Body::from(body.to_string())).unwrap())
             .await
     }
@@ -209,16 +193,47 @@ impl TestApp {
 
     pub async fn get(&self, caller: Caller<'_>, uri: &str) -> (StatusCode, Value) {
         let mut req = Request::get(uri).header("Authorization", format!("Bearer {}", caller.key));
-        if let Some(u) = caller.user {
-            req = req.header("X-User-Id", u);
-        }
-        if !caller.groups.is_empty() {
-            req = req.header("X-User-Groups", caller.groups.join(","));
-        }
-        if let Some(a) = caller.audience {
-            req = req.header("X-Audience", a);
-        }
+        req = with_caller(req, caller);
         self.send(req.body(Body::empty()).unwrap()).await
+    }
+
+    /// A `multipart/form-data` POST: text fields, and a file as (name, bytes).
+    pub async fn post_form(
+        &self,
+        caller: Caller<'_>,
+        uri: &str,
+        fields: &[(&str, &str)],
+        file: Option<(&str, &[u8])>,
+    ) -> (StatusCode, Value) {
+        const BOUNDARY: &str = "pinakes-test-boundary";
+        let mut body: Vec<u8> = Vec::new();
+        for (name, value) in fields {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some((file_name, bytes)) = file {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+        let mut req = Request::post(uri)
+            .header("Authorization", format!("Bearer {}", caller.key))
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            );
+        req = with_caller(req, caller);
+        self.send(req.body(Body::from(body)).unwrap()).await
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
@@ -229,4 +244,21 @@ impl TestApp {
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
         (status, value)
     }
+}
+
+/// A request with the caller's identity and audience headers (the key is set by each method).
+fn with_caller(
+    mut req: axum::http::request::Builder,
+    caller: Caller<'_>,
+) -> axum::http::request::Builder {
+    if let Some(u) = caller.user {
+        req = req.header("X-User-Id", u);
+    }
+    if !caller.groups.is_empty() {
+        req = req.header("X-User-Groups", caller.groups.join(","));
+    }
+    if let Some(a) = caller.audience {
+        req = req.header("X-Audience", a);
+    }
+    req
 }
