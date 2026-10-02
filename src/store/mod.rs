@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::graph::{SchemaDef, SpaceDef};
+use crate::librarian::documents::{Reading, ReadingState};
 use crate::librarian::{Document, Proposal};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -68,5 +69,23 @@ pub trait Store: Send + Sync {
 
     /// Records a raw record as a document's next version (creating the document, or updating
     /// its title), in one transaction. Returns the version number, from 1.
-    async fn add_document_version(&self, doc: &Document, source: &str) -> anyhow::Result<u32>;
+    async fn add_document_version(
+        &self,
+        doc: &Document,
+        source: &str,
+        reading: Option<&Reading>,
+    ) -> anyhow::Result<u32>;
+
+    /// How a version was read (its ledger and main thread), if it was read step by step.
+    async fn version_reading(&self, source: &str) -> anyhow::Result<Option<Reading>>;
+
+    /// Saves where a document's reading is, after a step.
+    async fn put_reading_state(&self, state: &ReadingState) -> anyhow::Result<()>;
+
+    /// A reading left unfinished of the same text for the same audience, to resume.
+    async fn reading_state(
+        &self,
+        audience: &str,
+        content_hash: &str,
+    ) -> anyhow::Result<Option<ReadingState>>;
 }

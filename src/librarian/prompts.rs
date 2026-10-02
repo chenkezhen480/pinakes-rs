@@ -11,7 +11,7 @@ pub const VERIFY: &str = include_str!("../../prompts/verify.md");
 pub const DESCRIBE: &str = include_str!("../../prompts/describe.md");
 pub const VERIFY_DESCRIBE: &str = include_str!("../../prompts/verify-describe.md");
 pub const MATCH: &str = include_str!("../../prompts/match.md");
-pub const OUTLINE: &str = include_str!("../../prompts/outline.md");
+pub const READ: &str = include_str!("../../prompts/read.md");
 
 /// The rules shipped with the service for a kind.
 pub fn default_rules(kind: Kind) -> &'static str {

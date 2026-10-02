@@ -151,9 +151,9 @@ async fn a_real_model_recognizes_a_new_version() {
     assert!(found, "an updated page has the new rule");
 }
 
-/// A longer manual, read whole: outlined into concepts by the model (some spread over several
-/// sections), one call per concept; then a new version without its id that changes one rule
-/// must be recognized and only touch the pages of that rule.
+/// A longer manual, read from the top one concept at a time, each concept filed as it is read;
+/// then a new version without its id that changes one rule must be recognized, read again only
+/// where it changed, and only touch the pages of that rule.
 #[tokio::test]
 async fn a_real_model_files_a_manual_by_concept() {
     let Some(llm) = live_llm() else {
@@ -215,4 +215,63 @@ async fn a_real_model_files_a_manual_by_concept() {
     for p in list["pages"].as_array().unwrap() {
         eprintln!("{}: {}", p["page"], p["summary"]);
     }
+}
+
+/// A text with no headings at all, a meeting transcript: the model must still find where each
+/// topic ends, file each as a condensed page (not a copy) with its numbers exactly as said, and
+/// cite the lines each page was written from.
+#[tokio::test]
+async fn a_real_model_reads_a_transcript_without_headings() {
+    let Some(llm) = live_llm() else {
+        eprintln!("PINAKES_TEST_LLM is not set; skipping the live transcript test");
+        return;
+    };
+    let app = TestApp::with_llm(llm);
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let text = include_str!("fixtures/ops-meeting-transcript.txt");
+    let started = std::time::Instant::now();
+    let (status, queued) = app
+        .post(
+            c,
+            "/ingest/expertise",
+            json!({ "title": "运营周会记录 2026-09-28", "content": text }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
+    eprintln!(
+        "{} s\n{}",
+        started.elapsed().as_secs(),
+        serde_json::to_string_pretty(&job).unwrap()
+    );
+    assert_eq!(job["status"], "done", "{job}");
+    let r = &job["result"];
+    let pages = r["pages_created"].as_array().unwrap();
+    assert!(pages.len() >= 3, "the topics are filed apart: {r}");
+    let mut all = String::new();
+    let mut page_chars = 0;
+    for page in pages {
+        let (_, p) = app
+            .get(c, &format!("/pages/{}", page.as_str().unwrap()))
+            .await;
+        let body = p["body"].as_str().unwrap();
+        eprintln!("--- {page} {}\n{body}", p["front_matter"]["sources"]);
+        let sources = p["front_matter"]["sources"].to_string();
+        assert!(sources.contains("#L"), "cites its lines: {sources}");
+        page_chars += body.chars().count();
+        all.push_str(body);
+    }
+    // The decisions' numbers, exactly as said.
+    for fact in ["24 小时", "48 小时", "2000", "15 元", "两年"] {
+        let squeezed = fact.replace(' ', "");
+        assert!(
+            all.contains(fact) || all.contains(&squeezed),
+            "{fact} is on a page"
+        );
+    }
+    eprintln!(
+        "pages: {page_chars} characters for a {}-character transcript",
+        text.chars().count()
+    );
 }

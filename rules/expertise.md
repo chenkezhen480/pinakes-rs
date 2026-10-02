@@ -7,8 +7,9 @@ entities, written as linked wiki pages. It comes back in the knowledge slot.
 
 - One page per concept or entity, as in a classic wiki. A long document becomes several pages,
   or updates to several existing ones.
-- Start with a short definition, then sections with headings. Link related pages with
-  `[[page-name]]`.
+- Start with a short definition, then sections with headings. Link related pages by their
+  ids, `[[<folder>/<name>]]` such as `[[expertise/cross-border-returns]]`, and only to pages
+  that exist.
 - The summary is 1–3 sentences that define the concept.
 - Aliases hold the other names of the concept in English and Chinese; keywords hold the terms
   people search for.

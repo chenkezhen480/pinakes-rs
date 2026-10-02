@@ -86,6 +86,11 @@ impl TestApp {
         Self::build("", Some(llm))
     }
 
+    /// A service whose librarian calls the given LLM, with extra config TOML.
+    pub fn with_llm_and_config(llm: Llm, extra: &str) -> Self {
+        Self::build(extra, Some(llm))
+    }
+
     fn build(extra: &str, llm: Option<Llm>) -> Self {
         let data = tempfile::tempdir().unwrap();
         let (router, state) = Self::make_router(&data, extra, llm.clone());

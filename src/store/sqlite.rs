@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::{AuditEntry, Store};
 use crate::graph::{SchemaDef, SpaceDef};
+use crate::librarian::documents::{Reading, ReadingState};
 use crate::librarian::{Document, Proposal};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
@@ -72,6 +73,20 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
         PRIMARY KEY (document, version)
     );
+"#,
+    r#"
+    -- How each version was read: its ledger and main thread (JSON of documents::Reading).
+    ALTER TABLE document_versions ADD COLUMN reading TEXT;
+    -- A document being read, saved after every step so a stopped job can resume.
+    CREATE TABLE readings (
+        source       TEXT PRIMARY KEY,   -- the raw record being read
+        document     TEXT NOT NULL,      -- the document it is a version of
+        audience     TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        state        TEXT NOT NULL,      -- JSON of documents::ReadingState
+        updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE INDEX readings_content ON readings (audience, content_hash);
 "#,
 ];
 
@@ -392,8 +407,14 @@ impl Store for SqliteStore {
         .await
     }
 
-    async fn add_document_version(&self, doc: &Document, source: &str) -> anyhow::Result<u32> {
+    async fn add_document_version(
+        &self,
+        doc: &Document,
+        source: &str,
+        reading: Option<&Reading>,
+    ) -> anyhow::Result<u32> {
         let (doc, source) = (doc.clone(), source.to_owned());
+        let reading = reading.map(serde_json::to_string).transpose()?;
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<u32> {
             let mut c = conn
@@ -412,14 +433,80 @@ impl Store for SqliteStore {
                 |r| r.get(0),
             )?;
             tx.execute(
-                "INSERT INTO document_versions (document, version, source) VALUES (?1, ?2, ?3)",
-                params![doc.id, version, source],
+                "INSERT INTO document_versions (document, version, source, reading)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![doc.id, version, source, reading],
+            )?;
+            // The version is filed: its reading, and any reading of the document left
+            // unfinished (an upload that changed again before it was resumed), are done.
+            tx.execute(
+                "DELETE FROM readings WHERE source = ?1 OR document = ?2",
+                params![source, doc.id],
             )?;
             tx.commit()?;
             Ok(version)
         })
         .await
         .context("sqlite task panicked")?
+    }
+
+    async fn version_reading(&self, source: &str) -> anyhow::Result<Option<Reading>> {
+        let source = source.to_owned();
+        let text: Option<Option<String>> = self
+            .with_conn(move |c| {
+                c.query_row(
+                    "SELECT reading FROM document_versions WHERE source = ?1",
+                    params![source],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .await?;
+        text.flatten()
+            .map(|t| serde_json::from_str(&t).context("a stored reading"))
+            .transpose()
+    }
+
+    async fn put_reading_state(&self, state: &ReadingState) -> anyhow::Result<()> {
+        let text = serde_json::to_string(state)?;
+        let (source, document, audience, hash) = (
+            state.source.clone(),
+            state.document.id.clone(),
+            state.document.audience.clone(),
+            state.content_hash.clone(),
+        );
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO readings (source, document, audience, content_hash, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (source) DO UPDATE SET state = excluded.state,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                params![source, document, audience, hash, text],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    async fn reading_state(
+        &self,
+        audience: &str,
+        content_hash: &str,
+    ) -> anyhow::Result<Option<ReadingState>> {
+        let (audience, hash) = (audience.to_owned(), content_hash.to_owned());
+        let text: Option<String> = self
+            .with_conn(move |c| {
+                c.query_row(
+                    "SELECT state FROM readings WHERE audience = ?1 AND content_hash = ?2
+                     ORDER BY updated_at DESC LIMIT 1",
+                    params![audience, hash],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .await?;
+        text.map(|t| serde_json::from_str(&t).context("a stored reading state"))
+            .transpose()
     }
 }
 
@@ -438,11 +525,50 @@ mod tests {
             audience: "tenant".into(),
             title: "Manual".into(),
         };
-        assert_eq!(store.add_document_version(&doc, "a.json").await.unwrap(), 1);
+        assert_eq!(
+            store
+                .add_document_version(&doc, "a.json", None)
+                .await
+                .unwrap(),
+            1
+        );
         doc.title = "Manual v2".into();
-        assert_eq!(store.add_document_version(&doc, "b.json").await.unwrap(), 2);
+        // A reading in progress is kept until its version is recorded.
+        let reading = Reading {
+            thread: "A manual.".into(),
+            steps: vec![],
+        };
+        let state = ReadingState {
+            source: "b.json".into(),
+            content_hash: "h".into(),
+            document: doc.clone(),
+            how: crate::librarian::DocumentMatch::Given,
+            version: 2,
+            cursor: 7,
+            reading: reading.clone(),
+        };
+        store.put_reading_state(&state).await.unwrap();
+        let back = store.reading_state("tenant", "h").await.unwrap().unwrap();
+        assert_eq!(back.cursor, 7);
+        assert!(store.reading_state("g_x", "h").await.unwrap().is_none());
+        assert_eq!(
+            store
+                .add_document_version(&doc, "b.json", Some(&reading))
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(store.reading_state("tenant", "h").await.unwrap().is_none());
+        assert_eq!(
+            store.version_reading("b.json").await.unwrap(),
+            Some(reading)
+        );
+        assert_eq!(store.version_reading("a.json").await.unwrap(), None);
         assert!(
-            store.add_document_version(&doc, "b.json").await.is_err(),
+            store
+                .add_document_version(&doc, "b.json", None)
+                .await
+                .is_err(),
             "a record is one version"
         );
         assert_eq!(store.document(&doc.id).await.unwrap(), Some(doc.clone()));

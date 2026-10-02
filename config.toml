@@ -36,6 +36,7 @@ model_file = "model.conf"      # which model, where and its key: copy model.conf
 max_tokens = 16000             # per reply
 timeout_secs = 300             # per call
 related_pages = 8              # related pages the librarian is shown (5 to 10 in the design)
+read_window_tokens = 20000     # how much of a document one read sees; grows for a long concept
 
 [search]                       # (M2)
 slots = { memories = 3, knowledge = 3, relations = 5 }   # hits per slot by default, max 20

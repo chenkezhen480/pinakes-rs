@@ -130,6 +130,10 @@ pub struct LibrarianConfig {
     /// How many related pages the librarian is shown (design: the best 5 to 10).
     #[serde(default = "default_related_pages")]
     pub related_pages: usize,
+    /// About how many tokens of a document one read is shown, from the cursor on; it grows
+    /// when a concept runs past it (design, "Reading like a person, one concept at a time").
+    #[serde(default = "default_read_window_tokens")]
+    pub read_window_tokens: usize,
     /// What the model file says, once read ([`Config::load_model_file`]).
     #[serde(skip)]
     pub llm: ModelConfig,
@@ -156,6 +160,7 @@ impl Default for LibrarianConfig {
             max_tokens: default_max_tokens(),
             timeout_secs: default_llm_timeout(),
             related_pages: default_related_pages(),
+            read_window_tokens: default_read_window_tokens(),
             llm: ModelConfig::default(),
             llm_file: None,
         }
@@ -473,6 +478,9 @@ fn default_model_file() -> PathBuf {
 }
 fn default_related_pages() -> usize {
     8
+}
+fn default_read_window_tokens() -> usize {
+    20_000
 }
 fn default_keep_finished() -> u64 {
     60

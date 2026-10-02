@@ -50,7 +50,7 @@ fn model(plan: impl Fn(&str, usize) -> Value + Send + Sync + 'static) -> Arc<Fak
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => OK.into(),
         Step::Match => common::llm::NOT_THE_SAME.into(),
-        Step::Outline => r#"{"concepts": []}"#.into(),
+        Step::Read => common::llm::skip_to_end(msg),
     })
 }
 
@@ -291,7 +291,7 @@ async fn unsupported_edits_are_held_for_review() {
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => OK.into(),
         Step::Match => common::llm::NOT_THE_SAME.into(),
-        Step::Outline => r#"{"concepts": []}"#.into(),
+        Step::Read => common::llm::skip_to_end(msg),
     });
     let (app, key) = shopline(&llm).await;
     let lily = Caller::new(&key).user(Some("lily"));
@@ -581,7 +581,7 @@ async fn schema_descriptions_come_from_the_librarian() {
         }
         Step::VerifyDescribe => OK.into(),
         Step::Match => common::llm::NOT_THE_SAME.into(),
-        Step::Outline => r#"{"concepts": []}"#.into(),
+        Step::Read => common::llm::skip_to_end(msg),
         Step::Plan => NO_EDITS.into(),
         Step::Verify => all_ok(msg),
     });
@@ -682,7 +682,7 @@ async fn hand_edits_are_verified() {
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => OK.into(),
         Step::Match => common::llm::NOT_THE_SAME.into(),
-        Step::Outline => r#"{"concepts": []}"#.into(),
+        Step::Read => common::llm::skip_to_end(msg),
     });
     let (app, key) = shopline(&llm).await;
     let wang = Caller::new(&key).user(Some("wang"));

@@ -17,6 +17,7 @@
 pub mod documents;
 pub mod edit;
 pub mod prompts;
+mod reading;
 pub mod sources;
 
 pub use documents::{Document, DocumentMatch};
@@ -48,11 +49,9 @@ const MAX_PAGE_CHARS: usize = 12_000;
 const MAX_QUERY_CHARS: usize = 1_500;
 /// Most queries one unit's text is searched with (spread evenly over it).
 const MAX_QUERIES: usize = 10;
-/// Most characters of a new version's changes shown to the librarian.
+/// Most characters of a new version's changes shown with one concept.
 const CHANGES_CHARS: usize = 20_000;
-/// Most concepts one document is filed as; the outline is cut there.
-const MAX_CONCEPTS: usize = 30;
-/// Most pages of a document's earlier versions shown with each part.
+/// Most pages of a document's versions shown with each concept.
 const MAX_DOC_PAGES: usize = 20;
 /// Documents shown to the model when recognizing an upload, and what is shown of each.
 const MATCH_CANDIDATES: usize = 3;
@@ -178,43 +177,21 @@ pub struct DocumentIn {
     pub content: String,
 }
 
-/// One plan's worth of a record: the whole record, or one part of a document.
+/// One plan's worth of content: a whole record, or one concept of a document with its lines.
 struct Unit {
-    /// The record as the librarian is shown it. For a document, the whole document, the same
-    /// in every call of the job, so the calls share a prefix the API can cache.
+    /// The record as the librarian is shown it; for a concept, its lines.
     record: String,
     /// What to search related pages with.
     queries: Vec<String>,
     keywords: Vec<String>,
-    /// What the librarian should know about the document: its version, what changed, its
-    /// outline. The same in every call of the job.
+    /// What the librarian should know about the document: its main thread, the ledger, and
+    /// for a new version what changed.
     note: Option<String>,
     /// What this one call is for: one concept of the document.
     focus: Option<String>,
-    /// Pages the outline says the concept is in, shown first.
+    /// Pages shown first: the concept's page, and the pages an earlier version filed its
+    /// lines into.
     first_pages: Vec<String>,
-}
-
-/// One concept of a document, as the outline names it.
-#[derive(Debug, Deserialize)]
-struct Concept {
-    title: String,
-    /// The page it is filed as: an existing page, or the id a new page will have. Fixed in
-    /// the outline, so every call knows every concept's page and links agree.
-    #[serde(default)]
-    page: String,
-    #[serde(default)]
-    keywords: Vec<String>,
-    #[serde(default)]
-    sections: Vec<String>,
-    #[serde(default)]
-    change: String,
-}
-
-#[derive(Deserialize)]
-struct Outline {
-    #[serde(default)]
-    concepts: Vec<Concept>,
 }
 
 /// Pages a search found, best first, with their kind and score, and the entities it named.
@@ -268,12 +245,8 @@ impl Librarian {
 
     /// Files one record: steps 2 to 6. The record was saved before the job was queued.
     ///
-    /// A document (expertise) is read whole and filed one concept at a time: an outline call
-    /// names the concepts it covers (where the document divides is the model's call, never a
-    /// character count), then one plan per concept, each seeing the whole document and the
-    /// pages written for the concepts before it. A new version of a known document is
-    /// outlined with what changed, so only the concepts it touches are filed again, and it is
-    /// shown every page its earlier versions were filed into.
+    /// A document (expertise) is read like a person reads it, one concept at a time, each
+    /// concept filed as it is read (see `reading`); a record is the one-step case.
     #[tracing::instrument(name = "librarian_ingest", skip_all, fields(tenant = %tenant.dir_name, kind = job.target.kind.as_str()))]
     pub async fn ingest(&self, tenant: Arc<Tenant>, job: Ingest) -> anyhow::Result<JobResult> {
         let target = &job.target;
@@ -284,89 +257,47 @@ impl Librarian {
             source: Some(format!("sources/{}", job.source)),
             ..JobResult::default()
         };
-
-        // Which document this is, and its earlier versions.
-        let mut doc_sources: Vec<String> = Vec::new();
-        let mut doc: Option<(Document, u32)> = None;
-        let units = match &job.document {
-            None => vec![Unit {
-                record: serde_json::to_string_pretty(&job.record)?,
-                queries: documents::chunks(&job.query, MAX_QUERY_CHARS, MAX_QUERIES),
-                keywords: job.keywords.clone(),
-                note: None,
-                focus: None,
-                first_pages: Vec::new(),
-            }],
-            Some(d) => {
-                let (found, how) = self.identify(&tenant, target, &reader, d).await?;
-                if how != DocumentMatch::New {
-                    doc_sources = tenant.store.document_sources(&found.id).await?;
-                }
-                let version = u32::try_from(doc_sources.len()).unwrap_or(u32::MAX) + 1;
-                tracing::info!(document = %found.id, ?how, version, "document identified");
-                result.document = Some(found.id.clone());
-                result.document_match = Some(how);
-                result.version = Some(version);
-                let units = self
-                    .document_units(
-                        &tenant,
-                        &job,
-                        &reader,
-                        &rules,
-                        d,
-                        &found,
-                        version,
-                        &doc_sources,
-                    )
-                    .await?;
-                doc = Some((found, version));
-                units
-            }
-        };
-        // Pages this job writes cite its record, so later concepts find what earlier ones wrote.
-        doc_sources.push(job.source.clone());
-
-        let mut held = Vec::new();
-        for unit in &units {
-            let (pass, unit_held) = self
-                .plan_unit(
-                    &tenant,
-                    &job,
-                    &reader,
-                    &rules,
-                    &today,
-                    unit,
-                    &doc_sources,
-                    &mut result,
-                )
+        if let Some(d) = &job.document {
+            self.read_document(&tenant, &job, d, &reader, &rules, &today, &mut result)
                 .await?;
-            held.extend(unit_held);
-            let _writer = tenant.wiki_writer.lock().await;
-            apply_and_record(
+            dedup_pages(&mut result);
+            return Ok(result);
+        }
+
+        let unit = Unit {
+            record: serde_json::to_string_pretty(&job.record)?,
+            queries: documents::chunks(&job.query, MAX_QUERY_CHARS, MAX_QUERIES),
+            keywords: job.keywords.clone(),
+            note: None,
+            focus: None,
+            first_pages: Vec::new(),
+        };
+        let (pass, held) = self
+            .plan_unit(
                 &tenant,
-                target,
-                &job.writer,
-                Some(&job.source),
+                &job,
+                &reader,
+                &rules,
                 &today,
-                &pass,
+                &unit,
+                std::slice::from_ref(&job.source),
+                &job.source,
                 &mut result,
-                &format!("ingest {}", target.kind.as_str()),
             )
             .await?;
-        }
-        if units.is_empty() {
-            let _writer = tenant.wiki_writer.lock().await;
-            record_log(
-                &tenant,
-                &format!(
-                    "ingest {}: nothing changed since the last version",
-                    target.kind.as_str()
-                ),
-            )
-            .await?;
-        }
+        let _writer = tenant.wiki_writer.lock().await;
+        apply_and_record(
+            &tenant,
+            target,
+            &job.writer,
+            Some(&job.source),
+            &today,
+            &pass,
+            &mut result,
+            &format!("ingest {}", target.kind.as_str()),
+        )
+        .await?;
         if !held.is_empty() {
-            let _writer = tenant.wiki_writer.lock().await;
             let id = hold(&tenant, target, &job.writer, Some(&job.source), held).await?;
             record_log(
                 &tenant,
@@ -375,19 +306,13 @@ impl Librarian {
             .await?;
             result.proposal = Some(id);
         }
-        // The version is recorded once the job has filed it, so a failed job leaves the
-        // previous version as the one the next upload is compared with.
-        if let Some((d, _)) = &doc {
-            let version = tenant.store.add_document_version(d, &job.source).await?;
-            result.version = Some(version);
-        }
-        dedup_pages(&mut result);
         Ok(result)
     }
 
     /// Steps 2 to 4 for one unit (the whole record, or one concept of a document): related pages,
-    /// the plan, the code checks and the verdicts, with one retry. Returns the edits to apply
-    /// and the edits to hold; code-refused edits go into `result.rejected`.
+    /// the plan, the code checks and the verdicts, with one retry. `cite` is what the pages
+    /// cite for it (the record, or the concept's lines in it). Returns the edits to apply and
+    /// the edits to hold; code-refused edits go into `result.rejected`.
     #[allow(clippy::too_many_arguments)]
     async fn plan_unit(
         &self,
@@ -398,6 +323,7 @@ impl Librarian {
         today: &str,
         unit: &Unit,
         doc_sources: &[String],
+        cite: &str,
         result: &mut JobResult,
     ) -> anyhow::Result<(Vec<Edit>, Vec<HeldEdit>)> {
         let target = &job.target;
@@ -454,16 +380,8 @@ impl Librarian {
                 }
                 Err(e) => anyhow::bail!("the librarian's plan could not be read twice: {e}"),
             };
-            let checked = check(
-                tenant,
-                target,
-                &job.writer,
-                Some(&job.source),
-                today,
-                &edits,
-                true,
-            )
-            .await?;
+            let checked =
+                check(tenant, target, &job.writer, Some(cite), today, &edits, true).await?;
             let verdicts = self
                 .verify(
                     rules,
@@ -501,219 +419,38 @@ impl Librarian {
         let (edits, checked, verdicts) = last.context("no plan")?;
         let mut pass = Vec::new();
         let mut held = Vec::new();
+        let hold_it = |edit: Edit, reason: String| HeldEdit { edit, reason };
         for (i, e) in edits.into_iter().enumerate() {
             match (&checked.results[i], verdicts.get(&i)) {
                 (Err(r), _) => result.rejected.push(Rejected {
                     page: e.page(),
                     reason: r.clone(),
                 }),
-                (Ok(()), Some(Err(r))) => held.push(HeldEdit {
-                    edit: e,
-                    reason: r.clone(),
-                }),
+                (Ok(()), Some(Err(r))) => held.push(hold_it(e, r.clone())),
                 (Ok(()), _) => pass.push(e),
             }
         }
+        // An edit of, linking to or anchored to a page whose creation is held would fail
+        // without it: it is held with that page, and so on for edits that depend on it.
+        loop {
+            let held_pages: HashSet<String> = held
+                .iter()
+                .filter(|h| matches!(h.edit, Edit::Create { .. }))
+                .map(|h| page_id(&h.edit.page()))
+                .collect();
+            let Some(i) = pass.iter().position(|e| {
+                held_pages.contains(&page_id(&e.page()))
+                    || added_links(e)
+                        .iter()
+                        .any(|l| held_pages.contains(&page_id(l)))
+            }) else {
+                break;
+            };
+            let e = pass.remove(i);
+            let reason = "it depends on a page whose creation is held for review".to_owned();
+            held.push(hold_it(e, reason));
+        }
         Ok((pass, held))
-    }
-
-    /// The calls a document is filed in: an outline of its concepts, then one unit per
-    /// concept. For a new version, the outline is made with what changed and lists only the
-    /// concepts it touches; an unchanged upload has no units at all.
-    #[allow(clippy::too_many_arguments)]
-    async fn document_units(
-        &self,
-        tenant: &Arc<Tenant>,
-        job: &Ingest,
-        reader: &Scope,
-        rules: &str,
-        d: &DocumentIn,
-        doc: &Document,
-        version: u32,
-        earlier: &[String],
-    ) -> anyhow::Result<Vec<Unit>> {
-        let old = match earlier.last() {
-            Some(src) => {
-                let (dir, src) = (tenant.dir.clone(), src.clone());
-                tokio::task::spawn_blocking(move || sources::read(&dir, &src))
-                    .await??
-                    .and_then(|text| documents::content_of(&text))
-                    // Compared as the insert endpoint takes the text: trimmed.
-                    .map(|old| old.trim().to_owned())
-            }
-            None => None,
-        };
-        let changes = match &old {
-            Some(old) => match documents::changes(old, &d.content, CHANGES_CHARS) {
-                Some(c) => Some(c),
-                None => return Ok(Vec::new()),
-            },
-            None => None,
-        };
-
-        let mut rec = job.record.clone();
-        rec["document"] = json!(doc.id);
-        rec["version"] = json!(version);
-        let record = serde_json::to_string_pretty(&rec)?;
-        let mut note = String::new();
-        if version > 1 {
-            let _ = write!(
-                note,
-                "This is version {version} of document {} ({}). The pages its earlier versions \
-                 were filed into cite them and come first under Related pages. Update them for \
-                 what changed: change what changed, mark what this version replaces or removes \
-                 as superseded, and create a page only for something no page covers. An earlier \
-                 version is not another source: where this version says something else, it \
-                 replaces the earlier text, so supersede it; never flag it as a contradiction. \
-                 To change a claim, use one `supersede` edit with the claim copied exactly from \
-                 the page and the new wording as its replacement, and don't also rewrite the \
-                 section it is in.\n\n",
-                doc.id, doc.title
-            );
-            match &changes {
-                Some(c) => {
-                    let _ = write!(
-                        note,
-                        "What changed since version {} (`-` removed, `+` added):\n\n```diff\n{c}```\n\n",
-                        version - 1
-                    );
-                }
-                None => note.push_str(
-                    "The previous version's text is not available; compare with the pages.\n\n",
-                ),
-            }
-        }
-
-        // The pages of earlier versions, for the outline to say which concept is in which.
-        let snap = tenant.snapshot().await?;
-        let earlier_pages: Vec<String> = snap
-            .catalog
-            .pages
-            .iter()
-            .filter(|p| reader.can_see(&p.path))
-            .filter(|p| p.sources.iter().any(|s| earlier.contains(s)))
-            .take(MAX_DOC_PAGES)
-            .map(|p| format!("- {}: {} — {}", p.path, p.title, p.summary))
-            .collect();
-        let concepts = self
-            .outline(rules, &job.target, &record, &note, &earlier_pages)
-            .await?;
-        if concepts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let n = concepts.len();
-        note.push_str(
-            "The document is filed as these concepts, one call each, each as the page named; \
-             link to them by these ids:\n\n",
-        );
-        for (i, c) in concepts.iter().enumerate() {
-            let _ = writeln!(
-                note,
-                "{}. {} → [[{}]] (sections: {})",
-                i + 1,
-                c.title,
-                c.page.trim(),
-                c.sections.join("; ")
-            );
-        }
-        Ok(concepts
-            .into_iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let page = c.page.trim().to_owned();
-                let pages: Vec<String> = PagePath::parse(&page)
-                    .ok()
-                    .map(|p| p.to_string())
-                    .into_iter()
-                    .collect();
-                let focus = format!(
-                    "Write the edits for concept {} of {n} only: \"{}\" (in the document: {}). \
-                     {}\nFile it as `{page}`: update that page if it exists, create it if not. \
-                     The other concepts get calls of their own; pages written for the concepts \
-                     before this one come first under Related pages.",
-                    i + 1,
-                    c.title,
-                    if c.sections.is_empty() {
-                        "see the outline".to_owned()
-                    } else {
-                        c.sections.join("; ")
-                    },
-                    c.change.trim(),
-                );
-                let mut keywords = vec![c.title.clone()];
-                keywords.extend(c.keywords.iter().take(10).cloned());
-                Unit {
-                    record: record.clone(),
-                    queries: vec![keywords.join(" ")],
-                    keywords,
-                    note: Some(note.clone()),
-                    focus: Some(focus),
-                    first_pages: pages,
-                }
-            })
-            .collect())
-    }
-
-    /// The outline of a document: the concepts it is filed as, with where they are in it and,
-    /// for a new version, only those its changes touch. Read whole: the model decides where
-    /// the document divides. A reply that can't be read is asked for once more.
-    async fn outline(
-        &self,
-        rules: &str,
-        target: &Target,
-        record: &str,
-        note: &str,
-        earlier_pages: &[String],
-    ) -> anyhow::Result<Vec<Concept>> {
-        let mut msg = format!(
-            "## Rules for expertise pages\n\n{rules}\n\n## Where pages go\n\nNew pages of \
-             this document are in `{0}/`: a new page's id is `{0}/<name>`, a short lowercase \
-             name of letters, digits and `-`.\n\n## The document\n\n```json\n{record}\n```\n\n",
-            target.folder()
-        );
-        if !note.is_empty() {
-            let _ = write!(msg, "## This document\n\n{note}");
-        }
-        if !earlier_pages.is_empty() {
-            let _ = write!(
-                msg,
-                "## Pages filed from its earlier versions\n\n{}\n\n",
-                earlier_pages.join("\n")
-            );
-        }
-        let prompt = self.prompt(prompts::OUTLINE, msg, outline_schema());
-        let mut last_err = String::new();
-        for _ in 0..2 {
-            let reply = self
-                .llm
-                .complete(&prompt)
-                .await
-                .context("outlining the document")?;
-            match parse_json::<Outline>(&reply) {
-                Ok(o) => {
-                    let mut concepts: Vec<Concept> = o
-                        .concepts
-                        .into_iter()
-                        .filter(|c| !c.title.trim().is_empty())
-                        .collect();
-                    if concepts.len() > MAX_CONCEPTS {
-                        tracing::warn!(
-                            concepts = concepts.len(),
-                            "outline cut to {MAX_CONCEPTS} concepts"
-                        );
-                        concepts.truncate(MAX_CONCEPTS);
-                    }
-                    tracing::info!(
-                        concepts = concepts.len(),
-                        pages = ?concepts.iter().map(|c| c.page.as_str()).collect::<Vec<_>>(),
-                        "document outlined"
-                    );
-                    return Ok(concepts);
-                }
-                Err(e) => last_err = e,
-            }
-        }
-        anyhow::bail!("the librarian's outline could not be read twice: {last_err}")
     }
 
     /// Which document a new upload is, when the caller didn't say: the documents whose pages
@@ -771,7 +508,7 @@ impl Librarian {
             let docs: HashSet<&str> = entry
                 .sources
                 .iter()
-                .filter_map(|s| doc_of.get(s.as_str()).map(|d| d.id.as_str()))
+                .filter_map(|s| doc_of.get(documents::record_name(s)).map(|d| d.id.as_str()))
                 .collect();
             for id in docs {
                 *scores.entry(id).or_default() += score;
@@ -808,7 +545,11 @@ impl Librarian {
                 .pages
                 .iter()
                 .filter(|p| reader.can_see(&p.path))
-                .filter(|p| p.sources.iter().any(|s| sources.contains(s.as_str())))
+                .filter(|p| {
+                    p.sources
+                        .iter()
+                        .any(|s| sources.contains(documents::record_name(s)))
+                })
                 .map(|p| p.path.clone())
                 .take(MATCH_PAGES)
                 .collect();
@@ -913,10 +654,10 @@ impl Librarian {
         })
     }
 
-    /// Step 2: the pages the librarian is shown. First `first_pages` (where the outline says a
-    /// concept is) and the pages that cite `first_sources` (a document's earlier versions and
-    /// this job's earlier concepts), up to a cap; then the best related pages the audience
-    /// may see, pages of the job's kind first.
+    /// Step 2: the pages the librarian is shown. First `first_pages` (a concept's page, and
+    /// where an earlier version filed its lines) and the pages that cite `first_sources` (a
+    /// document's earlier versions and this one's earlier concepts), up to a cap; then the
+    /// best related pages the audience may see, pages of the job's kind first.
     #[allow(clippy::too_many_arguments)]
     async fn related(
         &self,
@@ -957,7 +698,11 @@ impl Librarian {
                 .pages
                 .iter()
                 .filter(|p| reader.can_see(&p.path))
-                .filter(|p| p.sources.iter().any(|s| first_sources.contains(s)))
+                .filter(|p| {
+                    p.sources
+                        .iter()
+                        .any(|s| first_sources.iter().any(|f| f == documents::record_name(s)))
+                })
                 .map(|p| p.path.to_string())
                 .filter(|p| !first_pages.contains(p))
                 .take(MAX_DOC_PAGES),
@@ -1017,8 +762,7 @@ impl Librarian {
             target.kind.as_str()
         );
         if let Some(note) = note {
-            // The outline names the pages the other concepts are filed as: links to them are
-            // expected even before they exist.
+            // The document's main thread and ledger: links to the ledger's pages are expected.
             let _ = write!(msg, "## This document\n\n{note}\n\n");
         }
         push_pages(&mut msg, "Related pages, as they stand", related);
@@ -1316,7 +1060,6 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         "proposal {} is no longer held",
         proposal.id
     );
-    let page_edits: Vec<Edit> = proposal.edits.iter().map(|h| h.edit.clone()).collect();
     let target = Target::new(proposal.kind, PageAudience::from_key(&proposal.audience))
         .map_err(anyhow::Error::msg)?;
     let writer = Scope::offline(
@@ -1324,13 +1067,14 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         proposal.user.clone(),
         proposal.groups.clone(),
     );
+    let edits: Vec<Edit> = proposal.edits.iter().map(|h| h.edit.clone()).collect();
     let wrote = apply_and_record(
         &tenant,
         &target,
         &writer,
         proposal.source.as_deref(),
         &today,
-        &page_edits,
+        &edits,
         &mut result,
         &format!("approve {}", proposal.id),
     )
@@ -1568,6 +1312,26 @@ fn plan_message(
     msg
 }
 
+/// A page id as code writes it (`expertise/x.md` is `expertise/x`); anything else as it is.
+fn page_id(page: &str) -> String {
+    PagePath::parse(page).map_or_else(|_| page.to_owned(), |p| p.to_string())
+}
+
+/// The pages and anchors an edit's new text links to and its new `about` names.
+fn added_links(e: &Edit) -> Vec<String> {
+    let (text, about): (Option<&str>, &[String]) = match e {
+        Edit::Create { body, about, .. } => (Some(body), about),
+        Edit::Replace { body, .. } => (Some(body), &[]),
+        Edit::Update {
+            text, add_about, ..
+        } => (text.as_deref(), add_about),
+        Edit::Supersede { replacement, .. } => (replacement.as_deref(), &[]),
+    };
+    let mut out = text.map(crate::search::catalog::links).unwrap_or_default();
+    out.extend(about.iter().cloned());
+    out
+}
+
 /// A page written for several concepts is listed once: as created if any call created it.
 fn dedup_pages(result: &mut JobResult) {
     let mut seen = HashSet::new();
@@ -1668,18 +1432,6 @@ pub fn verdicts_schema() -> serde_json::Value {
         ("reason", nullable_string()),
     ]);
     object(&[("verdicts", json!({ "type": "array", "items": verdict }))])
-}
-
-/// The concepts a document is filed as.
-pub fn outline_schema() -> serde_json::Value {
-    let concept = object(&[
-        ("title", string()),
-        ("page", string()),
-        ("keywords", strings()),
-        ("sections", strings()),
-        ("change", string()),
-    ]);
-    object(&[("concepts", json!({ "type": "array", "items": concept }))])
 }
 
 /// Which candidate document an upload is a new version of: one of their ids, or null.
@@ -1813,6 +1565,7 @@ fn check_blocking(
         today,
         source,
         anchor: &anchor,
+        links: from_plan,
     };
     let mut draft = Draft::new(wiki);
     let mut results = Vec::new();
@@ -2152,7 +1905,7 @@ mod tests {
             ("verdicts", verdicts_schema()),
             ("verdict", verdict_schema()),
             ("match", match_schema(&["d_0011223344556677".to_owned()])),
-            ("outline", outline_schema()),
+            ("read", reading::read_schema()),
             ("description", described.clone()),
         ] {
             check(&schema, name);

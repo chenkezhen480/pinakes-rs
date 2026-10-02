@@ -1,5 +1,6 @@
 //! `POST /read`: a follow-up after `/search`. Returns whole pages or one heading of them, and
-//! the raw sources pages cite (`sources/<name>`, as hits list them), with the read tracker.
+//! the raw sources pages cite (`sources/<name>`, or `sources/<name>#L<from>-<to>` for the
+//! lines of a document a page was written from, as hits list them), with the read tracker.
 //! A page the caller can't see is reported exactly like a missing one, and so is a source no
 //! page the caller can see cites: a source takes the audience of the pages citing it.
 
@@ -12,7 +13,7 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::identity::Scope;
 use crate::kinds::Kind;
-use crate::librarian::sources;
+use crate::librarian::{documents, sources};
 use crate::search::catalog::{Fence, heading_of};
 use crate::search::text::normalize;
 use crate::search::{SearchSnapshot, validate_session};
@@ -20,7 +21,8 @@ use crate::trace::Endpoint;
 use crate::wiki::{Page, PagePath, WikiError};
 
 const MAX_IDS: usize = 20;
-/// Source ids are `sources/<name>`; a `heading` doesn't apply to them.
+/// Source ids are `sources/<name>`, with `#L<from>-<to>` for lines of a document; a
+/// `heading` doesn't apply to them.
 pub(crate) const SOURCE_PREFIX: &str = "sources/";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,8 +113,8 @@ pub async fn read(
     let mut paths = Vec::new();
     let mut wants_source = false;
     for id in &req.ids {
-        if let Some(name) = id.strip_prefix(SOURCE_PREFIX) {
-            if !sources::valid_name(name) {
+        if let Some(cited) = id.strip_prefix(SOURCE_PREFIX) {
+            if !documents::parse_cite(cited).is_some_and(|(name, _)| sources::valid_name(name)) {
                 return Err(ApiError::BadRequest(format!("{id:?} is not a source id")));
             }
             wants_source = true;
@@ -153,17 +155,19 @@ pub async fn read(
     };
     let cited: Vec<String> = match &snapshot {
         Some(snap) if wants_source => {
-            let names: Vec<&str> = paths
+            // A source is readable when a page the caller can see cites exactly it: the whole
+            // record, or the lines, as hits list them. Each id is checked on its own.
+            let ids: Vec<&str> = paths
                 .iter()
                 .filter_map(|(id, _)| id.strip_prefix(SOURCE_PREFIX))
-                .filter(|name| {
+                .filter(|cited| {
                     snap.catalog
                         .pages
                         .iter()
-                        .any(|p| scope.can_see(&p.path) && p.sources.iter().any(|s| s == name))
+                        .any(|p| scope.can_see(&p.path) && p.sources.iter().any(|s| s == *cited))
                 })
                 .collect();
-            names.into_iter().map(str::to_owned).collect()
+            ids.into_iter().map(str::to_owned).collect()
         }
         _ => Vec::new(),
     };
@@ -171,7 +175,7 @@ pub async fn read(
     let source_texts = tokio::task::spawn_blocking(move || {
         cited
             .into_iter()
-            .map(|name| sources::read(&dir, &name).map(|t| (name, t)))
+            .map(|id| sources::read(&dir, documents::record_name(&id)).map(|t| (id, t)))
             .collect::<std::io::Result<Vec<_>>>()
     })
     .await
@@ -181,11 +185,20 @@ pub async fn read(
     let mut loaded = loaded.into_iter();
     let mut out = Vec::new();
     for (id, path) in paths {
-        if let Some(name) = id.strip_prefix(SOURCE_PREFIX) {
+        if let Some(cited) = id.strip_prefix(SOURCE_PREFIX) {
+            let lines = documents::parse_cite(cited).and_then(|(_, lines)| lines);
             let text = source_texts
                 .iter()
-                .find(|(n, _)| n == name)
+                .find(|(c, _)| c == cited)
                 .and_then(|(_, t)| t.clone());
+            // Lines are of the document's text, numbered as the librarian read it.
+            let text = match lines {
+                None => text,
+                Some((from, to)) => text
+                    .as_deref()
+                    .and_then(documents::content_of)
+                    .and_then(|c| documents::lines_of(&c, from, to)),
+            };
             let Some(text) = text else {
                 out.push(ReadItem::error(id, "not_found"));
                 continue;

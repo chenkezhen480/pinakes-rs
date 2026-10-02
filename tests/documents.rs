@@ -1,17 +1,19 @@
-//! Documents filed as expertise: ids issued by the service, new versions finding every page
-//! the earlier ones were filed into (however the librarian spread them over concept pages),
-//! only what changed being filed again, uploads without an id recognized from the wiki, and
-//! documents read whole and filed one concept at a time, as the outline divides them.
+//! Documents filed as expertise: ids issued by the service, documents read like a person reads
+//! them (one concept per step, each concept filed as it is read, pages citing the lines they
+//! were written from), new versions read again only where they changed, uploads without an id
+//! recognized from the wiki, and a stopped reading resumed where it stopped.
 
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::http::StatusCode;
 use common::app::{Caller, TestApp};
 use common::llm::{
-    FakeLlm, NOT_THE_SAME, OK, Step, all_ok, candidates, concept, create, describe_from_definition,
-    focus_title, folder, record_of, related_pages, same_as, update,
+    FakeLlm, NOT_THE_SAME, OK, Step, UNREACHABLE, all_ok, candidates, create, cursor_of,
+    describe_from_definition, focus_title, folder, line_after, read_reply, reader, record_of,
+    related_pages, same_as, shown, update,
 };
 use serde_json::{Value, json};
 
@@ -34,16 +36,6 @@ fn manual(cross: &str) -> String {
 const V1: &str = "跨境商品退货需在 3 天内申报，退回保税仓，关税不退。";
 const V2: &str = "自 2026-11-01 起，跨境商品退货申报期延长到 7 天，关税按比例退还。";
 
-/// The document an outline message shows.
-fn document_of(msg: &str) -> Value {
-    let block = msg
-        .split("## The document\n\n```json\n")
-        .nth(1)
-        .and_then(|s| s.split("\n```").next())
-        .expect("a document");
-    serde_json::from_str(block).unwrap()
-}
-
 /// The page each concept of the manual is filed into.
 fn page_of(title: &str) -> &'static str {
     match title {
@@ -54,46 +46,38 @@ fn page_of(title: &str) -> &'static str {
     }
 }
 
-/// A librarian that outlines the manual's first version as three concepts and files each as
-/// a page; for a later version it outlines only the cross-border concept (in the page the
-/// outline is shown for it) and updates that page when it is shown it, writing a duplicate
-/// when it isn't, which the tests would catch. `answer` says which candidate a match is.
+/// A librarian that reads the manual one section per concept (its headings mark where
+/// concepts start, as a model would see) and a heading-less document as one concept. It
+/// writes each concept's page; for a later version it updates the page when it is shown it,
+/// writing a duplicate when it isn't, which the tests would catch. `answer` says which
+/// candidate a match is.
 fn librarian(answer: impl Fn(&str) -> String + Send + Sync + 'static) -> Arc<FakeLlm> {
     FakeLlm::new(move |step, msg, _| match step {
-        Step::Outline => {
-            let doc = document_of(msg);
-            // The folder the outline is told new pages go in.
-            let dir = msg
-                .split("New pages of this document are in `")
-                .nth(1)
-                .and_then(|s| s.split("/`").next())
-                .unwrap()
-                .to_owned();
-            let at = |name: &str| format!("{dir}/{name}");
-            if !doc["title"].as_str().unwrap().starts_with("售后规则手册") {
-                return json!({ "concepts": [
-                    concept("客服话术", &at("service-scripts"), &[], "write it")
-                ]})
-                .to_string();
+        Step::Read => {
+            let (lines, _) = shown(msg);
+            if !lines.iter().any(|(_, l)| l.starts_with("## ")) && cursor_of(msg) == 1 {
+                // No headings: the whole text is one concept.
+                let title = line_after(msg, "Title: ");
+                let page = format!("{}/{}", common::llm::read_folder(msg), page_of(title));
+                let end = lines.last().unwrap().0;
+                return read_reply("concept", end, Some(title), Some(&page), Some("话术"));
             }
-            if msg.contains("What changed since version") {
-                let listed = format!("- {}: 跨境商品退货", at("crossborder-returns"));
-                assert!(msg.contains(&listed), "the earlier pages are listed: {msg}");
-                return json!({ "concepts": [concept("跨境商品退货", &at("crossborder-returns"),
-                    &["跨境商品退货"], "the filing period and the tax refund changed")] })
-                .to_string();
-            }
-            json!({ "concepts": [
-                concept("七天无理由退货", &at("return-window"), &["七天无理由退货"], "write it"),
-                concept("运费险", &at("shipping-insurance"), &["运费险"], "write it"),
-                concept("跨境商品退货", &at("crossborder-returns"), &["跨境商品退货"], "write it"),
-            ]})
-            .to_string()
+            reader(
+                msg,
+                |l| l.starts_with("## "),
+                |l| {
+                    let t = l.trim_start_matches("## ").to_owned();
+                    let p = page_of(&t).to_owned();
+                    (t, p)
+                },
+                Some("售后规则手册：平台售后规则，面向客服。"),
+            )
         }
         Step::Plan => {
             let rec = record_of(msg);
             let title = focus_title(msg).expect("one concept per call");
             let page = format!("{}/{}", folder(msg), page_of(&title));
+            let text = rec["text"].as_str().unwrap();
             if rec["version"] == 1 {
                 let body = match title.as_str() {
                     "跨境商品退货" => format!("# 跨境商品退货\n\n## 规则\n\n{V1}"),
@@ -102,8 +86,7 @@ fn librarian(answer: impl Fn(&str) -> String + Send + Sync + 'static) -> Arc<Fak
                 return json!({ "edits": [create(&page, &title, "一条规则。", &[], &body)] })
                     .to_string();
             }
-            let content = rec["content"].as_str().unwrap();
-            let rule = content.lines().last().unwrap();
+            let rule = text.lines().last().unwrap();
             if related_pages(msg).first() == Some(&page) {
                 json!({ "edits": [update(&page, Some("规则"), Some(rule))] })
             } else {
@@ -139,7 +122,8 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     let key = app.create_tenant("acme").await;
     let c = Caller::new(&key);
 
-    // Version 1: a new document, filed as three concept pages, and given an id.
+    // Version 1: a new document, read one concept at a time into three pages, and given an
+    // id. Its title line is skipped as not knowledge.
     let (queued, r) = file(
         &app,
         c,
@@ -151,25 +135,27 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     assert_eq!(r["version"], 1);
     let id = r["document"].as_str().unwrap().to_owned();
     assert!(id.starts_with("d_") && id.len() == 18, "{id}");
-    assert_eq!(r["pages_created"].as_array().unwrap().len(), 3);
-    // Read whole: one outline, then one call per concept, each with the whole document.
-    assert_eq!(llm.calls(Step::Outline).len(), 1);
+    assert_eq!(r["pages_created"].as_array().unwrap().len(), 3, "{r}");
+    assert_eq!(llm.calls(Step::Read).len(), 4, "a skip and three concepts");
     let plans = llm.calls(Step::Plan);
     assert_eq!(plans.len(), 3);
-    for plan in &plans {
-        assert!(
-            record_of(plan)["content"].as_str().unwrap().contains(V1),
-            "the whole document"
-        );
-    }
+    // Each concept is filed from its own lines, not the whole document.
+    let freight = record_of(&plans[1]);
+    assert_eq!(freight["concept"], "运费险");
+    assert!(freight["text"].as_str().unwrap().contains("上限 25 元"));
+    assert!(!freight["text"].as_str().unwrap().contains("七天内"));
+    assert!(
+        plans[2].contains("→ [[expertise/shipping-insurance]]"),
+        "the ledger, with each concept's page, is shown"
+    );
     assert_eq!(
         llm.calls(Step::Match).len(),
         0,
         "nothing filed yet to compare with"
     );
 
-    // Version 2, with its id: the page of the changed section is found and updated, with
-    // what changed; the sections that didn't change are not filed again.
+    // Version 2, with its id: only the step the change touches is read and filed again,
+    // with what changed; the steps it doesn't touch are kept without a model call.
     llm.clear();
     let (queued, r) = file(
         &app,
@@ -190,20 +176,19 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
         "{r}"
     );
     assert_eq!(r["pages_created"], json!([]));
-    let outline = &llm.calls(Step::Outline)[0];
-    assert!(outline.contains(&format!("- {V1}")) && outline.contains(&format!("+ {V2}")));
+    let reads = llm.calls(Step::Read);
+    assert_eq!(reads.len(), 1, "only the changed step is read again");
+    assert!(reads[0].contains("## How version 1 read these lines"));
+    assert!(reads[0].contains(&format!("- {V1}")) && reads[0].contains(&format!("+ {V2}")));
     assert!(
-        outline.contains("/crossborder-returns: 跨境商品退货"),
-        "earlier pages listed"
+        reads[0].contains("售后规则手册：平台售后规则"),
+        "the main thread is kept"
     );
     let plans = llm.calls(Step::Plan);
-    assert_eq!(plans.len(), 1, "only the concept the change touches");
+    assert_eq!(plans.len(), 1);
     let related = related_pages(&plans[0]);
-    for page in [
-        "expertise/return-window",
-        "expertise/shipping-insurance",
-        "expertise/crossborder-returns",
-    ] {
+    assert_eq!(related[0], "expertise/crossborder-returns");
+    for page in ["expertise/return-window", "expertise/shipping-insurance"] {
         assert!(
             related.contains(&page.to_owned()),
             "{page} not shown: {related:?}"
@@ -224,11 +209,12 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     )
     .await;
     assert_eq!(r["version"], 3);
-    assert_eq!(llm.calls(Step::Outline).len(), 0, "no model call at all");
+    assert_eq!(llm.calls(Step::Read).len(), 0, "no model call at all");
     assert_eq!(llm.calls(Step::Plan).len(), 0);
     assert_eq!(r["pages_updated"], json!([]));
 
-    // Version 4 without the id: recognized from the wiki pages filed from it.
+    // Version 4 without the id: recognized from the wiki pages filed from it, and compared
+    // with version 3, whose ledger it kept from version 2.
     llm.clear();
     let (_, r) = file(
         &app,
@@ -240,6 +226,7 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     assert_eq!(r["document"], id.as_str());
     assert_eq!(r["version"], 4);
     assert_eq!(r["pages_updated"], json!(["expertise/crossborder-returns"]));
+    assert_eq!(llm.calls(Step::Read).len(), 1);
     let matched = &llm.calls(Step::Match)[0];
     assert_eq!(candidates(matched)[0], id);
     assert!(
@@ -248,8 +235,8 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     );
     // The candidates are shown as their pages, never their raw records: the manual's
     // detailed rules (细则) are in the records, not in any page.
-    let shown = matched.split("## Candidates").nth(1).unwrap();
-    assert!(!shown.contains("细则"), "never the raw records");
+    let shown_pages = matched.split("## Candidates").nth(1).unwrap();
+    assert!(!shown_pages.contains("细则"), "never the raw records");
 
     // A different document sharing words with it: the librarian says so, and it is new.
     let (_, r) = file(
@@ -333,42 +320,154 @@ async fn a_group_document_stays_in_its_group() {
     assert_eq!(llm.calls(Step::Match).len(), 0);
 }
 
-/// A document is read whole and divided by meaning, not size: the outline's concepts may
-/// span sections, each concept gets one call with the whole document, and later concepts see
-/// the pages earlier ones wrote. A new version files only the concepts its changes touch.
+/// A heading-less text of rules, each a paragraph that opens with its name in 【】 and is
+/// longer than a small read window.
+fn rules_text(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|n| format!("【{n}】{n}规定如下。\n{}", filler(n, 20)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn rule_name(line: &str) -> (String, String) {
+    let name = line
+        .trim_start_matches('【')
+        .split('】')
+        .next()
+        .unwrap()
+        .to_owned();
+    let n = match name.as_str() {
+        "甲" => 1,
+        "乙" => 2,
+        "丙" => 3,
+        _ => 4,
+    };
+    (name, format!("rule-{n}"))
+}
+
+/// Code never interprets a document's structure: the model reads from the cursor and says
+/// where each concept ends. A concept longer than the window is shown with more text from the
+/// same line; an end line outside what was shown is sent back with the reason; every line is
+/// read once, in order; the main thread and the ledger travel with every read and write; and
+/// each page cites the lines it was written from, which `/read` returns.
 #[tokio::test]
-async fn documents_are_filed_one_concept_at_a_time() {
-    let llm = FakeLlm::new(|step, msg, _| match step {
-        Step::Outline if msg.contains("What changed since version") => json!({ "concepts": [
-            concept("乙", "expertise/concept-2", &["二", "四"], "四 changed")
-        ]})
-        .to_string(),
-        Step::Outline => json!({ "concepts": [
-            concept("甲", "expertise/concept-1", &["一"], "write it"),
-            // One concept explained in two sections apart.
-            concept("乙", "expertise/concept-2", &["二", "四"], "write it"),
-            concept("丙", "expertise/concept-3", &["三"], "write it"),
-        ]})
-        .to_string(),
+async fn documents_are_read_one_concept_at_a_time() {
+    let llm = FakeLlm::new(|step, msg, n| match step {
+        // The very first answer ends outside the text shown.
+        Step::Read if n == 0 => read_reply("skip", 9_999, None, None, None),
+        Step::Read => reader(
+            msg,
+            |l| l.starts_with('【'),
+            rule_name,
+            (cursor_of(msg) == 1).then_some("大手册：四条规定，适用于全体商家。"),
+        ),
+        Step::Plan => {
+            let rec = record_of(msg);
+            let title = focus_title(msg).unwrap();
+            let page = format!("{}/{}", folder(msg), rule_name(&format!("【{title}】")).1);
+            let body = format!(
+                "# {title}\n\n{}规定的概括。",
+                rec["concept"].as_str().unwrap()
+            );
+            json!({ "edits": [create(&page, &title, "一条规定。", &[], &body)] }).to_string()
+        }
+        Step::Verify => all_ok(msg),
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => NOT_THE_SAME.into(),
+    });
+    let app = TestApp::with_llm_and_config(llm.llm(), "[librarian]\nread_window_tokens = 600\n");
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let text = rules_text(&["甲", "乙", "丙", "丁"]);
+    let (_, r) = file(&app, c, json!({ "title": "大手册", "content": text })).await;
+    assert_eq!(r["pages_created"].as_array().unwrap().len(), 4, "{r}");
+
+    let reads = llm.calls(Step::Read);
+    assert!(
+        reads[1].contains("## Why the last answer was rejected")
+            && reads[1].contains("end_line 9999 is not one of the lines shown"),
+        "{}",
+        reads[1]
+    );
+    // Each concept (21 lines) is longer than the window: the same line is shown again with
+    // more text, until the next concept's start is in sight.
+    let cursors: Vec<usize> = reads.iter().map(|m| cursor_of(m)).collect();
+    let mut starts = cursors.clone();
+    starts.dedup();
+    assert_eq!(starts, vec![1, 22, 43, 64], "every line once, in order");
+    assert!(
+        cursors.len() > starts.len() + 1,
+        "windows grew: {cursors:?}"
+    );
+    let grown: Vec<usize> = reads
+        .iter()
+        .filter(|m| cursor_of(m) == 22)
+        .map(|m| shown(m).0.len())
+        .collect();
+    assert!(grown.windows(2).all(|w| w[1] > w[0]), "{grown:?}");
+
+    // The main thread from the opening, and the ledger, travel with every later read and write.
+    let last = reads.last().unwrap();
+    assert!(last.contains("大手册：四条规定"));
+    assert!(
+        last.contains("- L1-21: 甲 → [[expertise/rule-1]]"),
+        "{last}"
+    );
+    let plans = llm.calls(Step::Plan);
+    assert_eq!(plans.len(), 4);
+    assert!(plans[3].contains("Main thread: 大手册：四条规定"));
+    assert!(plans[3].contains("- L43-63: 丙 → [[expertise/rule-3]]"));
+    assert_eq!(record_of(&plans[1])["lines"], "22-42");
+
+    // Pages cite their lines, and /read returns exactly those lines.
+    let source = r["source"].as_str().unwrap();
+    let (_, page) = app.get(c, "/pages/expertise/rule-2").await;
+    let cited = format!("{}#L22-42", source.strip_prefix("sources/").unwrap());
+    assert_eq!(page["front_matter"]["sources"], json!([cited]));
+    let (_, read) = app
+        .post(c, "/read", json!({ "ids": [format!("sources/{cited}")] }))
+        .await;
+    let lines = read["pages"][0]["text"].as_str().unwrap();
+    assert!(lines.starts_with("【乙】乙规定如下。"), "{lines}");
+    assert_eq!(lines.lines().count(), 21);
+    assert!(!lines.contains("丙"));
+    // Only what a page cites: not the whole record, nor other lines of it.
+    let record = source.strip_prefix("sources/").unwrap();
+    for other in [
+        format!("sources/{record}"),
+        format!("sources/{record}#L1-84"),
+    ] {
+        // Not even with a cited id in the same request.
+        let ids = json!([format!("sources/{cited}"), other]);
+        let (_, read) = app.post(c, "/read", json!({ "ids": ids })).await;
+        assert!(read["pages"][0]["text"].is_string(), "{read}");
+        assert_eq!(read["pages"][1]["error"], "not_found", "{read}");
+    }
+    // Hits list the cited lines, ready for /read.
+    let (_, hits) = app.post(c, "/search", json!({ "query": "一条规定" })).await;
+    let cites = hits["knowledge"]["hits"][0]["sources"].to_string();
+    assert!(cites.contains("#L"), "{hits}");
+}
+
+/// A reading that stops half way (here the model is unreachable while the third concept is
+/// filed) is resumed by the next upload of the same text: the concepts already filed are not
+/// read or written again, and the version is recorded under the first upload's record.
+#[tokio::test]
+async fn a_stopped_reading_resumes_where_it_stopped() {
+    let down = Arc::new(AtomicBool::new(true));
+    let flag = down.clone();
+    let llm = FakeLlm::new(move |step, msg, _| match step {
+        Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
         Step::Plan => {
             let title = focus_title(msg).unwrap();
-            let n = match title.as_str() {
-                "甲" => 1,
-                "乙" => 2,
-                _ => 3,
-            };
-            let page = format!("{}/concept-{n}", folder(msg));
-            let edit = if related_pages(msg).contains(&page) {
-                let rec = record_of(msg);
-                update(
-                    &page,
-                    Some("最新"),
-                    Some(rec["content"].as_str().unwrap().lines().last().unwrap()),
-                )
-            } else {
-                create(&page, &title, "一个概念。", &[], "# 概念\n\n内容。")
-            };
-            json!({ "edits": [edit] }).to_string()
+            if title == "丙" && flag.swap(false, Ordering::SeqCst) {
+                return UNREACHABLE.into();
+            }
+            let page = format!("{}/{}", folder(msg), rule_name(&format!("【{title}】")).1);
+            json!({ "edits": [create(&page, &title, "一条规定。", &[], "# 规定\n\n概括。")] })
+                .to_string()
         }
         Step::Verify => all_ok(msg),
         Step::Describe => describe_from_definition(msg),
@@ -378,61 +477,110 @@ async fn documents_are_filed_one_concept_at_a_time() {
     let app = TestApp::with_llm(llm.llm());
     let key = app.create_tenant("acme").await;
     let c = Caller::new(&key);
-    let doc = |last: &str| {
-        format!(
-            "# 大手册\n\n## 一\n\n{}\n\n## 二\n\n{}\n\n## 三\n\n{}\n\n## 四\n\n{last}\n",
-            filler("第一节", 200),
-            filler("第二节", 200),
-            filler("第三节", 200)
-        )
-    };
-    let (_, r) = file(
-        &app,
-        c,
-        json!({ "title": "大手册", "content": doc("旧规定。") }),
-    )
-    .await;
-    assert_eq!(llm.calls(Step::Outline).len(), 1);
-    let plans = llm.calls(Step::Plan);
-    assert_eq!(plans.len(), 3, "one call per concept");
-    assert_eq!(focus_title(&plans[1]).as_deref(), Some("乙"));
-    assert!(plans[1].contains("in the document: 二; 四"));
-    for plan in &plans {
-        assert!(
-            record_of(plan)["content"]
-                .as_str()
-                .unwrap()
-                .contains("旧规定。")
-        );
-        assert!(
-            plan.contains("1. 甲 → [[expertise/concept-1]]")
-                && plan.contains("3. 丙 → [[expertise/concept-3]]"),
-            "the outline, with each concept's page id, is shown"
-        );
+    let body = json!({ "title": "规定", "content": rules_text(&["甲", "乙", "丙", "丁"]) });
+
+    let (_, queued) = app.post(c, "/ingest/expertise", body.clone()).await;
+    let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert!(!down.load(Ordering::SeqCst));
+    for (page, there) in [("rule-1", true), ("rule-2", true), ("rule-3", false)] {
+        let (status, _) = app.get(c, &format!("/pages/expertise/{page}")).await;
+        assert_eq!(status == StatusCode::OK, there, "{page}");
     }
-    assert!(
-        related_pages(&plans[1]).contains(&"expertise/concept-1".to_owned()),
-        "a later concept sees what an earlier one wrote"
-    );
-    assert_eq!(r["pages_created"].as_array().unwrap().len(), 3, "{r}");
-    let id = r["document"].as_str().unwrap().to_owned();
 
     llm.clear();
-    let (_, r) = file(
-        &app,
-        c,
-        json!({ "title": "大手册", "content": doc("新规定。"), "document": id }),
-    )
-    .await;
-    let outline = &llm.calls(Step::Outline)[0];
-    assert!(outline.contains("+ 新规定。") && outline.contains("- 旧规定。"));
-    assert!(outline.contains("Pages filed from its earlier versions"));
-    let plans = llm.calls(Step::Plan);
-    assert_eq!(plans.len(), 1, "only the concept the change touches");
+    let (queued_again, r) = file(&app, c, body).await;
+    let reads = llm.calls(Step::Read);
+    assert_eq!(cursor_of(&reads[0]), 43, "from the third concept on");
+    let titles: Vec<String> = llm
+        .calls(Step::Plan)
+        .iter()
+        .filter_map(|m| focus_title(m))
+        .collect();
+    assert_eq!(titles, vec!["丙", "丁"]);
+    assert_eq!(r["version"], 1);
+    assert_eq!(r["document_match"], "new");
     assert_eq!(
-        related_pages(&plans[0]).first().map(String::as_str),
-        Some("expertise/concept-2"),
-        "the page the outline names comes first"
+        r["pages_created"],
+        json!(["expertise/rule-3", "expertise/rule-4"])
     );
-    assert_eq!(r["pages_updated"], json!(["expertise/concept-2"]), "{r}");
+    assert_ne!(queued["job"], queued_again["job"], "a second job");
+    // All four pages cite the first upload's record, which is the version filed.
+    let source = r["source"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("sources/")
+        .unwrap();
+    for (page, lines) in [("rule-1", "1-21"), ("rule-4", "64-84")] {
+        let (_, p) = app.get(c, &format!("/pages/expertise/{page}")).await;
+        assert_eq!(
+            p["front_matter"]["sources"],
+            json!([format!("{source}#L{lines}")])
+        );
+    }
+}
+
+/// An edit linking to a page whose creation the verifier holds is held with it, not written
+/// with a link to nothing; approved, both are written, citing the concept's lines.
+#[tokio::test]
+async fn edits_linking_to_a_held_page_are_held_with_it() {
+    let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
+        Step::Plan => {
+            let b = create(
+                "expertise/rule-b",
+                "乙",
+                "一条规定。",
+                &[],
+                "# 乙\n\n概括。",
+            );
+            let a_body = "# 甲\n\n见 [[expertise/rule-b]]。";
+            let a = create("expertise/rule-a", "甲", "一条规定。", &[], a_body);
+            let more = update("expertise/rule-b", Some("补充"), Some("一条补充。"));
+            json!({ "edits": [b, a, more] }).to_string()
+        }
+        Step::Verify => {
+            // Only the creation of rule-b is objected to.
+            let v: Vec<Value> = common::llm::asked_edits(msg)
+                .into_iter()
+                .map(|i| {
+                    let reason = (i == 0).then_some("unsupported");
+                    json!({ "edit": i, "ok": i != 0, "reason": reason })
+                })
+                .collect();
+            json!({ "verdicts": v }).to_string()
+        }
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => NOT_THE_SAME.into(),
+    });
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let body = json!({ "title": "规定", "content": rules_text(&["甲"]) });
+    let (_, r) = file(&app, c, body).await;
+    assert_eq!(r["pages_created"], json!([]), "{r}");
+    let (_, list) = app.get(c, "/proposals").await;
+    let edits = &list["proposals"][0]["edits"];
+    assert_eq!(edits.as_array().unwrap().len(), 3, "{list}");
+    for i in [1, 2] {
+        let reason = edits[i]["reason"].as_str().unwrap();
+        assert!(reason.contains("held for review"), "{reason}");
+    }
+    let record = r["source"].as_str().unwrap();
+    let cited = format!("{}#L1-21", record.strip_prefix("sources/").unwrap());
+    // One proposal per concept, citing its lines.
+    assert_eq!(list["proposals"][0]["source"], cited.as_str());
+
+    let proposal = list["proposals"][0]["proposal"].as_str().unwrap();
+    let (status, body) = app
+        .post_admin(&format!("/proposals/{proposal}/approve"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for page in ["rule-a", "rule-b"] {
+        let (_, p) = app.get(c, &format!("/pages/expertise/{page}")).await;
+        assert_eq!(p["front_matter"]["sources"], json!([cited]));
+    }
+    let (_, b) = app.get(c, "/pages/expertise/rule-b").await;
+    assert!(b["body"].as_str().unwrap().contains("一条补充。"));
 }

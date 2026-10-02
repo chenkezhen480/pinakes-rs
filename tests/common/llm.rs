@@ -19,8 +19,8 @@ pub enum Step {
     VerifyDescribe,
     /// Recognizing which earlier document an upload is.
     Match,
-    /// Outlining a document's concepts.
-    Outline,
+    /// Reading a document from the cursor to the end of one concept.
+    Read,
 }
 
 type Reply = dyn Fn(Step, &str, usize) -> String + Send + Sync;
@@ -72,7 +72,7 @@ impl LlmClient for FakeLlm {
             s if s == prompts::DESCRIBE => Step::Describe,
             s if s == prompts::VERIFY_DESCRIBE => Step::VerifyDescribe,
             s if s == prompts::MATCH => Step::Match,
-            s if s == prompts::OUTLINE => Step::Outline,
+            s if s == prompts::READ => Step::Read,
             _ => anyhow::bail!("unknown prompt"),
         };
         let n = {
@@ -314,14 +314,103 @@ pub fn describer() -> Arc<FakeLlm> {
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => OK.into(),
         Step::Match => NOT_THE_SAME.into(),
-        Step::Outline => r#"{"concepts": []}"#.into(),
+        Step::Read => skip_to_end(msg),
     })
 }
 
-/// An outline concept with every field.
-pub fn concept(title: &str, page: &str, sections: &[&str], change: &str) -> serde_json::Value {
-    serde_json::json!({ "title": title, "page": page, "keywords": [title],
-                        "sections": sections, "change": change })
+/// The numbered lines a read message shows, and whether they reach the end of the document.
+pub fn shown(msg: &str) -> (Vec<(usize, String)>, bool) {
+    let block = msg
+        .split("## Text from line")
+        .nth(1)
+        .and_then(|s| s.split("```text\n").nth(1))
+        .and_then(|s| s.split("```").next())
+        .expect("the text shown");
+    let lines = block
+        .lines()
+        .map(|l| {
+            let (n, text) = l.split_once("| ").unwrap_or((l.trim_end_matches('|'), ""));
+            (n.parse().unwrap(), text.to_owned())
+        })
+        .collect();
+    (lines, msg.contains("this is the end of the document"))
+}
+
+/// The line a read message starts at.
+pub fn cursor_of(msg: &str) -> usize {
+    shown(msg).0[0].0
+}
+
+/// A read message's value after `label` (such as `Title: `), to the end of that line.
+pub fn line_after<'a>(msg: &'a str, label: &str) -> &'a str {
+    msg.split(label)
+        .nth(1)
+        .and_then(|s| s.lines().next())
+        .unwrap_or("")
+}
+
+/// The folder a read message says new pages go in.
+pub fn read_folder(msg: &str) -> String {
+    msg.split("New pages of this document are in `")
+        .nth(1)
+        .and_then(|s| s.split("/`").next())
+        .unwrap()
+        .to_owned()
+}
+
+/// A read reply.
+pub fn read_reply(
+    action: &str,
+    end: usize,
+    title: Option<&str>,
+    page: Option<&str>,
+    thread: Option<&str>,
+) -> String {
+    json!({ "action": action, "end_line": end, "title": title, "page": page,
+            "keywords": title.into_iter().collect::<Vec<_>>(), "thread": thread })
+    .to_string()
+}
+
+/// A reader that skips everything it is shown, as a model that finds nothing to file would.
+pub fn skip_to_end(msg: &str) -> String {
+    let (lines, end) = shown(msg);
+    if end {
+        read_reply("skip", lines.last().unwrap().0, None, None, None)
+    } else {
+        read_reply("more", 0, None, None, None)
+    }
+}
+
+/// A reader that takes each concept to start at a line `starts` says, and to run to the line
+/// before the next one: one concept per read, `more` when the next start isn't shown yet.
+/// Lines before the first start are skipped. `name` gives a concept's title and page name from
+/// its first line.
+pub fn reader(
+    msg: &str,
+    starts: impl Fn(&str) -> bool,
+    name: impl Fn(&str) -> (String, String),
+    thread: Option<&str>,
+) -> String {
+    let (lines, at_end) = shown(msg);
+    let first = &lines[0];
+    let next = lines[1..]
+        .iter()
+        .position(|(_, l)| starts(l))
+        .map(|i| lines[i].0);
+    if !starts(&first.1) {
+        let Some(before) = lines.iter().position(|(_, l)| starts(l)) else {
+            return skip_to_end(msg);
+        };
+        return read_reply("skip", lines[before - 1].0, None, None, thread);
+    }
+    let end = match next {
+        Some(end) => end,
+        None if at_end => lines.last().unwrap().0,
+        None => return read_reply("more", 0, None, None, None),
+    };
+    let (title, page) = name(&first.1);
+    let page = format!("{}/{page}", read_folder(msg));
+    read_reply("concept", end, Some(&title), Some(&page), thread)
 }
 
 /// The concept a plan message's "This call" is about.

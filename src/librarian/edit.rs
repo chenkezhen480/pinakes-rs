@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::kinds::{AudienceLevel, Kind};
-use crate::search::catalog::{Fence, heading_of};
+use crate::search::catalog::{Fence, heading_of, links};
 use crate::search::text::normalize;
 use crate::wiki::{Audience, FrontMatter, Page, PagePath, WikiError, WikiFs};
 
@@ -177,6 +177,10 @@ pub struct Rules<'a> {
     pub today: &'a str,
     pub source: Option<&'a str>,
     pub anchor: &'a AnchorCheck<'a>,
+    /// Whether links an edit adds must lead to pages that exist: for the librarian's plans,
+    /// which file a document one concept at a time and would otherwise link ahead under ids
+    /// guessed before those pages are written. A person's hand edit isn't held to it.
+    pub links: bool,
 }
 
 /// Pages as a plan changes them, over the wiki as it stands. Each edit applies whole or not
@@ -243,6 +247,10 @@ impl<'a> Draft<'a> {
         if current.is_none() && matches!(edit, Edit::Create { .. } | Edit::Replace { .. }) {
             created.insert(path.clone());
         }
+        let linked_before: HashSet<String> = current
+            .as_ref()
+            .map(|c| links(&c.body).into_iter().collect())
+            .unwrap_or_default();
         let result = match edit {
             Edit::Create {
                 title,
@@ -310,6 +318,21 @@ impl<'a> Draft<'a> {
             Ok(p) => p,
             Err(e) => return Ok(Err(e)),
         };
+        // Links the edit adds must lead somewhere every reader of the page can go: a link to
+        // a page a later step might write (under a name guessed now) would dangle.
+        for link in links(&page.body).into_iter().filter(|_| r.links) {
+            if link == path.as_str() || linked_before.contains(&link) {
+                continue;
+            }
+            // A link names what an anchor may: a page id, `schema:type` or
+            // `space:type/key`, by the same rule.
+            if let Err(e) = (r.anchor)(&link, &path, &created) {
+                return Ok(Err(format!(
+                    "link [[{link}]]: {e}; link only to pages that exist (the related pages, \
+                     the ledger's pages, or one an earlier edit of this plan creates)"
+                )));
+            }
+        }
         let was_new = created.contains(&path);
         self.created = created;
         if !self.order.contains(&path) {
@@ -704,6 +727,7 @@ mod tests {
             today: "2026-10-01",
             source: Some("2026-10-01-experience-0a1b2c3d.json"),
             anchor: &anchors_ok,
+            links: true,
         }
     }
 
@@ -885,6 +909,71 @@ mod tests {
         assert!(page.body.contains(
             "~~The rate is 13%.~~ (superseded 2026-10-01: new law) The rate is 9% from 2026-10-01."
         ));
+    }
+
+    #[test]
+    fn links_must_lead_to_pages_that_exist() {
+        assert_eq!(
+            links(
+                "See [[expertise/a]] and [[expertise/b|B]], [[expertise/a#x]].\n```\n[[no]]\n```\n"
+            ),
+            vec!["expertise/a", "expertise/b"]
+        );
+        let (_d, wiki) = wiki();
+        let target = Target::new(Kind::Expertise, PageAudience::Tenant).unwrap();
+        let exists = |a: &str, _: &PagePath, created: &HashSet<PagePath>| {
+            if a == "expertise/known" || created.iter().any(|p| p.as_str() == a) {
+                Ok(())
+            } else {
+                Err("no such page".to_owned())
+            }
+        };
+        let r = Rules {
+            target: &target,
+            today: "2026-10-01",
+            source: None,
+            anchor: &exists,
+            links: true,
+        };
+        let page = |name: &str, body: &str| Edit::Create {
+            page: format!("expertise/{name}"),
+            title: "T".into(),
+            summary: "S.".into(),
+            aliases: vec![],
+            keywords: vec![],
+            about: vec![],
+            body: body.into(),
+        };
+        let mut draft = Draft::new(&wiki);
+        let guessed = draft
+            .apply(&page("a", "See [[expertise/later]]."), &r)
+            .unwrap()
+            .unwrap_err();
+        assert!(guessed.contains("[[expertise/later]]"), "{guessed}");
+        assert!(
+            draft
+                .apply(&page("a", "See [[a title]]."), &r)
+                .unwrap()
+                .is_err()
+        );
+        draft
+            .apply(
+                &page("a", "See [[expertise/known]] and [[expertise/a]]."),
+                &r,
+            )
+            .unwrap()
+            .unwrap();
+        // A page this plan creates can be linked.
+        draft
+            .apply(&page("b", "After [[expertise/a]]."), &r)
+            .unwrap()
+            .unwrap();
+        // A person's edit isn't held to it.
+        let hand = Rules { links: false, ..r };
+        draft
+            .apply(&page("c", "See [[a title]]."), &hand)
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

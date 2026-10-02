@@ -332,20 +332,27 @@ pub fn heading_of(line: &str) -> Option<(usize, &str)> {
     Some((level, rest.trim().trim_end_matches('#').trim()))
 }
 
-/// `[[link]]` targets in a Markdown body, in order, without duplicates.
+/// `[[link]]` targets in a Markdown body (`[[page]]`, `[[page|text]]`, `[[page#heading]]`), in
+/// order, without duplicates; links in code blocks don't count.
 pub fn links(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(start) = rest.find("[[") {
-        let after = &rest[start + 2..];
-        let Some(end) = after.find("]]") else {
-            break;
-        };
-        let target = after[..end].split('|').next().unwrap_or("").trim();
-        if !target.is_empty() && !out.iter().any(|t| t == target) {
-            out.push(target.to_owned());
+    let mut out: Vec<String> = Vec::new();
+    let mut fence = Fence::default();
+    for line in body.lines() {
+        if fence.step(line.trim()) {
+            continue;
         }
-        rest = &after[end + 2..];
+        let mut rest = line;
+        while let Some(start) = rest.find("[[") {
+            let after = &rest[start + 2..];
+            let Some(end) = after.find("]]") else {
+                break;
+            };
+            let target = after[..end].split(['|', '#']).next().unwrap_or("").trim();
+            if !target.is_empty() && !out.iter().any(|t| t == target) {
+                out.push(target.to_owned());
+            }
+            rest = &after[end + 2..];
+        }
     }
     out
 }

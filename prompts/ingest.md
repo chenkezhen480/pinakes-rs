@@ -39,8 +39,14 @@ How edits work:
 - `supersede` marks a claim as replaced without deleting it. `claim` must be copied exactly from
   the page.
 - Link to other pages with `[[<page id>]]`, such as `[[expertise/refund-regulations]]`,
-  using ids from the related pages, the allowed anchors or the document's outline; never link
-  by title.
+  using ids from the related pages, the allowed anchors or the document's ledger; never link
+  by title. Link only to pages that exist, or that an earlier edit of this plan creates: never
+  to a page you expect a later step to write, since its id isn't known yet. A later concept links back to
+  this one instead.
+- For a document, you file one concept, read from the lines given: write the librarian's
+  condensed account of them, never a copy. Say what the concept is, its rules, conditions,
+  steps and exceptions, in the document's terms (its main thread says what they mean), and
+  keep numbers, deadlines, amounts and conditions exactly as the lines have them.
 - `summary` is 1–3 sentences. `aliases` and `keywords` are short terms in English and Chinese.
 - `about` anchors: only the anchors listed as allowed. Memory pages (experience, decisions,
   preferences) need at least one.

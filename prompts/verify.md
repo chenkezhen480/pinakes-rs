@@ -10,11 +10,15 @@ An edit passes only if:
    rule: no duplicate page when an existing page covers the topic, no overwritten history where
    the rules forbid it.
 
-A document is filed one concept at a time, as its outline (shown under "This document")
-lists: links to the pages the outline names are expected, even before those pages exist.
+A document is read and filed one concept at a time (shown under "This document": its main
+thread and the ledger of concepts read so far, each with its page). Links to the ledger's pages
+are expected. A document's page is a condensed account of the lines given: it must not copy
+them wholesale, and its numbers, deadlines, amounts and conditions must match them exactly.
 
-Judge each edit on its own. Be strict about unsupported claims and wrong anchors, not about
-wording or style.
+Judge each edit as part of its plan: the edits are applied together, in order, so an edit
+that is right once the plan's other edits are applied passes (a summary changed by one edit
+and the claim it summarizes superseded by another agree). Be strict about unsupported claims
+and wrong anchors, not about wording or style.
 
 Reply with one JSON object of this shape (the reply format is enforced):
 
