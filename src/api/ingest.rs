@@ -40,7 +40,6 @@ pub async fn schema(
 ) -> Result<Json<SchemaResponse>, ApiError> {
     let Json(def) = body?;
     def.validate().map_err(ApiError::BadRequest)?;
-    let librarian = app.librarian()?;
     let tenant = scope.tenant();
     // The librarian is called without the graph writer lock, which would hold back every
     // graph write of the tenant for as long as the model takes; under the lock the schema is
@@ -62,6 +61,16 @@ pub async fn schema(
         .await
         .map_err(anyhow::Error::from)??
     };
+    // The same definition again, already described: nothing to do, and no model call, so a
+    // host can send its schemas at every start.
+    if !created && before_described.as_ref() == Some(&stored) && current.is_some() {
+        return Ok(Json(SchemaResponse {
+            page: path.to_string(),
+            schema: stored.schema,
+            created: false,
+        }));
+    }
+    let librarian = app.librarian()?;
     let page = librarian
         .describe(&tenant.dir, &stored, current.as_ref())
         .await

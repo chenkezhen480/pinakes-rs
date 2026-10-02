@@ -614,6 +614,12 @@ async fn schema_descriptions_come_from_the_librarian() {
     assert_eq!(resp["knowledge"]["hits"][0]["page"], "graph/work", "{resp}");
     let (_, index) = app.get(c, "/pages/index").await;
     assert!(index["body"].as_str().unwrap().contains("[[graph/work]]"));
+    // Sent again unchanged, as a host does at every start: no model call.
+    let describes = llm.calls(Step::Describe).len();
+    let (status, resp) = app.post(c, "/ingest/graph/schema", schema("work")).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(resp["created"], false);
+    assert_eq!(llm.calls(Step::Describe).len(), describes);
 
     // Rejected twice, or the model unreachable: nothing is stored.
     for (name, want) in [
@@ -701,7 +707,13 @@ async fn hand_edits_are_verified() {
         .put(
             wang,
             uri,
-            json!({ "version": page["version"], "front_matter": front, "body": body }),
+            // GET's answer sent back as it is, edited.
+            {
+                let mut sent = page.clone();
+                sent["front_matter"] = front.clone();
+                sent["body"] = json!(body);
+                sent
+            },
         )
         .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{resp}");

@@ -612,6 +612,17 @@ fn replace(
         }
         (None, Some(_)) => return Err(format!("{path} no longer exists")),
     }
+    // A hand edit is held to the decision rule too: past entries stay as they are.
+    if r.target.kind == Kind::Decision
+        && let Some(c) = &current
+        && !body.trim_end().starts_with(c.body.trim_end())
+    {
+        return Err(
+            "decision pages never overwrite past entries: keep the page as it is and add new \
+             sections after it"
+                .into(),
+        );
+    }
     let mut page = Page::new(path.clone());
     page.front = front.clone();
     page.body = body.to_owned();
@@ -871,6 +882,20 @@ mod tests {
         };
         let applied = draft.apply(&append, &r).unwrap().unwrap();
         assert!(!applied.created);
+        // A hand edit too: it may add after the page, never change what is there.
+        let mut front = page.front.clone();
+        front.summary = Some("Refund decisions.".into());
+        let hand = |body: &str| Edit::Replace {
+            page: path.to_string(),
+            base: Some(page.version()),
+            front_matter: front.clone(),
+            body: body.into(),
+        };
+        let mut fresh = Draft::new(&wiki);
+        let rewrite = hand("# Refunds\n\n## 2026-09-01: refund shipping\n\nNo.\n");
+        assert!(fresh.apply(&rewrite, &r).unwrap().is_err());
+        let added = format!("{}\n## 2026-10-02: note\n\nAdded.\n", page.body);
+        fresh.apply(&hand(&added), &r).unwrap().unwrap();
         let (page, _) = draft.into_pages().pop().unwrap();
         assert!(
             page.body

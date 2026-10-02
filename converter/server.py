@@ -57,16 +57,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/convert":
             return self.reply(404, {"error": "not found"})
         # The body is read before any answer: closing on an unread body resets the connection,
-        # and the caller would see that instead of the answer. (The service caps uploads.)
+        # and the caller would see that instead of the answer. One too large is read and dropped
+        # in pieces, never held.
         length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_BYTES:
+            left = length
+            while left > 0:
+                chunk = self.rfile.read(min(left, 1 << 20))
+                if not chunk:
+                    break
+                left -= len(chunk)
+            return self.reply(413, {"error": f"the file is larger than {MAX_BYTES} bytes"})
         data = self.rfile.read(length) if length > 0 else b""
         ext = self.headers.get("X-File-Extension", "").strip().lower().lstrip(".")
         if ext not in FORMATS:
             return self.reply(415, {"error": f"unsupported format: {ext or 'none given'}"})
         if not data:
             return self.reply(400, {"error": "the body is the file, and it is empty"})
-        if length > MAX_BYTES:
-            return self.reply(413, {"error": f"the file is larger than {MAX_BYTES} bytes"})
         # One request at a time (HTTPServer is single-threaded), so the alarm is this one's.
         signal.alarm(TIMEOUT_SECS)
         try:

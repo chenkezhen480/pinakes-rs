@@ -93,6 +93,12 @@ pub struct PutPage {
     /// The `version` `GET` returned; none (or absent) for a new page.
     #[serde(default)]
     pub version: Option<String>,
+    /// What `GET` also returns, so its answer can be sent back as it is; ignored (the path
+    /// says which page, and code writes `kind`).
+    #[serde(default, rename = "page")]
+    pub _page: Option<serde_json::Value>,
+    #[serde(default, rename = "kind")]
+    pub _kind: Option<serde_json::Value>,
     pub front_matter: FrontMatter,
     pub body: String,
 }
