@@ -31,6 +31,10 @@ present, and a field you don't use is `null` or `[]`):
 - `skip`: the lines from the first one shown to `end_line` aren't knowledge (a table of
   contents, a revision history, legal boilerplate, greetings, blank space). `title` and `page`
   are `null`.
+- In a new version, the lines shown are read again because they changed: they are the same
+  kind of text the earlier version's reading says they were. A concept there is a concept here
+  (filed again, as the page that reading names, so the change reaches it), never a `skip`
+  because it was filed before.
 - `more`: the first concept doesn't end within the lines shown; you will be shown more from the
   same line. Only when the text shown doesn't reach the end of the document.
 - `end_line` is a line number shown, at or after the first one. Every line is either part of a

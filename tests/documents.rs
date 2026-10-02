@@ -70,7 +70,10 @@ fn librarian(answer: impl Fn(&str) -> String + Send + Sync + 'static) -> Arc<Fak
                     let p = page_of(&t).to_owned();
                     (t, p)
                 },
-                Some("售后规则手册：平台售后规则，面向客服。"),
+                // As a model writes it: what the document covers.
+                Some(
+                    "售后规则手册：平台售后规则，面向客服，含七天无理由退货、运费险和跨境商品退货。",
+                ),
             )
         }
         Step::Plan => {
@@ -213,8 +216,8 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     assert_eq!(llm.calls(Step::Plan).len(), 0);
     assert_eq!(r["pages_updated"], json!([]));
 
-    // Version 4 without the id: recognized from the wiki pages filed from it, and compared
-    // with version 3, whose ledger it kept from version 2.
+    // Version 4 without the id: recognized by what its first read says it is, against the wiki
+    // pages filed from earlier versions, and compared with version 3, whose ledger it kept.
     llm.clear();
     let (_, r) = file(
         &app,
@@ -226,7 +229,8 @@ async fn new_versions_find_the_pages_of_earlier_ones() {
     assert_eq!(r["document"], id.as_str());
     assert_eq!(r["version"], 4);
     assert_eq!(r["pages_updated"], json!(["expertise/crossborder-returns"]));
-    assert_eq!(llm.calls(Step::Read).len(), 1);
+    // The first read, which recognized it, and the changed step read again.
+    assert_eq!(llm.calls(Step::Read).len(), 2);
     let matched = &llm.calls(Step::Match)[0];
     assert_eq!(candidates(matched)[0], id);
     assert!(

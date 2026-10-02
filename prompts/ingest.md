@@ -47,6 +47,9 @@ How edits work:
   condensed account of them, never a copy. Say what the concept is, its rules, conditions,
   steps and exceptions, in the document's terms (its main thread says what they mean), and
   keep numbers, deadlines, amounts and conditions exactly as the lines have them.
+- Every line given must reach the wiki. If some of the lines belong to another concept (the
+  reading drew the line late), file them too, on that concept's page: one in the ledger, or a
+  new page. Never leave a rule out because it seems to belong elsewhere.
 - `summary` is 1–3 sentences. `aliases` and `keywords` are short terms in English and Chinese.
 - `about` anchors: only the anchors listed as allowed. Memory pages (experience, decisions,
   preferences) need at least one.

@@ -233,9 +233,10 @@ impl Changes {
         self.old_lines_touched(1, self.new_lines.len().max(1))
     }
 
-    /// The hunks of new lines `from..=to` as text (`-` removed, `+` added), at most `max`
-    /// characters; `None` when there are none.
-    pub fn within(&self, from: usize, to: usize, max: usize) -> Option<String> {
+    /// The hunks of new lines `from..=to` as text (`-` removed, `+` added), whole; `None` when
+    /// there are none. A step's lines are a window at most, so this is never the whole
+    /// document's changes.
+    pub fn within(&self, from: usize, to: usize) -> Option<String> {
         let mut out = String::new();
         for (o, n) in &self.hunks {
             if !Self::in_lines(n, from, to) {
@@ -249,15 +250,7 @@ impl Changes {
                 out.push_str(&format!("+ {l}\n"));
             }
         }
-        if out.is_empty() {
-            return None;
-        }
-        if out.chars().count() > max {
-            let mut cut: String = out.chars().take(max).collect();
-            cut.push_str("\n[… more changes left out]\n");
-            out = cut;
-        }
-        Some(out)
+        (!out.is_empty()).then_some(out)
     }
 }
 
@@ -271,33 +264,6 @@ pub fn valid_document_id(id: &str) -> bool {
             && h.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
-}
-
-/// Pieces of a text of at most `max` characters, split at line ends, for searching with:
-/// a whole document is too long to be one query. When there are more than `count`, that many
-/// are taken evenly across the text, so every part of it is searched.
-pub fn chunks(text: &str, max: usize, count: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for line in text.lines() {
-        let line: String = line.chars().take(max).collect();
-        if !cur.is_empty() && cur.chars().count() + line.chars().count() + 1 > max {
-            out.push(std::mem::take(&mut cur));
-        }
-        if !cur.is_empty() {
-            cur.push('\n');
-        }
-        cur.push_str(&line);
-    }
-    if !cur.trim().is_empty() {
-        out.push(cur);
-    }
-    out.retain(|c| !c.trim().is_empty());
-    if out.len() > count && count > 0 {
-        let n = out.len();
-        out = (0..count).map(|i| out[i * n / count].clone()).collect();
-    }
-    out
 }
 
 /// The text of a document in a raw expertise record (`content`), if it has one, as it was
@@ -321,26 +287,12 @@ mod tests {
     }
 
     #[test]
-    fn chunks_cover_the_whole_text() {
-        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
-        let c = chunks(&text, 50, 100);
-        assert!(c.iter().all(|c| c.chars().count() <= 50));
-        assert!(c[0].starts_with("line 0") && c.last().unwrap().ends_with("line 99"));
-        let few = chunks(&text, 50, 4);
-        assert_eq!(few.len(), 4);
-        assert!(
-            few[3].contains("line 7"),
-            "the last pick is near the end: {few:?}"
-        );
-    }
-
-    #[test]
     fn changes_between_versions() {
         let old = "## A\nkeep\n## B\nold rule\n## C\ngone\nstay\n";
         let new = "## A\nkeep\n## B\nnew rule\n## C\nstay\n";
         let c = Changes::new(old, new);
         assert!(!c.is_empty());
-        let all = c.within(1, 6, 1_000).unwrap();
+        let all = c.within(1, 6).unwrap();
         assert!(
             all.contains("- old rule") && all.contains("+ new rule"),
             "{all}"
@@ -353,9 +305,9 @@ mod tests {
         assert_eq!(c.old_line(6), Some(7));
         // Each hunk belongs to the lines it is in: the new rule to line 4, the removed
         // line to line 5, after which it was.
-        assert!(c.within(1, 3, 1_000).is_none());
-        assert!(c.within(4, 4, 1_000).unwrap().contains("+ new rule"));
-        assert!(c.within(5, 6, 1_000).unwrap().contains("- gone"));
+        assert!(c.within(1, 3).is_none());
+        assert!(c.within(4, 4).unwrap().contains("+ new rule"));
+        assert!(c.within(5, 6).unwrap().contains("- gone"));
         assert_eq!(c.old_lines_touched(4, 4), vec![4]);
         // The removed line, and the line before it, whose step sees the removal.
         assert_eq!(c.old_lines_touched(5, 6), vec![5, 6]);
@@ -363,14 +315,8 @@ mod tests {
         // Text added after an unchanged last line leaves that line unchanged.
         let more = Changes::new("a\nlast", "a\nlast\nadded\n");
         assert_eq!(more.old_line(2), Some(2));
-        assert_eq!(more.within(1, 2, 1_000), None);
+        assert_eq!(more.within(1, 2), None);
         assert!(Changes::new(new, new).is_empty());
-        let long = Changes::new("", &"x\n".repeat(1_000));
-        assert!(
-            long.within(1, 1_000, 50)
-                .unwrap()
-                .ends_with("[… more changes left out]\n")
-        );
     }
 
     #[test]

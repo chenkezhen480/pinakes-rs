@@ -22,7 +22,7 @@ use serde_json::json;
 
 use super::documents::{self, Changes, LedgerStep, Reading, ReadingState};
 use super::{
-    ATTEMPTS, CHANGES_CHARS, DocumentIn, DocumentMatch, Ingest, Librarian, MAX_QUERY_CHARS, Unit,
+    ATTEMPTS, Document, DocumentIn, DocumentMatch, Ingest, Librarian, Opening, Unit,
     apply_and_record, hold, nullable_string, object, page_id, parse_json, prompts, record_log,
     sources, strings,
 };
@@ -34,8 +34,6 @@ use crate::wiki::PagePath;
 
 /// The smallest read window, in tokens, whatever the config says.
 const MIN_WINDOW_TOKENS: usize = 500;
-/// Most queries the related-page search is given for one concept.
-const CONCEPT_QUERIES: usize = 3;
 /// How many times the read window may grow, at most, for one long concept: by default up to
 /// about 120,000 tokens, within today's models' context.
 const WINDOW_GROWTH: usize = 6;
@@ -116,14 +114,9 @@ impl Earlier {
 
     /// What changed in new lines `from..=to`, as a prompt section's text.
     fn changes_text(&self, from: usize, to: usize) -> Option<String> {
-        self.changes.within(from, to, CHANGES_CHARS).map(|c| {
-            format!(
-                "`-` removed, `+` added:
-
-```diff
-{c}```"
-            )
-        })
+        self.changes
+            .within(from, to)
+            .map(|c| format!("`-` removed, `+` added:\n\n```diff\n{c}```"))
     }
 
     /// The earlier step that can be kept as it is at new line `cursor`: one that starts there,
@@ -271,6 +264,8 @@ impl Librarian {
     ) -> anyhow::Result<()> {
         let target = &job.target;
         let hash = documents::content_hash(&d.content);
+        // The first read of an upload recognized by it, when it is new: the reading's first step.
+        let mut first: Option<Read> = None;
         let unfinished = tenant
             .store
             .reading_state(target.audience.key(), &hash)
@@ -283,16 +278,54 @@ impl Librarian {
                 s
             }
             None => {
-                let (found, how) = self.identify(tenant, target, reader, d).await?;
-                ReadingState {
+                let mut s = ReadingState {
                     source: job.source.clone(),
                     content_hash: hash,
-                    document: found,
-                    how,
-                    version: 0,
+                    document: Document {
+                        id: documents::new_document_id(),
+                        audience: target.audience.key().to_owned(),
+                        title: d.title.clone(),
+                    },
+                    how: DocumentMatch::New,
+                    version: 1,
                     cursor: 1,
                     reading: Reading::default(),
+                };
+                match &d.given {
+                    Some(given) => {
+                        s.document = Document {
+                            title: d.title.clone(),
+                            ..given.clone()
+                        };
+                        s.how = DocumentMatch::Given;
+                    }
+                    None => {
+                        // Read first: what the first read says the document is recognizes it,
+                        // never cut pieces of its text. For a new document that read is the
+                        // reading's first step.
+                        let lines: Vec<&str> = d.content.lines().collect();
+                        let read = self.read_step(target, &s, &lines, None).await?;
+                        let mut terms = Vec::new();
+                        if let Some(c) = &read.concept {
+                            terms.push(c.title.clone());
+                            terms.extend(c.keywords.iter().cloned());
+                        }
+                        let opening = Opening {
+                            thread: read.thread.clone().unwrap_or_default(),
+                            terms,
+                            text: lines[..read.end].join("\n"),
+                        };
+                        let new = s.document.clone();
+                        let (found, how) = self
+                            .identify(tenant, reader, &d.title, new, &opening)
+                            .await?;
+                        (s.document, s.how) = (found, how);
+                        if how == DocumentMatch::New {
+                            first = Some(read);
+                        }
+                    }
                 }
+                s
             }
         };
         let earlier_sources = match state.how {
@@ -345,9 +378,13 @@ impl Librarian {
                 state.reading.steps.push(kept);
                 continue;
             }
-            let read = self
-                .read_step(target, &state, &lines, earlier.as_ref())
-                .await?;
+            let read = match first.take() {
+                Some(read) => read,
+                None => {
+                    self.read_step(target, &state, &lines, earlier.as_ref())
+                        .await?
+                }
+            };
             if let Some(t) = read
                 .thread
                 .map(|t| t.trim().to_owned())
@@ -609,19 +646,18 @@ impl Librarian {
         let focus = format!(
             "File the concept \"{}\" (lines {from}-{to}) as `{}`: update that page if it \
              exists, create it if not. Write a condensed account of these lines, never a copy. \
-             The rest of the document is filed in steps of its own; link to the ledger's pages \
-             where this concept refers to them.",
+             Every line given must reach the wiki: if some of them belong to another concept, \
+             file them too, on that concept's page (one in the ledger, or a new one). The rest \
+             of the document is filed in steps of its own; link to the ledger's pages where this \
+             concept refers to them.",
             concept.title, concept.page
         );
         let mut keywords = vec![concept.title.clone()];
         keywords.extend(concept.keywords.iter().take(10).cloned());
         let unit = Unit {
             record,
-            queries: documents::chunks(
-                &format!("{}\n{text}", concept.title),
-                MAX_QUERY_CHARS,
-                CONCEPT_QUERIES,
-            ),
+            // Searched by what the read says the concept is, never by pieces of its text.
+            queries: vec![format!("{} {}", concept.title, concept.keywords.join(" "))],
             keywords,
             note: Some(note),
             focus: Some(focus),
@@ -774,7 +810,7 @@ mod tests {
         };
         let e = Earlier::new(1, old, new, Some(reading));
         assert!(e.kept_at(1).is_none(), "read again, to see the removal");
-        assert!(e.changes.within(1, 2, 1_000).unwrap().contains("- c"));
+        assert!(e.changes.within(1, 2).unwrap().contains("- c"));
         assert_eq!(e.pages_for(1, 2), vec!["expertise/one", "expertise/two"]);
         let kept = e.kept_at(3).unwrap();
         assert_eq!(

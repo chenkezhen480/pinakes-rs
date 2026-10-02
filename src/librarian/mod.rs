@@ -45,12 +45,6 @@ use edit::{Draft, Rules};
 
 /// Most characters of one related page shown to the librarian.
 const MAX_PAGE_CHARS: usize = 12_000;
-/// Most characters of one query the related-page search is given.
-const MAX_QUERY_CHARS: usize = 1_500;
-/// Most queries one unit's text is searched with (spread evenly over it).
-const MAX_QUERIES: usize = 10;
-/// Most characters of a new version's changes shown with one concept.
-const CHANGES_CHARS: usize = 20_000;
 /// Most pages of a document's versions shown with each concept.
 const MAX_DOC_PAGES: usize = 20;
 /// Tries for one step whose answer can't be used (a reply that can't be read, a plan refused,
@@ -60,7 +54,6 @@ const ATTEMPTS: usize = 4;
 const MATCH_CANDIDATES: usize = 3;
 const MATCH_PAGES: usize = 5;
 const MATCH_PAGE_CHARS: usize = 3_000;
-const MATCH_DOC_CHARS: usize = 6_000;
 
 /// What the librarian writes about one node or relation type.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +173,14 @@ pub struct DocumentIn {
     pub content: String,
 }
 
+/// What the first read of an upload says it is, to recognize it by: the main thread, the first
+/// concept's title and terms, and the lines that read took.
+struct Opening {
+    thread: String,
+    terms: Vec<String>,
+    text: String,
+}
+
 /// One plan's worth of content: a whole record, or one concept of a document with its lines.
 struct Unit {
     /// The record as the librarian is shown it; for a concept, its lines.
@@ -269,7 +270,7 @@ impl Librarian {
 
         let unit = Unit {
             record: serde_json::to_string_pretty(&job.record)?,
-            queries: documents::chunks(&job.query, MAX_QUERY_CHARS, MAX_QUERIES),
+            queries: vec![job.query.clone()],
             keywords: job.keywords.clone(),
             note: None,
             focus: None,
@@ -458,27 +459,19 @@ impl Librarian {
         Ok((pass, held))
     }
 
-    /// Which document a new upload is, when the caller didn't say: the documents whose pages
-    /// the upload's text finds (scores of a document's pages added up), the best three shown
-    /// to the model as the wiki pages filed from them, and the model says which one this is a
-    /// new version of, or none. Only documents of the same audience are candidates.
+    /// Which document a new upload is, when the caller didn't say, from what its first read
+    /// says it is (`opening`): the documents whose pages its title, main thread and first terms
+    /// find (scores of a document's pages added up), the best three shown to the model as the
+    /// wiki pages filed from them, and the model says which one this is a new version of, or
+    /// none (`new`). Only documents of the same audience are candidates.
     async fn identify(
         &self,
         tenant: &Arc<Tenant>,
-        target: &Target,
         reader: &Scope,
-        d: &DocumentIn,
+        title: &str,
+        new: Document,
+        opening: &Opening,
     ) -> anyhow::Result<(Document, DocumentMatch)> {
-        if let Some(given) = &d.given {
-            let mut doc = given.clone();
-            doc.title.clone_from(&d.title);
-            return Ok((doc, DocumentMatch::Given));
-        }
-        let new = Document {
-            id: documents::new_document_id(),
-            audience: target.audience.key().to_owned(),
-            title: d.title.clone(),
-        };
         let filed: Vec<(String, Document)> = tenant
             .store
             .documents_by_source()
@@ -492,19 +485,17 @@ impl Librarian {
         let doc_of: HashMap<&str, &Document> = filed.iter().map(|(s, d)| (s.as_str(), d)).collect();
         let snap = tenant.snapshot().await?;
         let graph = tenant.graph_or_empty().await;
-        let queries = documents::chunks(
-            &format!("{}\n{}", d.title, d.content),
-            MAX_QUERY_CHARS,
-            MAX_QUERIES,
-        );
-        let found = self.find(
-            &snap,
-            &graph,
-            reader,
-            &queries,
-            std::slice::from_ref(&d.title),
-            &[],
-        )?;
+        let queries: Vec<String> = [
+            title.to_owned(),
+            opening.thread.clone(),
+            opening.terms.join(" "),
+        ]
+        .into_iter()
+        .filter(|q| !q.trim().is_empty())
+        .collect();
+        let mut keywords = vec![title.to_owned()];
+        keywords.extend(opening.terms.iter().cloned());
+        let found = self.find(&snap, &graph, reader, &queries, &keywords, &[])?;
         let mut scores: HashMap<&str, f32> = HashMap::new();
         for (page, _, score) in &found.pages {
             let Some((_, entry)) = snap.catalog.get(page) else {
@@ -528,9 +519,9 @@ impl Librarian {
 
         // The candidates as the wiki shows them: the pages filed from each.
         let mut msg = format!(
-            "## New document\n\nTitle: {}\n\n```text\n{}\n```\n\n## Candidates\n\n",
-            d.title,
-            cut(&d.content, MATCH_DOC_CHARS)
+            "## New document\n\nTitle: {title}\n\nMain thread: {}\n\nIts opening, as first \
+             read:\n\n```text\n{}\n```\n\n## Candidates\n\n",
+            opening.thread, opening.text
         );
         let wiki = tenant.wiki();
         let mut ids = Vec::new();
@@ -602,7 +593,7 @@ impl Librarian {
                     .find(|(_, d)| d.id == id)
                     .map(|(_, d)| d.clone())
                     .context("a candidate")?;
-                doc.title.clone_from(&d.title);
+                doc.title = title.to_owned();
                 Ok((doc, DocumentMatch::Matched))
             }
             None => Ok((new, DocumentMatch::New)),
@@ -962,7 +953,7 @@ impl Librarian {
             _ => Default::default(),
         };
         let reader = reader_scope(&tenant, &target.audience, &writer);
-        let queries = documents::chunks(&format!("{title}\n{summary}"), MAX_QUERY_CHARS, 1);
+        let queries = vec![format!("{title}\n{summary}")];
         let mut related = self
             .related(&tenant, &target, &reader, &queries, &[], &[], &[], &[])
             .await?;
