@@ -3,14 +3,15 @@
 //! queues a librarian job on the tenant's write queue and answers 202 with the job id
 //! (design, "The librarian: how new content is filed").
 //!
-//! The caller picks the audience among those its credentials and the kind allow: `group`
-//! names one of the caller's own groups; otherwise experience and expertise are for the
+//! The caller picks the audience in the audience header (`X-Audience`), like its identity and
+//! never in the body: `tenant`, `user` (the calling user) or `group:<id>` (one of the caller's
+//! own groups), among those the kind allows. Without it, experience and expertise are for the
 //! tenant, and decisions and preferences for the calling user.
 
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -42,8 +43,6 @@ struct ExperienceIn {
     #[serde(default)]
     entities: Vec<String>,
     #[serde(default)]
-    group: Option<String>,
-    #[serde(default)]
     date: Option<String>,
 }
 
@@ -58,8 +57,6 @@ struct DecisionIn {
     outcome: Option<String>,
     #[serde(default)]
     entities: Vec<String>,
-    #[serde(default)]
-    group: Option<String>,
     #[serde(default)]
     date: Option<String>,
 }
@@ -78,8 +75,6 @@ struct ExpertiseIn {
     source_url: Option<String>,
     #[serde(default)]
     entities: Vec<String>,
-    #[serde(default)]
-    group: Option<String>,
     #[serde(default)]
     date: Option<String>,
 }
@@ -105,7 +100,6 @@ struct Parsed {
     query: String,
     keywords: Vec<String>,
     entities: Vec<String>,
-    group: Option<String>,
     /// For a document: its title, its text and the id the caller sent.
     document: Option<(String, String, Option<String>)>,
 }
@@ -181,7 +175,6 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 query: text,
                 keywords: vec![task],
                 entities: entities(&r.entities)?,
-                group: r.group,
                 document: None,
             }
         }
@@ -200,7 +193,6 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 query: text,
                 keywords: vec![topic],
                 entities: entities(&r.entities)?,
-                group: r.group,
                 document: None,
             }
         }
@@ -223,7 +215,6 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 query: format!("{title}\n{content}"),
                 keywords: vec![title.clone()],
                 entities: entities(&r.entities)?,
-                group: r.group,
                 document: Some((title, content, id)),
             }
         }
@@ -234,7 +225,6 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 query: field("statement", &r.statement, MAX_FIELD)?,
                 keywords: Vec::new(),
                 entities: entities(&r.entities)?,
-                group: None,
                 document: None,
             }
         }
@@ -242,26 +232,50 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
     })
 }
 
-/// The audience a record asks for, checked against the caller's credentials and the kind.
-fn audience(kind: Kind, scope: &Scope, group: Option<&str>) -> Result<Target, ApiError> {
-    let audience = match group.map(str::trim) {
-        Some(g) => {
+/// The audience header's value, if sent.
+fn audience_header(app: &AppState, headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let name = &app.config.identity.audience_header;
+    match headers.get(name.as_str()) {
+        None => Ok(None),
+        Some(v) => v
+            .to_str()
+            .map(|s| Some(s.trim().to_owned()))
+            .map_err(|_| ApiError::BadRequest(format!("{name} is not valid text"))),
+    }
+}
+
+/// The audience a record is for, checked against the caller's credentials and the kind:
+/// the audience header's choice, or the kind's default.
+fn audience(kind: Kind, scope: &Scope, asked: Option<&str>) -> Result<Target, ApiError> {
+    let user = || {
+        scope
+            .user()
+            .map(|u| PageAudience::User(u.dir.clone()))
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "a {} for a user needs the user header",
+                    kind.as_str()
+                ))
+            })
+    };
+    let audience = match asked {
+        Some("tenant") => PageAudience::Tenant,
+        Some("user") => user()?,
+        Some(a) if a.starts_with("group:") => {
+            let g = a["group:".len()..].trim();
             let own = scope.groups().iter().find(|x| x.id == g).ok_or_else(|| {
                 ApiError::BadRequest(format!("group {g:?} is not one of the caller's groups"))
             })?;
             PageAudience::Group(own.dir.clone())
         }
+        Some(a) => {
+            return Err(ApiError::BadRequest(format!(
+                "audience {a:?} is not tenant, user or group:<id>"
+            )));
+        }
         None => match kind {
             Kind::Experience | Kind::Expertise => PageAudience::Tenant,
-            _ => {
-                let user = scope.user().ok_or_else(|| {
-                    ApiError::BadRequest(format!(
-                        "a {} is for a user: send the user header, or a group",
-                        kind.as_str()
-                    ))
-                })?;
-                PageAudience::User(user.dir.clone())
-            }
+            _ => user()?,
         },
     };
     Target::new(kind, audience).map_err(ApiError::BadRequest)
@@ -270,6 +284,7 @@ fn audience(kind: Kind, scope: &Scope, group: Option<&str>) -> Result<Target, Ap
 async fn insert(
     app: AppState,
     scope: Scope,
+    headers: HeaderMap,
     kind: Kind,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
@@ -280,7 +295,8 @@ async fn insert(
         ));
     }
     let parsed = parse_kind(kind, &record)?;
-    let mut target = audience(kind, &scope, parsed.group.as_deref())?;
+    let asked = audience_header(&app, &headers)?;
+    let mut target = audience(kind, &scope, asked.as_deref())?;
     let librarian = app.librarian()?;
     let tenant = scope.tenant().clone();
 
@@ -297,9 +313,10 @@ async fn insert(
         if !visible {
             return Err(ApiError::NotFound);
         }
-        if parsed.group.is_some() && target.audience != audience {
+        if asked.is_some() && target.audience != audience {
             return Err(ApiError::BadRequest(format!(
-                "document {id} was filed for another audience; leave out group"
+                "document {id} was filed for another audience; leave out {}",
+                app.config.identity.audience_header
             )));
         }
         target = Target::new(kind, audience).map_err(ApiError::BadRequest)?;
@@ -351,34 +368,38 @@ async fn insert(
 pub async fn experience(
     State(app): State<AppState>,
     scope: Scope,
+    headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, Kind::Experience, body).await
+    insert(app, scope, headers, Kind::Experience, body).await
 }
 
 #[tracing::instrument(name = "ingest_decision", skip_all)]
 pub async fn decision(
     State(app): State<AppState>,
     scope: Scope,
+    headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, Kind::Decision, body).await
+    insert(app, scope, headers, Kind::Decision, body).await
 }
 
 #[tracing::instrument(name = "ingest_expertise", skip_all)]
 pub async fn expertise(
     State(app): State<AppState>,
     scope: Scope,
+    headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, Kind::Expertise, body).await
+    insert(app, scope, headers, Kind::Expertise, body).await
 }
 
 #[tracing::instrument(name = "ingest_preference", skip_all)]
 pub async fn preference(
     State(app): State<AppState>,
     scope: Scope,
+    headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    insert(app, scope, Kind::Preference, body).await
+    insert(app, scope, headers, Kind::Preference, body).await
 }

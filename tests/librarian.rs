@@ -428,21 +428,33 @@ async fn audiences_follow_credentials() {
     let risk = vec!["risk-team".to_owned()];
     let marco = Caller::new(&key).user(Some("marco")).groups(&risk);
     let outsider = Caller::new(&key).user(Some("dana"));
+    // The audience is chosen in a header, like the caller's identity, never in the body.
+    let for_risk = marco.audience("group:risk-team");
 
-    let body =
-        json!({ "task": "card testing", "outcome": "Blocked the BIN.", "group": "risk-team" });
+    let body = json!({ "task": "card testing", "outcome": "Blocked the BIN." });
     for (caller, uri, body) in [
-        (outsider, "/ingest/experience", body.clone()),
+        (
+            outsider.audience("group:risk-team"),
+            "/ingest/experience",
+            body.clone(),
+        ),
+        (
+            marco,
+            "/ingest/experience",
+            json!({ "task": "x", "outcome": "y", "group": "risk-team" }),
+        ),
+        (
+            marco.audience("risk-team"),
+            "/ingest/experience",
+            body.clone(),
+        ),
+        (marco.audience("user"), "/ingest/experience", body.clone()),
         (
             Caller::new(&key),
             "/ingest/decision",
             json!({ "topic": "x", "decision": "y" }),
         ),
-        (
-            marco,
-            "/ingest/preference",
-            json!({ "statement": "x", "group": "risk-team" }),
-        ),
+        (for_risk, "/ingest/preference", json!({ "statement": "x" })),
         (
             marco,
             "/ingest/experience",
@@ -458,7 +470,7 @@ async fn audiences_follow_credentials() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {resp}");
     }
 
-    let (status, queued) = app.post(marco, "/ingest/experience", body).await;
+    let (status, queued) = app.post(for_risk, "/ingest/experience", body).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let id = queued["job"].as_str().unwrap();
     let job = app.wait_job(marco, id).await;
@@ -846,42 +858,50 @@ async fn related_pages_include_the_page_a_record_is_about() {
                 front["summary"].as_str().unwrap().to_owned(),
             );
             let segs: Vec<&str> = rel.split('/').collect();
-            let (user, groups, uri, body) = match segs.as_slice() {
+            let (user, groups, uri, body, audience) = match segs.as_slice() {
                 ["experience", _] => (
                     None,
                     vec![],
                     "/ingest/experience",
                     json!({ "task": title, "outcome": summary }),
+                    None,
                 ),
                 ["groups", g, "experience", _] => (
                     None,
                     vec![(*g).to_owned()],
                     "/ingest/experience",
-                    json!({ "task": title, "outcome": summary, "group": g }),
+                    json!({ "task": title, "outcome": summary }),
+                    Some(format!("group:{g}")),
                 ),
                 ["groups", g, "decisions", _] => (
                     None,
                     vec![(*g).to_owned()],
                     "/ingest/decision",
-                    json!({ "topic": title, "decision": summary, "group": g }),
+                    json!({ "topic": title, "decision": summary }),
+                    Some(format!("group:{g}")),
                 ),
                 ["users", u, "decisions", _] => (
                     Some((*u).to_owned()),
                     t.groups_of(u),
                     "/ingest/decision",
                     json!({ "topic": title, "decision": summary }),
+                    None,
                 ),
                 ["users", u, "preferences"] => (
                     Some((*u).to_owned()),
                     t.groups_of(u),
                     "/ingest/preference",
                     json!({ "statement": summary }),
+                    None,
                 ),
                 _ => continue,
             };
             total += 1;
             llm.clear();
-            let caller = Caller::new(key).user(user.as_deref()).groups(&groups);
+            let mut caller = Caller::new(key).user(user.as_deref()).groups(&groups);
+            if let Some(a) = &audience {
+                caller = caller.audience(a);
+            }
             submit(&app, caller, uri, body).await;
             let related = related_pages(&llm.calls(Step::Plan)[0]);
             let want = testset::page_path(&rel);

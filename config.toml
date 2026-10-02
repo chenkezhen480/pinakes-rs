@@ -17,6 +17,8 @@ default_tenant = "000000"      # personal: created on first start, key in <data>
 default_user = "admin"         # personal: the user when no user header is sent (no admin rights)
 key_header = "Authorization"   # "Bearer <key>"
 user_header = "X-User-Id"
+group_header = "X-User-Groups"
+audience_header = "X-Audience" # who an insert is for: tenant, user or group:<id>
 admin_key_env = "PINAKES_ADMIN_KEY"
 # jwt mode (M7):
 # public_key_file = "keys/auth.pem"

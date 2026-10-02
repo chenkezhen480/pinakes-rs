@@ -22,7 +22,8 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 ## Rules
 
 - Every read and write path takes a `Scope` (tenant + user + groups); never take tenant, user or
-  group ids from request bodies. Groups arrive in the `X-User-Groups` header (API key mode).
+  group ids from request bodies. Groups arrive in the `X-User-Groups` header (API key mode);
+  who an insert is for, in the `X-Audience` header (`tenant`, `user`, `group:<id>`).
 - Schema descriptions come only from the librarian (`librarian::Librarian::describe`); code
   adds the structure (`src/graph/describe.rs`). No description, no schema: definition and page
   are stored together or not at all.

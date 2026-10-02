@@ -29,12 +29,13 @@ pub struct TestApp {
     llm: Option<Llm>,
 }
 
-/// Who is calling: an API key, plus the user and groups headers the host would send.
+/// Who is calling: an API key, plus the user, groups and audience headers the host would send.
 #[derive(Clone, Copy)]
 pub struct Caller<'a> {
     pub key: &'a str,
     pub user: Option<&'a str>,
     pub groups: &'a [String],
+    pub audience: Option<&'a str>,
 }
 
 impl<'a> Caller<'a> {
@@ -43,6 +44,7 @@ impl<'a> Caller<'a> {
             key,
             user: None,
             groups: &[],
+            audience: None,
         }
     }
 
@@ -53,6 +55,12 @@ impl<'a> Caller<'a> {
 
     pub fn groups(mut self, groups: &'a [String]) -> Self {
         self.groups = groups;
+        self
+    }
+
+    /// Who an insert is for: `tenant`, `user` or `group:<id>`.
+    pub fn audience(mut self, audience: &'a str) -> Self {
+        self.audience = Some(audience);
         self
     }
 }
@@ -154,6 +162,9 @@ impl TestApp {
         if !caller.groups.is_empty() {
             req = req.header("X-User-Groups", caller.groups.join(","));
         }
+        if let Some(a) = caller.audience {
+            req = req.header("X-Audience", a);
+        }
         self.send(req.body(Body::from(body.to_string())).unwrap())
             .await
     }
@@ -168,6 +179,9 @@ impl TestApp {
         }
         if !caller.groups.is_empty() {
             req = req.header("X-User-Groups", caller.groups.join(","));
+        }
+        if let Some(a) = caller.audience {
+            req = req.header("X-Audience", a);
         }
         self.send(req.body(Body::from(body.to_string())).unwrap())
             .await
@@ -195,6 +209,9 @@ impl TestApp {
         }
         if !caller.groups.is_empty() {
             req = req.header("X-User-Groups", caller.groups.join(","));
+        }
+        if let Some(a) = caller.audience {
+            req = req.header("X-Audience", a);
         }
         self.send(req.body(Body::empty()).unwrap()).await
     }

@@ -298,8 +298,8 @@ async fn a_group_document_stays_in_its_group() {
     let outsider = Caller::new(&key).user(Some("bob"));
     let (_, r) = file(
         &app,
-        member,
-        json!({ "title": "售后规则手册", "content": manual(V1), "group": "ops" }),
+        member.audience("group:ops"),
+        json!({ "title": "售后规则手册", "content": manual(V1) }),
     )
     .await;
     let id = r["document"].as_str().unwrap().to_owned();
