@@ -12,6 +12,7 @@ use anyhow::Context;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 
+use crate::embed::Embedder;
 use crate::graph::{GraphBackend, GraphSnapshot, GraphStore};
 use crate::search::SearchSnapshot;
 use crate::search::tracker::ReadTracker;
@@ -104,6 +105,10 @@ pub struct Tenant {
     /// Which pages each agent session has read.
     pub reads: ReadTracker,
     keep_history: bool,
+    /// Embeds the wiki's pages when the snapshot is built, if a model is configured.
+    embedder: Option<Arc<dyn Embedder>>,
+    /// Whether new page vectors are written to SQLite.
+    store_vectors: bool,
     /// Where this tenant's graph nodes and edges are stored.
     pub graph_store: Arc<dyn GraphStore>,
     /// The in-memory graph searches and walks read, loaded on first use.
@@ -157,7 +162,7 @@ impl Tenant {
         if let Some(s) = self.current_snapshot() {
             return Ok(s);
         }
-        let snapshot = Arc::new(build_snapshot(self.wiki(), self.history()).await?);
+        let snapshot = Arc::new(self.build_snapshot().await?);
         *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
         Ok(snapshot)
     }
@@ -167,9 +172,79 @@ impl Tenant {
     #[tracing::instrument(name = "reindex", skip_all, fields(tenant = %self.dir_name))]
     pub async fn reindex(&self) -> anyhow::Result<()> {
         let _building = self.building.lock().await;
-        let snapshot = build_snapshot(self.wiki(), self.history()).await?;
+        let snapshot = self.build_snapshot().await?;
         *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(snapshot));
         Ok(())
+    }
+
+    /// Builds the search snapshot from the wiki files, with the pages' vectors when a model is
+    /// configured: earlier ones for unchanged text (from the current snapshot, or from SQLite
+    /// when the tenant opens), new ones (then stored) for the rest. If the vectors can't be
+    /// made, the snapshot has none: keyword search and writes carry on, and the meaning-based
+    /// modes answer 503 until the next build.
+    async fn build_snapshot(&self) -> anyhow::Result<SearchSnapshot> {
+        use crate::search::vectors::{Earlier, build};
+        let snapshot = build_snapshot(self.wiki(), self.history()).await?;
+        let Some(embedder) = self.embedder.clone() else {
+            return Ok(snapshot);
+        };
+        let off = |e: anyhow::Error| {
+            tracing::error!(
+                tenant = %self.dir_name,
+                error = %format!("{e:#}"),
+                "page vectors could not be built; semantic search is off for this tenant"
+            );
+        };
+        let previous = self.current_snapshot().filter(|s| {
+            s.vectors
+                .as_ref()
+                .is_some_and(|v| v.model == embedder.model())
+        });
+        let stored = match previous {
+            Some(_) => Vec::new(),
+            None => match self.store.embeddings(embedder.model()).await {
+                Ok(stored) => stored,
+                Err(e) => {
+                    off(e);
+                    return Ok(snapshot);
+                }
+            },
+        };
+        let started = Instant::now();
+        let (built, mut snapshot) = tokio::task::spawn_blocking(move || {
+            let earlier = match previous.as_ref().and_then(|p| p.vectors.as_ref()) {
+                Some(v) => Earlier::Snapshot(v),
+                None => Earlier::Stored(stored),
+            };
+            (build(&snapshot.catalog, earlier, &*embedder), snapshot)
+        })
+        .await
+        .context("embedding pages panicked")?;
+        let built = match built {
+            Ok(built) => built,
+            Err(e) => {
+                off(e);
+                return Ok(snapshot);
+            }
+        };
+        if self.store_vectors && (!built.put.is_empty() || !built.drop.is_empty()) {
+            tracing::info!(
+                embedded = built.put.len(),
+                removed = built.drop.len(),
+                ms = started.elapsed().as_millis() as u64,
+                "page vectors updated"
+            );
+            // The vectors are good either way; unstored ones are made again after a restart.
+            if let Err(e) = self
+                .store
+                .sync_embeddings(&built.vectors.model, built.put, built.drop)
+                .await
+            {
+                tracing::warn!(tenant = %self.dir_name, error = %format!("{e:#}"), "page vectors not stored");
+            }
+        }
+        snapshot.vectors = Some(built.vectors);
+        Ok(snapshot)
     }
 
     fn current_graph(&self) -> Option<Arc<GraphSnapshot>> {
@@ -271,6 +346,9 @@ pub struct Tenants {
     /// Keep every wiki version a snapshot is built from, for replays (see `wiki::History`).
     keep_history: bool,
     graph_backend: GraphBackend,
+    embedder: Option<Arc<dyn Embedder>>,
+    /// Store new page vectors in each tenant's SQLite file (off for replays, which only read).
+    store_vectors: bool,
     /// Open tenants. The lock is only ever held for a map lookup or insert, never across disk
     /// work, so loading one tenant can't stall requests for the others.
     open: RwLock<HashMap<String, Arc<Tenant>>>,
@@ -290,6 +368,8 @@ impl Tenants {
             session_idle,
             keep_history: false,
             graph_backend: GraphBackend::Sqlite,
+            embedder: None,
+            store_vectors: true,
             open: RwLock::new(HashMap::new()),
             creating: Mutex::new(()),
         }
@@ -305,6 +385,19 @@ impl Tenants {
     /// Where tenants' graph data is stored (SQLite in each tenant's folder by default).
     pub fn graph_backend(mut self, backend: GraphBackend) -> Self {
         self.graph_backend = backend;
+        self
+    }
+
+    /// The model that embeds tenants' pages for meaning-based search (none by default).
+    pub fn embedder(mut self, embedder: Option<Arc<dyn Embedder>>) -> Self {
+        self.embedder = embedder;
+        self
+    }
+
+    /// Keeps the page vectors a snapshot build makes in memory only, never writing the tenants'
+    /// SQLite files: for tools such as `pinakes-replay` that read a live data folder.
+    pub fn without_storing_vectors(mut self) -> Self {
+        self.store_vectors = false;
         self
     }
 
@@ -451,6 +544,8 @@ impl Tenants {
             building: Mutex::new(()),
             reads: ReadTracker::new(self.session_idle),
             keep_history: self.keep_history,
+            embedder: self.embedder.clone(),
+            store_vectors: self.store_vectors,
             graph_store,
             graph: std::sync::RwLock::new(None),
             graph_loading: Mutex::new(()),

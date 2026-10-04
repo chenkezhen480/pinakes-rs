@@ -64,11 +64,11 @@ async fn searches_and_reads_leave_one_line_each() {
     );
     assert!(search.snapshot.is_some());
     assert_eq!(search.service, pinakes::SERVICE);
-    assert_eq!(search.search_config, app.config().search.fingerprint());
+    assert_eq!(search.search_config, app.config().search.fingerprint(None));
     for step in [
         "prepare",
         "name_match",
-        "keyword_search_memories",
+        "search_memories",
         "assemble",
         "total",
     ] {
@@ -163,7 +163,7 @@ async fn replay_reports_what_changed() {
     let mut bad = records[0].clone();
     bad.request["query"] = json!("");
     with_bad.insert(0, bad);
-    let report = replay(&tenants(), &cfg, WikiSource::Recorded, with_bad)
+    let report = replay(&tenants(), &cfg, None, WikiSource::Recorded, with_bad)
         .await
         .unwrap();
     assert_eq!((report.searches, report.same, report.changed), (2, 2, 0));
@@ -171,7 +171,7 @@ async fn replay_reports_what_changed() {
     assert!(report.failed.is_empty());
     assert_eq!((report.wiki_changed, report.wiki_missing), (0, 0));
     assert_eq!(report.recorded_services.get(pinakes::SERVICE), Some(&2));
-    assert_eq!(report.search_config, cfg.fingerprint());
+    assert_eq!(report.search_config, cfg.fingerprint(None));
 
     // A new page that outranks the old answer.
     let wiki = WikiFs::new(app.wiki_dir("shopline"));
@@ -184,14 +184,20 @@ async fn replay_reports_what_changed() {
     app.restart();
 
     // On the recorded wiki, rebuilt from the history, nothing changes: the code didn't.
-    let report = replay(&tenants(), &cfg, WikiSource::Recorded, records.clone())
-        .await
-        .unwrap();
+    let report = replay(
+        &tenants(),
+        &cfg,
+        None,
+        WikiSource::Recorded,
+        records.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!((report.searches, report.same, report.changed), (2, 2, 0));
     assert_eq!((report.wiki_changed, report.wiki_missing), (0, 0));
 
     // On today's wiki the new page shows up, flagged as another wiki.
-    let report = replay(&tenants(), &cfg, WikiSource::Current, records.clone())
+    let report = replay(&tenants(), &cfg, None, WikiSource::Current, records.clone())
         .await
         .unwrap();
     assert_eq!(report.searches, 2);
@@ -220,7 +226,7 @@ async fn replay_reports_what_changed() {
             .join("history"),
     )
     .unwrap();
-    let report = replay(&tenants(), &cfg, WikiSource::Recorded, records)
+    let report = replay(&tenants(), &cfg, None, WikiSource::Recorded, records)
         .await
         .unwrap();
     assert_eq!(
@@ -247,14 +253,14 @@ async fn replay_reports_the_search_config() {
         app.config().store.file_name.clone(),
         Duration::from_secs(60),
     );
-    let report = replay(&tenants, &other, WikiSource::Recorded, records)
+    let report = replay(&tenants, &other, None, WikiSource::Recorded, records)
         .await
         .unwrap();
-    assert_ne!(report.search_config, app.config().search.fingerprint());
+    assert_ne!(report.search_config, app.config().search.fingerprint(None));
     assert_eq!(
         report
             .recorded_search_configs
-            .get(&app.config().search.fingerprint()),
+            .get(&app.config().search.fingerprint(None)),
         Some(&1)
     );
 }

@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::{Endpoint, TraceRecord};
 use crate::config::SearchConfig;
+use crate::embed::Embedder;
 use crate::identity::Scope;
 use crate::search::tracker::ReadState;
 use crate::search::{SearchRequest, SearchSnapshot, search};
@@ -223,16 +224,18 @@ fn strings(v: &Value) -> Vec<String> {
 
 /// Runs every recorded search again and compares the results with the recording, one record
 /// at a time; only the differences are kept. The read tracker is left out: a replay never
-/// marks hits as read.
+/// marks hits as read. `embedder` embeds queries in the meaning-based modes (and the pages of
+/// recorded wiki versions, without storing their vectors); give the one `tenants` uses.
 pub async fn replay(
     tenants: &Tenants,
     cfg: &SearchConfig,
+    embedder: Option<&dyn Embedder>,
     wiki: WikiSource,
     records: impl IntoIterator<Item = TraceRecord>,
 ) -> anyhow::Result<ReplayReport> {
     let mut report = ReplayReport {
         service: crate::SERVICE.to_owned(),
-        search_config: cfg.fingerprint(),
+        search_config: cfg.fingerprint(embedder.map(|e| e.model())),
         wiki,
         recorded_services: BTreeMap::new(),
         recorded_search_configs: BTreeMap::new(),
@@ -276,7 +279,22 @@ pub async fn replay(
                                 if recorded.len() >= CACHED_VERSIONS {
                                     recorded.clear();
                                 }
-                                let s = Arc::new(SearchSnapshot::build(pages)?);
+                                let mut s = SearchSnapshot::build(pages)?;
+                                if let Some(embedder) = embedder {
+                                    // Most parts are unchanged since: reuse today's vectors.
+                                    use crate::search::vectors::{Earlier, build};
+                                    let today = tenant.snapshot().await?;
+                                    let earlier = match today.vectors.as_ref() {
+                                        Some(v) if v.model == embedder.model() => {
+                                            Earlier::Snapshot(v)
+                                        }
+                                        _ => Earlier::Stored(
+                                            tenant.store.embeddings(embedder.model()).await?,
+                                        ),
+                                    };
+                                    s.vectors = Some(build(&s.catalog, earlier, embedder)?.vectors);
+                                }
+                                let s = Arc::new(s);
                                 recorded.insert(key, s.clone());
                                 Some(s)
                             }
@@ -295,7 +313,15 @@ pub async fn replay(
             };
             let graph = tenant.graph().await?;
             let scope = Scope::offline(tenant, record.user.clone(), record.groups.clone());
-            let now = search(&snapshot, &graph, &scope, &req, cfg, &ReadState::default())?;
+            let now = search(
+                &snapshot,
+                &graph,
+                &scope,
+                &req,
+                cfg,
+                &ReadState::default(),
+                embedder,
+            )?;
             anyhow::Ok(Some((
                 now.trace_summary(),
                 snapshot.version.clone(),

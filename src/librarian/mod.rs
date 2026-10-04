@@ -162,6 +162,9 @@ pub struct Ingest {
     pub query: String,
     pub keywords: Vec<String>,
     pub entities: Vec<String>,
+    /// Knowledge pages the caller read for this task (its read-tracker session), shown first
+    /// and offered as anchors.
+    pub read: Vec<String>,
     /// For a document (expertise): its title and text, and its id when the caller sent one.
     pub document: Option<DocumentIn>,
 }
@@ -201,6 +204,8 @@ pub struct Librarian {
     llm: Llm,
     cfg: LibrarianConfig,
     search: SearchConfig,
+    /// Embeds the queries of the related-page search, which then ranks by meaning too.
+    embedder: Option<Arc<dyn crate::embed::Embedder>>,
     /// Records waiting to be filed, by batch key (`batch::batch_key`): a record job files every
     /// record already waiting with the same key in one batch.
     inbox: std::sync::Mutex<HashMap<String, Vec<Waiting>>>,
@@ -227,11 +232,19 @@ struct Checked {
 }
 
 impl Librarian {
-    pub fn new(llm: Llm, cfg: LibrarianConfig, search: SearchConfig) -> Self {
+    /// `embedder`, when there is one, lets the related-page search rank by meaning too, so a
+    /// record finds pages in the other language.
+    pub fn new(
+        llm: Llm,
+        cfg: LibrarianConfig,
+        search: SearchConfig,
+        embedder: Option<Arc<dyn crate::embed::Embedder>>,
+    ) -> Self {
         Self {
             llm,
             cfg,
             search,
+            embedder,
             inbox: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -327,10 +340,7 @@ impl Librarian {
         let (target, writer) = (&first.target, &first.writer);
         let reader = reader_scope(tenant, &target.audience, writer);
         let rules = prompts::rules(&tenant.dir, target.kind);
-        let items: Vec<batch::Item> = jobs
-            .iter()
-            .map(|j| batch::record_item(&j.record, &j.query, &j.keywords, &j.entities, &j.source))
-            .collect();
+        let items: Vec<batch::Item> = jobs.iter().map(batch::record_item).collect();
         let sources: Vec<String> = jobs.iter().map(|j| j.source.clone()).collect();
         let filed = self
             .file_batch(
@@ -395,7 +405,18 @@ impl Librarian {
         .collect();
         let mut keywords = vec![title.to_owned()];
         keywords.extend(opening.terms.iter().cloned());
-        let found = self.find(&snap, &graph, reader, &queries, &keywords, &[])?;
+        // Recognizing a document stays with keywords: its candidates are traced to documents
+        // through the pages' sources, never picked by likeness.
+        let found = find(
+            &snap,
+            &graph,
+            reader,
+            &self.search,
+            None,
+            &queries,
+            &keywords,
+            &[],
+        )?;
         let mut scores: HashMap<&str, f32> = HashMap::new();
         for (page, _, score) in &found.pages {
             let Some((_, entry)) = snap.catalog.get(page) else {
@@ -500,63 +521,70 @@ impl Librarian {
         }
     }
 
-    /// Searches with each query and adds up how each page ranks (1 for first, ½ for second,
-    /// …), so pages found for many parts of a text come first. Also the entities named.
-    fn find(
-        &self,
-        snap: &SearchSnapshot,
-        graph: &GraphSnapshot,
-        reader: &Scope,
-        queries: &[String],
-        keywords: &[String],
-        entities: &[String],
-    ) -> anyhow::Result<Found> {
-        let short = |list: &[String]| -> Vec<String> {
-            list.iter()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty() && s.chars().count() <= 100)
-                .take(20)
-                .collect()
-        };
-        let mut scores: HashMap<String, (Kind, f32)> = HashMap::new();
-        let mut named: Vec<String> = Vec::new();
-        for q in queries.iter().filter(|q| !q.trim().is_empty()) {
-            let req: SearchRequest = serde_json::from_value(json!({
-                "query": q,
-                "keywords": short(keywords),
-                "entities": short(entities),
-                "slots": { "memories": 20, "knowledge": 20, "relations": 0 },
-                "hop": false,
-            }))?;
-            let resp = crate::search::search(
-                snap,
-                graph,
-                reader,
-                &req,
-                &self.search,
-                &Default::default(),
-            )?;
-            for slot in [&resp.memories.hits, &resp.knowledge.hits] {
-                for (rank, h) in slot.iter().enumerate() {
-                    let e = scores.entry(h.page.clone()).or_insert((h.kind, 0.0));
-                    e.1 += 1.0 / (rank as f32 + 1.0);
-                }
-            }
-            for e in resp.entities {
-                if !named.contains(&e) {
-                    named.push(e);
-                }
+    /// The embedding model, when this snapshot's pages have vectors made by it.
+    fn meaning_for(&self, snap: &SearchSnapshot) -> Option<Arc<dyn crate::embed::Embedder>> {
+        let e = self.embedder.clone()?;
+        crate::search::has_meaning(snap, Some(&*e)).then_some(e)
+    }
+}
+
+/// Searches with each query and adds up how each page ranks (1 for first, ½ for second, …),
+/// so pages found for many parts of a text come first. Also the entities named. With
+/// `meaning`, the searches run in `both` mode (blocking: it embeds each query); otherwise by
+/// keywords alone.
+#[allow(clippy::too_many_arguments)]
+fn find(
+    snap: &SearchSnapshot,
+    graph: &GraphSnapshot,
+    reader: &Scope,
+    cfg: &SearchConfig,
+    meaning: Option<&dyn crate::embed::Embedder>,
+    queries: &[String],
+    keywords: &[String],
+    entities: &[String],
+) -> anyhow::Result<Found> {
+    let short = |list: &[String]| -> Vec<String> {
+        list.iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty() && s.chars().count() <= 100)
+            .take(20)
+            .collect()
+    };
+    let mut scores: HashMap<String, (Kind, f32)> = HashMap::new();
+    let mut named: Vec<String> = Vec::new();
+    for q in queries.iter().filter(|q| !q.trim().is_empty()) {
+        let req: SearchRequest = serde_json::from_value(json!({
+            "query": q,
+            "keywords": short(keywords),
+            "entities": short(entities),
+            "mode": if meaning.is_some() { "both" } else { "keyword" },
+            "slots": { "memories": 20, "knowledge": 20, "relations": 0 },
+            "hop": false,
+        }))?;
+        let resp =
+            crate::search::search(snap, graph, reader, &req, cfg, &Default::default(), meaning)?;
+        for slot in [&resp.memories.hits, &resp.knowledge.hits] {
+            for (rank, h) in slot.iter().enumerate() {
+                let e = scores.entry(h.page.clone()).or_insert((h.kind, 0.0));
+                e.1 += 1.0 / (rank as f32 + 1.0);
             }
         }
-        let mut pages: Vec<(String, Kind, f32)> =
-            scores.into_iter().map(|(p, (k, s))| (p, k, s)).collect();
-        pages.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
-        Ok(Found {
-            pages,
-            entities: named,
-        })
+        for e in resp.entities {
+            if !named.contains(&e) {
+                named.push(e);
+            }
+        }
     }
+    let mut pages: Vec<(String, Kind, f32)> =
+        scores.into_iter().map(|(p, (k, s))| (p, k, s)).collect();
+    pages.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+    Ok(Found {
+        pages,
+        entities: named,
+    })
+}
 
+impl Librarian {
     /// Step 2: the pages the librarian is shown. First `first_pages` (a concept's page, and
     /// where an earlier version filed its lines) and the pages that cite `first_sources` (a
     /// document's earlier versions and this one's earlier concepts), up to a cap; then the
@@ -580,7 +608,31 @@ impl Librarian {
         } else {
             queries.to_vec()
         };
-        let found = self.find(&snap, &graph, reader, &queries, keywords, entities)?;
+        let found = {
+            let (snap, graph, reader, cfg, meaning) = (
+                snap.clone(),
+                graph.clone(),
+                reader.clone(),
+                self.search.clone(),
+                self.meaning_for(&snap),
+            );
+            let (queries, keywords, entities) =
+                (queries.to_vec(), keywords.to_vec(), entities.to_vec());
+            tokio::task::spawn_blocking(move || {
+                find(
+                    &snap,
+                    &graph,
+                    &reader,
+                    &cfg,
+                    meaning.as_deref(),
+                    &queries,
+                    &keywords,
+                    &entities,
+                )
+            })
+            .await
+            .context("the related-page search panicked")??
+        };
         let mut first: Vec<String> = Vec::new();
         // The one page a preference job writes always comes first when it exists.
         if target.kind == Kind::Preference && snap.catalog.get(&target.folder()).is_some() {
@@ -1099,8 +1151,32 @@ fn check_anchor(
                 Err("no such node".into())
             }
         }
-        None => Err("an anchor is a page id, schema:type or space:type/key".into()),
+        None => Err(
+            "not an anchor: use one of the allowed anchors exactly as listed (a page id such as expertise/refunds, a node type such as commerce:order, or a node such as mainland:order/1042)"
+                .into(),
+        ),
     }
+}
+
+/// The pages among `pages` the job's pages may anchor to, in order, at most `max`.
+fn anchorable_pages(
+    target: &Target,
+    writer: &Scope,
+    pages: &[String],
+    catalog: &Catalog,
+    graph: &GraphSnapshot,
+    max: usize,
+) -> Vec<String> {
+    let Some(sample) = sample_path(target) else {
+        return Vec::new();
+    };
+    let none = HashSet::new();
+    pages
+        .iter()
+        .filter(|p| check_anchor(p, &sample, &none, catalog, graph, writer).is_ok())
+        .take(max)
+        .cloned()
+        .collect()
 }
 
 /// The anchors the librarian may use, as prompt lines: related pages, node types, and the

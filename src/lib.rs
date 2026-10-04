@@ -4,6 +4,7 @@
 pub mod api;
 pub mod config;
 pub mod convert;
+pub mod embed;
 pub mod error;
 pub mod graph;
 pub mod identity;
@@ -37,8 +38,11 @@ pub struct AppInner {
     pub tenants: Tenants,
     pub admin_key: Option<AdminKey>,
     pub traces: trace::TraceLog,
-    /// `config.search.fingerprint()`, computed once.
+    /// The search settings' fingerprint with the embedding model, computed once.
     pub search_fingerprint: String,
+    /// Embeds pages and queries for meaning-based search; `None` without `[embedding] model`
+    /// or when the model can't be loaded.
+    pub embedder: Option<Arc<dyn embed::Embedder>>,
     /// The per-tenant write queues.
     pub jobs: jobs::Jobs,
     /// Turns uploaded files into Markdown.
@@ -63,19 +67,35 @@ impl AppState {
             ),
             Err(e) => tracing::warn!(error = %e, "the librarian is off"),
         }
-        Self::build(config, admin_key, llm)
+        let embedder = load_embedder(&config);
+        Self::build(config, admin_key, llm, embedder)
     }
 
     /// Like [`AppState::new`] with the librarian's model given, as tests give a scripted one;
-    /// `None` leaves the librarian off.
+    /// `None` leaves the librarian off. No embedding model.
     pub fn with_llm(config: Config, admin_key: Option<&str>, llm: Option<llm::Llm>) -> Self {
+        Self::with_models(config, admin_key, llm, None)
+    }
+
+    /// Like [`AppState::with_llm`], with the embedding model given too.
+    pub fn with_models(
+        config: Config,
+        admin_key: Option<&str>,
+        llm: Option<llm::Llm>,
+        embedder: Option<Arc<dyn embed::Embedder>>,
+    ) -> Self {
         let off = llm::Missing::Model {
             file: config.librarian.llm_file_name(),
         };
-        Self::build(config, admin_key, llm.ok_or(off))
+        Self::build(config, admin_key, llm.ok_or(off), embedder)
     }
 
-    fn build(config: Config, admin_key: Option<&str>, llm: Result<llm::Llm, llm::Missing>) -> Self {
+    fn build(
+        config: Config,
+        admin_key: Option<&str>,
+        llm: Result<llm::Llm, llm::Missing>,
+        embedder: Option<Arc<dyn embed::Embedder>>,
+    ) -> Self {
         let tenants = Tenants::new(
             config.tenants_dir(),
             config.store.file_name.clone(),
@@ -83,13 +103,14 @@ impl AppState {
         )
         // Wiki versions are kept only for replaying traces.
         .keep_history(config.trace.enabled)
-        .graph_backend(graph::GraphBackend::from_config(&config));
+        .graph_backend(graph::GraphBackend::from_config(&config))
+        .embedder(embedder.clone());
         let traces = trace::TraceLog::start(
             config.tenants_dir(),
             config.trace.enabled,
             (config.trace.retention_days > 0).then_some(config.trace.retention_days),
         );
-        let librarian = llm.map(|llm| librarian_for(&config, llm));
+        let librarian = llm.map(|llm| librarian_for(&config, llm, embedder.clone()));
         let converter =
             convert::Converter::new(&config.converter).expect("an HTTP client for the converter");
         Self(Arc::new(AppInner {
@@ -98,7 +119,10 @@ impl AppState {
                 config.jobs.keep_finished_minutes.saturating_mul(60),
             )),
             librarian: std::sync::RwLock::new(librarian),
-            search_fingerprint: config.search.fingerprint(),
+            search_fingerprint: config
+                .search
+                .fingerprint(embedder.as_ref().map(|e| e.model())),
+            embedder,
             admin_key: admin_key.and_then(AdminKey::new),
             config,
             tenants,
@@ -126,16 +150,43 @@ impl AppState {
 
     /// Turns the librarian on with this model.
     pub fn set_llm(&self, llm: llm::Llm) {
-        let l = librarian_for(&self.config, llm);
+        let l = librarian_for(&self.config, llm, self.embedder.clone());
         *self.librarian.write().unwrap_or_else(|e| e.into_inner()) = Ok(l);
     }
 }
 
-fn librarian_for(config: &Config, llm: llm::Llm) -> Arc<librarian::Librarian> {
+/// Loads `[embedding] model`, downloading its files into `<data>/models` the first time. When
+/// it can't be loaded the service still starts, and meaning-based searches answer 503.
+pub fn load_embedder(config: &Config) -> Option<Arc<dyn embed::Embedder>> {
+    let name = config.embedding.model.as_deref()?;
+    let dir = config.data.dir.join("models");
+    let started = std::time::Instant::now();
+    match embed::FastEmbedder::load(&dir) {
+        Ok(e) => {
+            tracing::info!(
+                model = name,
+                ms = started.elapsed().as_millis() as u64,
+                "embedding model loaded"
+            );
+            Some(Arc::new(e))
+        }
+        Err(e) => {
+            tracing::error!(model = name, error = %format!("{e:#}"), "semantic search is off");
+            None
+        }
+    }
+}
+
+fn librarian_for(
+    config: &Config,
+    llm: llm::Llm,
+    embedder: Option<Arc<dyn embed::Embedder>>,
+) -> Arc<librarian::Librarian> {
     Arc::new(librarian::Librarian::new(
         llm,
         config.librarian.clone(),
         config.search.clone(),
+        embedder,
     ))
 }
 

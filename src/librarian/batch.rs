@@ -15,8 +15,8 @@ use serde_json::json;
 use super::edit::Target;
 use super::{
     ATTEMPTS, Checked, Edit, HeldEdit, Librarian, MAX_PAGE_CHARS, Related, added_links,
-    anchor_options, apply_and_record, check, cut, hold, op_name, page_id, parse_json, plan_schema,
-    prompts, record_log,
+    anchor_options, anchorable_pages, apply_and_record, check, cut, hold, op_name, page_id,
+    parse_json, plan_schema, prompts, record_log,
 };
 use crate::identity::Scope;
 use crate::jobs::{JobResult, Rejected};
@@ -26,6 +26,8 @@ use crate::wiki::Page;
 /// Most items one write call files, so a reply stays a size the model writes well; a larger
 /// batch is filed in rounds. The work is divided by items, never the text by size.
 const ROUND_ITEMS: usize = 8;
+/// Most knowledge pages a record's session read that its item is shown and offered.
+const MAX_READ_PAGES: usize = 8;
 
 /// One thing to file.
 pub(super) struct Item {
@@ -38,6 +40,9 @@ pub(super) struct Item {
     /// Pages shown first: a concept's page, and the pages an earlier version filed its lines
     /// into.
     pub first_pages: Vec<String>,
+    /// For a record: the knowledge pages the caller's session read for the task. Those its
+    /// pages may anchor to are shown first and named to the model.
+    pub read: Vec<String>,
     /// What the item is for, when its content doesn't say it all (the page a concept goes to).
     pub task: Option<String>,
     /// The page the item must write, unless it exists already and there is nothing to add:
@@ -136,7 +141,23 @@ impl Librarian {
         let graph = tenant.graph().await.context("anchors need the graph")?;
         let mut related: Vec<Related> = Vec::new();
         let mut anchors: Vec<Vec<String>> = Vec::new();
+        // The pages a record's session read that its pages may anchor to come first.
+        let mut reads: Vec<Vec<String>> = Vec::new();
         for item in items {
+            let read = anchorable_pages(
+                target,
+                writer,
+                &item.read,
+                &snap.catalog,
+                &graph,
+                MAX_READ_PAGES,
+            );
+            let mut first = item.first_pages.clone();
+            first.extend(
+                read.iter()
+                    .filter(|p| !item.first_pages.contains(p))
+                    .cloned(),
+            );
             let r = self
                 .related(
                     tenant,
@@ -146,9 +167,10 @@ impl Librarian {
                     &item.keywords,
                     &item.entities,
                     first_sources,
-                    &item.first_pages,
+                    &first,
                 )
                 .await?;
+            reads.push(read);
             anchors.push(anchor_options(
                 target,
                 writer,
@@ -172,7 +194,8 @@ impl Librarian {
 
             // Step 3: one plan for the round.
             let msg = write_message(
-                rules, target, today, note, items, &round, &related, &anchors, &pages, &feedback,
+                rules, target, today, note, items, &round, &related, &anchors, &reads, &pages,
+                &feedback,
             );
             let reply = self
                 .llm
@@ -537,6 +560,7 @@ fn write_message(
     round: &[usize],
     related: &[Related],
     anchors: &[Vec<String>],
+    reads: &[Vec<String>],
     pages: &[Page],
     feedback: &[Vec<String>],
 ) -> String {
@@ -577,6 +601,13 @@ fn write_message(
             },
             anchors[i].join("\n")
         );
+        if !reads[i].is_empty() {
+            let _ = write!(
+                msg,
+                "Knowledge pages the caller read for this task: {}\n\n",
+                reads[i].join(", ")
+            );
+        }
         if !feedback[i].is_empty() {
             let _ = write!(
                 msg,
@@ -589,22 +620,17 @@ fn write_message(
 }
 
 /// One item's content: a record as received.
-pub(super) fn record_item(
-    record: &serde_json::Value,
-    query: &str,
-    keywords: &[String],
-    entities: &[String],
-    cite: &str,
-) -> Item {
+pub(super) fn record_item(job: &super::Ingest) -> Item {
     Item {
-        content: record.clone(),
-        queries: vec![query.to_owned()],
-        keywords: keywords.to_vec(),
-        entities: entities.to_vec(),
+        content: job.record.clone(),
+        queries: vec![job.query.clone()],
+        keywords: job.keywords.clone(),
+        entities: job.entities.clone(),
         first_pages: Vec::new(),
+        read: job.read.clone(),
         task: None,
         page: None,
-        cite: cite.to_owned(),
+        cite: job.source.clone(),
     }
 }
 

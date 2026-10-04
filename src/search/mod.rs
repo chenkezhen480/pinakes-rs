@@ -1,18 +1,22 @@
-//! The one search entry (design, "One way in: the wiki as the only search entry"), keyword mode.
+//! The one search entry (design, "One way in: the wiki as the only search entry").
 //!
 //! A search reads only the tenant's in-memory copies: the [`SearchSnapshot`] of the wiki (page
-//! catalog, name matcher, tantivy index) and the [`GraphSnapshot`]. It never touches SQLite,
-//! Neo4j or an LLM. Steps:
+//! catalog, name matcher, tantivy index, page vectors) and the [`GraphSnapshot`]. It never
+//! touches SQLite, Neo4j or an LLM; meaning-based modes run the local embedding model on the
+//! query. Steps:
 //!
 //! 1. prepare: normalize the query and keywords, infer the intent;
 //! 2. name match: known titles and aliases pin their pages; node and relation type names,
 //!    node names, identifier keys and space names become the starting entities, only those the
 //!    caller may see;
-//! 3. keyword search: BM25 per channel (memories, knowledge), filtered to the caller's audiences;
+//! 3. search per channel (memories, knowledge), filtered to the caller's audiences: BM25 over
+//!    keywords, similarity of the query to the page vectors, or both (see [`Mode`]);
 //! 4. rank: pinned pages first, then by score; pages that match too little are dropped;
-//! 5. relations: edges around the starting entities and the entities the hits are anchored to
+//! 5. hop: the knowledge pages the top memories are anchored to join the knowledge slot,
+//!    below its strong hits (`via: memory`);
+//! 6. relations: edges around the starting entities and the entities the hits are anchored to
 //!    (see [`relations`]);
-//! 6. assemble: summaries, matching lines, routes, coverage and unmatched keywords.
+//! 7. assemble: summaries, matching lines, routes, coverage and unmatched keywords.
 
 pub mod catalog;
 pub mod index;
@@ -21,6 +25,7 @@ pub mod relations;
 pub mod text;
 pub mod tokenize;
 pub mod tracker;
+pub mod vectors;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -36,6 +41,7 @@ use tokenize::{Analyzer, Tok, stem};
 use tracker::ReadState;
 
 use crate::config::SearchConfig;
+use crate::embed::Embedder;
 use crate::graph::{EntityRef, GraphSnapshot, Visible};
 use crate::identity::Scope;
 use crate::kinds::Kind;
@@ -58,6 +64,11 @@ const MATCH_STRENGTH: f32 = 0.6;
 /// A slot is strong when its top hit matched at least this share of the keywords, at least one
 /// of them in its title, aliases, keywords or summary.
 const STRONG_SHARE: f32 = 0.5;
+/// A page found by meaning is shown only when its best part is at least this similar to the
+/// query, and then makes its slot strong (cosine similarity, jina-embeddings-v2-base-zh).
+/// Measured on the test set: off-topic questions reach at most 0.20, the pages that answer
+/// cross-language questions at least 0.30 (tests/meaning_testset.rs).
+const MEANING_FLOOR: f32 = 0.25;
 
 /// Everything a search reads, built from a tenant's wiki. Replaced whole when pages change, so
 /// running searches keep the snapshot they started with.
@@ -68,6 +79,8 @@ pub struct SearchSnapshot {
     analyzer: Analyzer,
     names: NameMatcher,
     index: PageIndex,
+    /// The pages' vectors, when an embedding model is configured.
+    pub vectors: Option<vectors::Vectors>,
 }
 
 impl SearchSnapshot {
@@ -83,6 +96,7 @@ impl SearchSnapshot {
             analyzer,
             names,
             index,
+            vectors: None,
         })
     }
 
@@ -110,14 +124,27 @@ pub fn version_of(pages: &[Page]) -> String {
 
 // ---- request and response ------------------------------------------------------------------
 
+/// How the memories and knowledge channels rank pages. Names are matched in every mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
+    /// BM25 over the keywords.
     #[default]
     Keyword,
+    /// Similarity of the query to the page vectors.
     Semantic,
+    /// Both: pages the keywords match strongly keep their keyword rank, meaning orders the
+    /// rest.
     Both,
+    /// Keywords first; a slot that comes back weak is searched again with both.
     Auto,
+}
+
+impl Mode {
+    /// Whether this mode needs page vectors and the embedding model.
+    pub fn needs_meaning(self) -> bool {
+        matches!(self, Mode::Semantic | Mode::Both)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,15 +190,16 @@ pub struct SearchRequest {
     pub query: String,
     #[serde(default)]
     pub keywords: Vec<String>,
-    #[serde(default)]
-    pub mode: Mode,
+    /// `[search] default_mode` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
     #[serde(default)]
     pub entities: Vec<String>,
     #[serde(default)]
     pub intent: Option<Intent>,
     #[serde(default)]
     pub slots: SlotRequest,
-    /// Follow the top memories to their knowledge. Accepted now; takes effect in M5.
+    /// Follow the top memories to the knowledge pages they are anchored to.
     #[serde(default = "yes")]
     pub hop: bool,
     #[serde(default)]
@@ -190,11 +218,6 @@ impl SearchRequest {
         }
         if self.query.chars().count() > MAX_QUERY_CHARS {
             return Err(format!("query is longer than {MAX_QUERY_CHARS} characters"));
-        }
-        if self.mode != Mode::Keyword {
-            return Err(
-                "only mode \"keyword\" is available; semantic, both and auto arrive in M5".into(),
-            );
         }
         if self.keywords.len() > MAX_KEYWORDS || self.entities.len() > MAX_KEYWORDS {
             return Err(format!(
@@ -252,7 +275,20 @@ pub enum Coverage {
 pub enum MatchedBy {
     /// A title or alias of the page is in the query.
     Alias,
+    /// Keyword search found it.
     Keyword,
+    /// Only its meaning is close to the query's.
+    Meaning,
+    /// Not matched itself: a top memory is anchored to it (`via: memory`).
+    Anchor,
+}
+
+/// How a hit got into its slot other than by matching the request itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Via {
+    /// A top memory is anchored to it (the memory-to-knowledge hop).
+    Memory,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,6 +314,8 @@ pub struct Hit {
     pub matched_by: MatchedBy,
     pub matched_keywords: Vec<String>,
     pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<Via>,
     pub lines: Vec<HitLine>,
     pub about: Vec<String>,
     /// The raw records the page cites, as `/read` ids (`sources/<name>`).
@@ -319,6 +357,8 @@ pub struct PathRoute {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResponse {
+    /// The mode the search ran in: the request's, or the default.
+    pub mode: Mode,
     pub entities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
@@ -342,13 +382,17 @@ impl SearchResponse {
         let slot = |s: &PageSlot| {
             serde_json::json!({
                 "coverage": s.coverage,
-                "hits": s.hits.iter().map(|h| serde_json::json!({
-                    "page": h.page,
-                    "match": h.matched_by,
-                })).collect::<Vec<_>>(),
+                "hits": s.hits.iter().map(|h| {
+                    let mut hit = serde_json::json!({ "page": h.page, "match": h.matched_by });
+                    if let Some(via) = h.via {
+                        hit["via"] = serde_json::json!(via);
+                    }
+                    hit
+                }).collect::<Vec<_>>(),
             })
         };
         let mut out = serde_json::json!({
+            "mode": self.mode,
             "entities": self.entities,
             "memories": slot(&self.memories),
             "knowledge": slot(&self.knowledge),
@@ -578,12 +622,19 @@ fn infer_intent(norm_query: &str) -> Option<Intent> {
 
 struct Candidate {
     ord: usize,
+    /// What it is ranked by after pins: BM25, similarity or the fused rank, by mode.
     score: f32,
+    /// Its BM25 score, when keyword search found it.
+    bm25: Option<f32>,
+    /// Its similarity to the query, when meaning search found it.
+    similarity: Option<f32>,
     /// Distinct names of this page found in the query or keywords.
     pins: usize,
     /// Per counted keyword: matched in the head (title, aliases, keywords, summary), the body.
     head: Vec<bool>,
     body: Vec<bool>,
+    /// Brought in by the memory-to-knowledge hop.
+    via: Option<Via>,
 }
 
 impl Candidate {
@@ -599,18 +650,62 @@ impl Candidate {
         self.head.iter().filter(|&&h| h).count()
     }
 
-    /// Whether the page matched enough to be shown at all.
+    /// Whether the page matched enough to be shown at all: named, matched by keywords enough
+    /// (when keyword search found it), or close enough in meaning.
     fn above_floor(&self) -> bool {
         let n = self.head.len();
-        self.pins > 0 || self.head_count() >= 1 || (n > 0 && self.matched_count() >= n.min(2))
+        self.pins > 0
+            || (self.bm25.is_some()
+                && (self.head_count() >= 1 || (n > 0 && self.matched_count() >= n.min(2))))
+            || self.meaning_strong()
+    }
+
+    /// Close enough in meaning to show, and then to make its slot strong.
+    fn meaning_strong(&self) -> bool {
+        self.similarity.is_some_and(|s| s >= MEANING_FLOOR)
+    }
+
+    /// Whether the keywords match it well: at least one in its head, and enough of them.
+    fn keyword_strong(&self) -> bool {
+        let n = self.head.len();
+        n > 0 && self.head_count() >= 1 && self.matched_count() as f32 / n as f32 >= STRONG_SHARE
     }
 
     fn strong(&self) -> bool {
-        let n = self.head.len();
-        self.pins > 0
-            || (n > 0
-                && self.head_count() >= 1
-                && self.matched_count() as f32 / n as f32 >= STRONG_SHARE)
+        self.pins > 0 || self.keyword_strong() || self.meaning_strong()
+    }
+
+    fn matched_by(&self) -> MatchedBy {
+        if self.pins > 0 {
+            MatchedBy::Alias
+        } else if self.bm25.is_some() {
+            MatchedBy::Keyword
+        } else if self.similarity.is_some() {
+            MatchedBy::Meaning
+        } else {
+            MatchedBy::Anchor
+        }
+    }
+}
+
+fn candidate(
+    snap: &SearchSnapshot,
+    counted: &[&Keyword],
+    ord: usize,
+    bm25: Option<f32>,
+    similarity: Option<f32>,
+    pins: &HashMap<usize, usize>,
+) -> Candidate {
+    let page = &snap.catalog.pages[ord];
+    Candidate {
+        ord,
+        score: 0.0,
+        bm25,
+        similarity,
+        pins: pins.get(&ord).copied().unwrap_or(0),
+        head: counted.iter().map(|k| k.matches(&page.head)).collect(),
+        body: counted.iter().map(|k| k.matches(&page.body)).collect(),
+        via: None,
     }
 }
 
@@ -637,8 +732,46 @@ impl Default for Ablation {
     }
 }
 
+/// Why a search in a meaning-based mode can't run.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct NoMeaning(pub &'static str);
+
+/// Whether meaning-based search can run on this snapshot: there is an embedding model, and
+/// the pages have vectors made by it.
+pub fn has_meaning(snap: &SearchSnapshot, embedder: Option<&dyn Embedder>) -> bool {
+    meaning(snap, embedder).is_some()
+}
+
+/// Whether a search in this mode can run on this snapshot: `semantic` and `both` need
+/// [`has_meaning`]. `auto` runs without it, by keywords alone.
+pub fn check_meaning(
+    mode: Mode,
+    snap: &SearchSnapshot,
+    embedder: Option<&dyn Embedder>,
+) -> Result<(), NoMeaning> {
+    if mode.needs_meaning() && !has_meaning(snap, embedder) {
+        return Err(NoMeaning(
+            "semantic search is off: no embedding model is loaded, or this tenant's page vectors could not be built ([embedding] model; see the service log)",
+        ));
+    }
+    Ok(())
+}
+
+/// The page vectors and the model that made them, when both are there.
+fn meaning<'a>(
+    snap: &'a SearchSnapshot,
+    embedder: Option<&'a dyn Embedder>,
+) -> Option<(&'a vectors::Vectors, &'a dyn Embedder)> {
+    match (&snap.vectors, embedder) {
+        (Some(v), Some(e)) if v.model == e.model() => Some((v, e)),
+        _ => None,
+    }
+}
+
 /// Runs one search for a caller over the wiki and graph snapshots. `reads` is what the caller's
-/// session has read so far.
+/// session has read so far. `embedder` embeds the query in the meaning-based modes; call
+/// [`check_meaning`] first. Blocking when it embeds: run it off the async threads.
 pub fn search(
     snap: &SearchSnapshot,
     graph: &GraphSnapshot,
@@ -646,7 +779,11 @@ pub fn search(
     req: &SearchRequest,
     cfg: &SearchConfig,
     reads: &ReadState,
+    embedder: Option<&dyn Embedder>,
 ) -> anyhow::Result<SearchResponse> {
+    let mode = req.mode.unwrap_or(cfg.default_mode);
+    check_meaning(mode, snap, embedder)?;
+    let meaning = meaning(snap, embedder);
     let defaults = cfg.slots;
     let ablation = cfg.ablation;
     let sizes = SlotSizes {
@@ -854,70 +991,173 @@ pub fn search(
 
     timings_us.push(("name_match", micros(step)));
 
-    // 3 and 4. Keyword search and ranking, per channel.
+    // 3 and 4. Search and ranking, per channel.
     let audiences = scope.audience_keys();
-    let mut run_channel = |slot: Slot, size: usize| -> anyhow::Result<(Vec<Candidate>, Coverage)> {
-        let span = tracing::info_span!("keyword_search", slot = slot.as_str());
-        let _enter = span.enter();
-        let queries = keywords
-            .iter()
-            .map(|k| {
-                let words: &[Tok] = if ablation.words { &k.words } else { &[] };
-                let bigrams: &[Tok] = if ablation.bigrams { &k.bigrams } else { &[] };
-                snap.index.keyword_query(words, bigrams, k.weight)
-            })
-            .collect();
-        let found = snap.index.search(queries, &audiences, slot, CANDIDATES)?;
-        let mut by_ord: HashMap<usize, f32> = found.into_iter().map(|(s, i)| (i, s)).collect();
+    let mut query_vector: Option<Vec<f32>> = None;
+    let mut run_channel = |slot: Slot,
+                           mode: Mode,
+                           timings: &mut Vec<(&'static str, u64)>|
+     -> anyhow::Result<Vec<Candidate>> {
+        let mut by_ord: HashMap<usize, (Option<f32>, Option<f32>)> = HashMap::new();
+        if matches!(mode, Mode::Keyword | Mode::Both) {
+            let span = tracing::info_span!("keyword_search", slot = slot.as_str());
+            let _enter = span.enter();
+            let queries = keywords
+                .iter()
+                .map(|k| {
+                    let words: &[Tok] = if ablation.words { &k.words } else { &[] };
+                    let bigrams: &[Tok] = if ablation.bigrams { &k.bigrams } else { &[] };
+                    snap.index.keyword_query(words, bigrams, k.weight)
+                })
+                .collect();
+            for (score, ord) in snap.index.search(queries, &audiences, slot, CANDIDATES)? {
+                by_ord.entry(ord).or_default().0 = Some(score);
+            }
+        }
+        if matches!(mode, Mode::Semantic | Mode::Both)
+            && let Some((vectors, embedder)) = meaning
+        {
+            if query_vector.is_none() {
+                let started = std::time::Instant::now();
+                let v = tracing::info_span!("embed_query")
+                    .in_scope(|| embedder.embed(&[req.query.trim().to_owned()]))?;
+                query_vector = v.into_iter().next();
+                timings.push(("embed_query", micros(started)));
+            }
+            let span = tracing::info_span!("meaning_search", slot = slot.as_str());
+            let _enter = span.enter();
+            let q = query_vector.as_deref().unwrap_or_default();
+            let found = vectors.best(q, |ord| {
+                let page = &snap.catalog.pages[ord];
+                page.slot == slot && audiences.contains(&page.audience)
+            });
+            // In `both` mode every keyword candidate gets its similarity too.
+            for (rank, (ord, sim)) in found.into_iter().enumerate() {
+                match by_ord.get_mut(&ord) {
+                    Some(e) => e.1 = Some(sim),
+                    None if rank < CANDIDATES => {
+                        by_ord.insert(ord, (None, Some(sim)));
+                    }
+                    None => {}
+                }
+            }
+        }
         for &i in pins.keys() {
             if snap.catalog.pages[i].slot == slot {
-                by_ord.entry(i).or_insert(0.0);
+                by_ord.entry(i).or_default();
             }
         }
         let mut cands: Vec<Candidate> = by_ord
             .into_iter()
-            .map(|(ord, score)| {
-                let page = &snap.catalog.pages[ord];
-                Candidate {
-                    ord,
-                    score,
-                    pins: pins.get(&ord).copied().unwrap_or(0),
-                    head: counted.iter().map(|k| k.matches(&page.head)).collect(),
-                    body: counted.iter().map(|k| k.matches(&page.body)).collect(),
-                }
-            })
+            .map(|(ord, (bm25, similarity))| candidate(snap, &counted, ord, bm25, similarity, pins))
             .collect();
         cands.retain(Candidate::above_floor);
+        // In `both` mode a page keywords match strongly keeps its keyword rank; meaning orders
+        // the rest. Scores from different rankings are never compared.
+        for c in &mut cands {
+            c.score = match mode {
+                Mode::Semantic => c.similarity.unwrap_or(0.0),
+                Mode::Keyword | Mode::Auto => c.bm25.unwrap_or(0.0),
+                Mode::Both if c.bm25.is_some() && c.keyword_strong() => c.bm25.unwrap_or(0.0),
+                Mode::Both => c.similarity.unwrap_or(0.0),
+            };
+        }
+        let tier = |c: &Candidate| match mode {
+            Mode::Both => u8::from(c.bm25.is_some() && c.keyword_strong()),
+            _ => 0,
+        };
+        cands.sort_by(|a, b| {
+            b.pins
+                .min(1)
+                .cmp(&a.pins.min(1))
+                .then(b.pins.cmp(&a.pins))
+                .then(tier(b).cmp(&tier(a)))
+                .then(b.score.total_cmp(&a.score))
+                .then(a.ord.cmp(&b.ord))
+        });
+        Ok(cands)
+    };
+    // `auto` searches a slot that comes back weak again with both rankings, when meaning is
+    // available.
+    let mut run_slot = |slot: Slot,
+                        timings: &mut Vec<(&'static str, u64)>|
+     -> anyhow::Result<(Vec<Candidate>, Coverage)> {
+        let first = if mode == Mode::Auto {
+            Mode::Keyword
+        } else {
+            mode
+        };
+        let mut cands = run_channel(slot, first, timings)?;
+        if mode == Mode::Auto && meaning.is_some() && !cands.first().is_some_and(Candidate::strong)
+        {
+            cands = run_channel(slot, Mode::Both, timings)?;
+        }
         // A keyword counts as matched only through a page that is good enough to show.
         for c in &cands {
             for (i, m) in matched_any.iter_mut().enumerate() {
                 *m |= c.matched(i);
             }
         }
-        cands.sort_by(|a, b| {
-            b.pins
-                .min(1)
-                .cmp(&a.pins.min(1))
-                .then(b.pins.cmp(&a.pins))
-                .then(b.score.total_cmp(&a.score))
-                .then(a.ord.cmp(&b.ord))
-        });
-        cands.truncate(size);
         let coverage = match cands.first() {
             Some(top) if top.strong() => Coverage::Strong,
             _ => Coverage::Weak,
         };
         Ok((cands, coverage))
     };
+    // A slot's time leaves out embedding the query, which has its own entry.
+    let embedded = |t: &[(&'static str, u64)]| -> u64 {
+        t.iter()
+            .filter(|(k, _)| *k == "embed_query")
+            .map(|(_, v)| v)
+            .sum()
+    };
     step = std::time::Instant::now();
-    let (mem, mem_cov) = run_channel(Slot::Memories, sizes.memories)?;
-    timings_us.push(("keyword_search_memories", micros(step)));
+    let before = timings_us.len();
+    let (mut mem, mem_cov) = run_slot(Slot::Memories, &mut timings_us)?;
+    let spent = micros(step).saturating_sub(embedded(&timings_us[before..]));
+    timings_us.push(("search_memories", spent));
     step = std::time::Instant::now();
-    let (kno, kno_cov) = run_channel(Slot::Knowledge, sizes.knowledge)?;
-    timings_us.push(("keyword_search_knowledge", micros(step)));
+    let before = timings_us.len();
+    let (mut kno, kno_cov) = run_slot(Slot::Knowledge, &mut timings_us)?;
+    let spent = micros(step).saturating_sub(embedded(&timings_us[before..]));
+    timings_us.push(("search_knowledge", spent));
     step = std::time::Instant::now();
 
-    // 5. Relations: edges around the named entities, then the entities the hits are anchored
+    // 5. Hop: the knowledge pages the top memories are anchored to, when those memories match
+    // well on their own, fill the knowledge slot's free places after its own hits ("these
+    // score lower, so the hop can't drift far"). A page already among the hits stays as it is.
+    mem.truncate(sizes.memories);
+    kno.truncate(sizes.knowledge);
+    if req.hop && kno.len() < sizes.knowledge {
+        tracing::info_span!("hop").in_scope(|| {
+            for c in mem.iter().take(cfg.hop.top_memories).filter(|c| c.strong()) {
+                for anchor in &snap.catalog.pages[c.ord].about {
+                    if kno.len() >= sizes.knowledge {
+                        return;
+                    }
+                    if let Some((ord, page)) = snap.catalog.get(anchor)
+                        && page.slot == Slot::Knowledge
+                        && scope.can_see(&page.path)
+                        && !kno.iter().any(|k| k.ord == ord)
+                    {
+                        let mut hop = candidate(snap, &counted, ord, None, None, pins);
+                        hop.via = Some(Via::Memory);
+                        kno.push(hop);
+                    }
+                }
+            }
+        });
+        timings_us.push(("hop", micros(step)));
+        step = std::time::Instant::now();
+    }
+    // Pages the hop brought in are shown too.
+    for c in kno.iter().filter(|c| c.via.is_some()) {
+        for (i, m) in matched_any.iter_mut().enumerate() {
+            *m |= c.matched(i);
+        }
+    }
+
+    // 6. Relations: edges around the named entities, then the entities the hits are anchored
     // to. A relationship question, or two named nodes, gets more room.
     let relation_slot = tracing::info_span!("relations").in_scope(|| {
         let mut lifted: Vec<NodeIndex> = Vec::new();
@@ -974,7 +1214,7 @@ pub fn search(
     timings_us.push(("relations", micros(step)));
     step = std::time::Instant::now();
 
-    // 6. Assemble.
+    // 7. Assemble.
     let span = tracing::info_span!("assemble");
     let _enter = span.enter();
     let make_slot = |cands: Vec<Candidate>, coverage: Coverage| PageSlot {
@@ -1009,6 +1249,7 @@ pub fn search(
         })
         .collect();
     Ok(SearchResponse {
+        mode,
         entities,
         intent,
         memories,
@@ -1236,11 +1477,8 @@ fn hit(
         page: path,
         kind: page.kind,
         title: page.title.clone(),
-        matched_by: if c.pins > 0 {
-            MatchedBy::Alias
-        } else {
-            MatchedBy::Keyword
-        },
+        matched_by: c.matched_by(),
+        via: c.via,
         matched_keywords: matched.iter().map(|k| k.text.clone()).collect(),
         summary: page.summary.clone(),
         lines,

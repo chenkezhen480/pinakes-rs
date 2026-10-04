@@ -46,15 +46,15 @@ timeout_secs = 120
 slots = { memories = 3, knowledge = 3, relations = 5 }   # hits per slot by default, max 20
 session_idle_minutes = 30      # read-tracker sessions expire after this idle time
 languages = ["en", "zh"]
-default_mode = "keyword"       # (M5) keyword, semantic, both or auto
-hop = { top_memories = 3, depth = 1 }   # (M5)
+default_mode = "keyword"       # (M5) keyword, semantic, both or auto, when a search doesn't say
+hop = { top_memories = 3 }     # (M5) the top memories whose knowledge anchors join the knowledge slot
 
 [trace]                        # search traces: <tenant>/logs/search-<date>.jsonl
 enabled = true
 retention_days = 30            # 0 keeps them forever
 
-[embedding]                    # (M5) local, runs inside the process
-model = "multilingual-e5-small"
+[embedding]                    # (M5) local, runs inside the process; files go to <data>/models
+model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: no vectors, semantic modes answer 503
 
 [graph]                        # (M3)
 backend = "neo4j"              # or "sqlite": graph.sqlite in each tenant folder, no Neo4j needed

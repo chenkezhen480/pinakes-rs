@@ -1077,3 +1077,113 @@ async fn a_page_anchors_to_one_its_plan_creates_later() {
     );
     assert_eq!(done["result"]["rejected"], json!([]), "{done}");
 }
+
+/// A memory recorded with the session the agent searched and read with is offered the
+/// knowledge pages that session read as anchors; anchored to one, a later search brings that
+/// page along through the memory-to-knowledge hop. Another user's session gives nothing.
+#[tokio::test]
+async fn a_memory_anchors_the_knowledge_its_task_read() {
+    let llm = model(|msg, _| {
+        if !msg
+            .contains("Knowledge pages the caller read for this task: expertise/seller-penalties")
+        {
+            return json!({ "edits": [] });
+        }
+        let mut e = create(
+            "experience/livestream-refund-disputes",
+            "Livestream refund disputes",
+            "Buyers from livestream sales dispute refunds after the stream ends; check the replay first.",
+            &["commerce:seller", "expertise/seller-penalties"],
+            "# Livestream refund disputes\n\n## Steps\n\n- Check the stream replay before answering.\n",
+        );
+        e["aliases"] = json!(["livestream refund dispute", "直播退款纠纷"]);
+        json!({ "edits": [e] })
+    });
+    let (mut app, key) = shopline(&llm).await;
+    // A group's own notes, which a page for the whole tenant may not anchor to.
+    let ops = group_dir_name("ops");
+    let notes = app
+        .wiki_dir("shopline")
+        .join(format!("groups/{ops}/expertise"));
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(
+        notes.join("refund-notes.md"),
+        "---\nkind: expertise\ntitle: Ops refund notes\nsummary: Internal notes.\n---\n\n# Ops refund notes\n\nInternal.\n",
+    )
+    .unwrap();
+    app.restart();
+    let ops_groups = vec!["ops".to_string()];
+    let wang = Caller::new(&key).user(Some("wang")).groups(&ops_groups);
+    let lily = Caller::new(&key).user(Some("lily"));
+    let group_page = format!("groups/{ops}/expertise/refund-notes");
+    let (status, resp) = app
+        .post(
+            wang,
+            "/read",
+            json!({ "ids": ["expertise/seller-penalties", group_page], "session": "task-7" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert!(resp.to_string().contains("Internal."), "{resp}");
+    let record = json!({
+        "task": "livestream refund dispute",
+        "outcome": "The buyer disputed a refund after the livestream ended; the replay settled it.",
+        "session": "task-7",
+    });
+
+    // Lily has no session task-7: nothing is offered, and the scripted model writes nothing.
+    let job = submit(&app, lily, "/ingest/experience", record.clone()).await;
+    assert_eq!(job["result"]["pages_created"], json!([]));
+    assert!(
+        !llm.calls(Step::Plan)[0].contains("read for this task"),
+        "another user's session leaked"
+    );
+
+    let job = submit(&app, wang, "/ingest/experience", record).await;
+    assert_eq!(
+        job["result"]["pages_created"],
+        json!(["experience/livestream-refund-disputes"]),
+        "{job}"
+    );
+    let plan = llm.calls(Step::Plan).pop().unwrap();
+    assert_eq!(
+        related_pages(&plan).first().map(String::as_str),
+        Some("expertise/seller-penalties"),
+        "the page read is shown first"
+    );
+    // The session is no part of the record: neither shown to the model nor kept.
+    assert!(!plan.contains("task-7"), "{plan}");
+    let source = job["result"]["source"].as_str().unwrap();
+    let kept =
+        std::fs::read_to_string(app.wiki_dir("shopline").parent().unwrap().join(source)).unwrap();
+    assert!(!kept.contains("task-7"), "{kept}");
+    assert!(kept.contains("livestream refund dispute"), "{kept}");
+    // The group's page was read too, but a tenant page may not anchor to it.
+    assert!(
+        plan.contains(
+            "Knowledge pages the caller read for this task: expertise/seller-penalties\n"
+        ),
+        "{plan}"
+    );
+
+    let (status, resp) = app
+        .post(
+            wang,
+            "/search",
+            json!({ "query": "直播退款纠纷怎么处理", "keywords": ["直播退款纠纷"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        resp["memories"]["hits"][0]["page"], "experience/livestream-refund-disputes",
+        "{resp}"
+    );
+    let hop: Vec<&Value> = resp["knowledge"]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| h["page"] == "expertise/seller-penalties")
+        .collect();
+    assert_eq!(hop.len(), 1, "{resp}");
+    assert_eq!(hop[0]["via"], "memory", "{resp}");
+}

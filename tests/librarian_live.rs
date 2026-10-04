@@ -314,3 +314,135 @@ async fn a_real_model_files_a_word_file() {
     );
     assert!(all.contains("5000"), "a threshold from the table");
 }
+
+/// A memory recorded with the session its task read with: the real model is offered the
+/// knowledge page the session read, should anchor the new playbook to it, and a later search
+/// brings that page along. The same record without a session runs in a second tenant, for
+/// comparison (printed, not asserted). Add `PINAKES_TEST_EMBEDDING=1` to search related pages
+/// by meaning too, which finds the Chinese page for the English record without the session.
+#[tokio::test]
+async fn a_real_model_anchors_the_knowledge_its_task_read() {
+    let Some(llm) = live_llm() else {
+        eprintln!("PINAKES_TEST_LLM is not set; skipping the live librarian test");
+        return;
+    };
+    // With PINAKES_TEST_EMBEDDING the related-page search ranks by meaning too.
+    let mut app = match common::embed::real() {
+        Some(e) => TestApp::with_llm_and_embedder(llm, e),
+        None => TestApp::with_llm(llm),
+    };
+    let mut keys = Vec::new();
+    for id in ["shopline", "shopline2"] {
+        keys.push(app.create_tenant(id).await);
+        testset::install_wiki("shopline", &app.wiki_dir(id));
+    }
+    app.restart();
+    let t = testset::tenants()
+        .into_iter()
+        .find(|t| t.id == "shopline")
+        .unwrap();
+    for key in &keys {
+        for call in testset::graph_calls(&t) {
+            let caller = Caller::new(key)
+                .user(call.user.as_deref())
+                .groups(&call.groups);
+            let (status, body) = app.post(caller, call.uri, call.body).await;
+            assert!(status.is_success(), "{}: {status} {body}", call.uri);
+        }
+    }
+    let record = |session: Option<&str>| {
+        let mut r = json!({
+            "task": "business buyer asks for a VAT special invoice",
+            "outcome": "A company buyer needed a VAT special invoice to claim the purchase. We asked for the company name, tax number, bank and account, and registered address before issuing it; it was sent three working days later and the buyer could claim it.",
+            "succeeded": true,
+            "entities": ["commerce:order"],
+            "date": "2026-10-04"
+        });
+        if let Some(s) = session {
+            r["session"] = json!(s);
+        }
+        r
+    };
+    let mut abouts = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        let wang = Caller::new(key).user(Some("wang"));
+        let session = (i == 0).then_some("task-invoice");
+        if session.is_some() {
+            let (status, _) = app
+                .post(
+                    wang,
+                    "/read",
+                    json!({ "ids": ["expertise/invoice-issuing"], "session": "task-invoice" }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, queued) = app.post(wang, "/ingest/experience", record(session)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+        let job = app.wait_job(wang, queued["job"].as_str().unwrap()).await;
+        eprintln!(
+            "with session: {}\n{}",
+            session.is_some(),
+            serde_json::to_string_pretty(&job["result"]).unwrap()
+        );
+        assert_eq!(job["status"], "done", "{job}");
+        let r = &job["result"];
+        let written: Vec<String> = r["pages_created"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(r["pages_updated"].as_array().unwrap())
+            .filter_map(|p| p.as_str().map(str::to_owned))
+            .filter(|p| p.starts_with("experience/"))
+            .collect();
+        let mut about = Vec::new();
+        for p in &written {
+            let (_, page) = app.get(wang, &format!("/pages/{p}")).await;
+            eprintln!("{p} about: {}", page["front_matter"]["about"]);
+            about.extend(
+                page["front_matter"]["about"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
+        let (_, resp) = app
+            .post(
+                wang,
+                "/search",
+                json!({ "query": "a company buyer wants a VAT special invoice", "keywords": ["VAT special invoice"] }),
+            )
+            .await;
+        eprintln!(
+            "search: memories {:?} knowledge {:?}",
+            resp["memories"]["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["page"].clone())
+                .collect::<Vec<_>>(),
+            resp["knowledge"]["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| (h["page"].clone(), h["match"].clone()))
+                .collect::<Vec<_>>()
+        );
+        abouts.push((session.is_some(), written, about));
+    }
+    let (_, written, about) = &abouts[0];
+    assert!(!written.is_empty(), "the playbook was written");
+    assert!(
+        about.iter().any(|a| a == "expertise/invoice-issuing"),
+        "with the session the playbook is anchored to the page the task read: {about:?}"
+    );
+    // Searching related pages by meaning finds the Chinese page without the session too.
+    if common::embed::real().is_some() {
+        let (_, written, about) = &abouts[1];
+        assert!(!written.is_empty(), "the playbook was written");
+        assert!(
+            about.iter().any(|a| a == "expertise/invoice-issuing"),
+            "without the session, by meaning: {about:?}"
+        );
+    }
+}

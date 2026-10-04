@@ -1,8 +1,8 @@
 //! Per-tenant operational storage: API keys, the audit log, graph schema definitions, the
 //! registry of graph spaces, the librarian's proposals and the documents it has filed (ids and
-//! versions); embeddings arrive in M5. Job status
-//! lives in memory in version 1 (`crate::jobs`). Each tenant has its own
-//! backend instance, so a store never sees another tenant.
+//! versions) and the vectors of wiki pages. Job status lives in memory in version 1
+//! (`crate::jobs`). Each tenant has its own backend instance, so a store never sees another
+//! tenant.
 
 mod sqlite;
 
@@ -21,6 +21,16 @@ pub struct AuditEntry {
     pub actor: String,
     pub action: String,
     pub detail: String,
+}
+
+/// The vector of one part of a page (`search::vectors::Unit`), as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredVector {
+    pub page: String,
+    pub heading: String,
+    /// The hash of the text it was built from.
+    pub hash: String,
+    pub vector: Vec<f32>,
 }
 
 #[async_trait]
@@ -85,4 +95,17 @@ pub trait Store: Send + Sync {
         audience: &str,
         content_hash: &str,
     ) -> anyhow::Result<Option<ReadingState>>;
+
+    /// Every stored vector of one embedding model.
+    async fn embeddings(&self, model: &str) -> anyhow::Result<Vec<StoredVector>>;
+
+    /// Brings the stored vectors up to date in one transaction: writes `put` (replacing the
+    /// same page and heading), removes `drop` (page, heading), and removes every vector of
+    /// another model.
+    async fn sync_embeddings(
+        &self,
+        model: &str,
+        put: Vec<StoredVector>,
+        drop: Vec<(String, String)>,
+    ) -> anyhow::Result<()>;
 }

@@ -26,5 +26,9 @@ It comes back in the memories slot.
 
 - Anchor the page to the node types, nodes and pages the task touched (`about`). At least one
   anchor is required.
-- Prefer node types (`schema:type`) over single nodes: a playbook is about a kind of thing, not
+- Prefer node types (such as `commerce:order`) over single nodes: a playbook is about a kind of thing, not
   one order.
+- Also anchor the knowledge pages (expertise, schema descriptions) the task relied on: the
+  rules, limits or procedures the playbook follows. When the item lists knowledge pages the
+  caller read for the task, anchor those the outcome used. A search that finds the playbook
+  then brings those pages along.

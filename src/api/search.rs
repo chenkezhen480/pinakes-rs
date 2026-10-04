@@ -1,4 +1,5 @@
-//! `POST /search`: the only search entry. Reads the tenant's in-memory snapshot; no LLM.
+//! `POST /search`: the only search entry. Reads the tenant's in-memory snapshot; no LLM. The
+//! meaning-based modes run the local embedding model on the query, off the async threads.
 
 use axum::Json;
 use axum::extract::State;
@@ -25,8 +26,45 @@ pub async fn search(
     // search answers from the wiki alone, with an empty relations slot.
     let graph = tenant.graph_or_empty().await;
     let reads = scope.read_state(req.session.as_deref());
-    let response =
-        crate::search::search(&snapshot, &graph, &scope, &req, &app.config.search, &reads)?;
+    let mode = req.mode.unwrap_or(app.config.search.default_mode);
+    crate::search::check_meaning(mode, &snapshot, app.embedder.as_deref())
+        .map_err(|e| ApiError::Unavailable(e.0.into()))?;
+    // Only a search that may embed its query leaves the async threads: `auto` without the
+    // model runs on keywords alone.
+    let embeds = mode != crate::search::Mode::Keyword
+        && crate::search::has_meaning(&snapshot, app.embedder.as_deref());
+    let response = if !embeds {
+        crate::search::search(
+            &snapshot,
+            &graph,
+            &scope,
+            &req,
+            &app.config.search,
+            &reads,
+            None,
+        )?
+    } else {
+        let (app, snapshot, graph, scope, req) = (
+            app.clone(),
+            snapshot.clone(),
+            graph.clone(),
+            scope.clone(),
+            req.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            crate::search::search(
+                &snapshot,
+                &graph,
+                &scope,
+                &req,
+                &app.config.search,
+                &reads,
+                app.embedder.as_deref(),
+            )
+        })
+        .await
+        .map_err(anyhow::Error::from)??
+    };
 
     let mut record = scope.trace_record(Endpoint::Search);
     record.snapshot = Some(snapshot.version.clone());

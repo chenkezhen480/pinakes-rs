@@ -9,7 +9,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
-use super::{AuditEntry, Store};
+use super::{AuditEntry, Store, StoredVector};
 use crate::graph::{SchemaDef, SpaceDef};
 use crate::librarian::documents::{Reading, ReadingState};
 use crate::librarian::{Document, Proposal};
@@ -87,6 +87,17 @@ const MIGRATIONS: &[&str] = &[
         updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
     CREATE INDEX readings_content ON readings (audience, content_hash);
+"#,
+    r#"
+    -- Vectors of wiki pages for meaning-based search, derived data like the search index.
+    CREATE TABLE embeddings (
+        page    TEXT NOT NULL,   -- e.g. experience/refund-handling
+        heading TEXT NOT NULL,   -- the part of the page: '' for its head, else a section heading
+        model   TEXT NOT NULL,   -- the model and its revision, e.g. jina-embeddings-v2-base-zh@c1ff9086
+        hash    TEXT NOT NULL,   -- hash of the text it was built from
+        vector  BLOB NOT NULL,   -- float32 values, little-endian
+        PRIMARY KEY (page, heading, model)
+    );
 "#,
 ];
 
@@ -495,6 +506,67 @@ impl Store for SqliteStore {
             .await?;
         text.map(|t| serde_json::from_str(&t).context("a stored reading state"))
             .transpose()
+    }
+
+    async fn embeddings(&self, model: &str) -> anyhow::Result<Vec<StoredVector>> {
+        let model = model.to_owned();
+        self.with_conn(move |c| {
+            let mut stmt =
+                c.prepare("SELECT page, heading, hash, vector FROM embeddings WHERE model = ?1")?;
+            let rows = stmt.query_map(params![model], |r| {
+                let bytes: Vec<u8> = r.get(3)?;
+                Ok(StoredVector {
+                    page: r.get(0)?,
+                    heading: r.get(1)?,
+                    hash: r.get(2)?,
+                    vector: bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| f32::from_le_bytes(*b))
+                        .collect(),
+                })
+            })?;
+            rows.collect()
+        })
+        .await
+    }
+
+    async fn sync_embeddings(
+        &self,
+        model: &str,
+        put: Vec<StoredVector>,
+        drop: Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
+        let model = model.to_owned();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut conn = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("sqlite mutex poisoned"))?;
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM embeddings WHERE model != ?1", params![model])?;
+            for (page, heading) in &drop {
+                tx.execute(
+                    "DELETE FROM embeddings WHERE page = ?1 AND heading = ?2 AND model = ?3",
+                    params![page, heading, model],
+                )?;
+            }
+            for v in &put {
+                let bytes: Vec<u8> = v.vector.iter().flat_map(|x| x.to_le_bytes()).collect();
+                tx.execute(
+                    "INSERT INTO embeddings (page, heading, model, hash, vector)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT (page, heading, model)
+                     DO UPDATE SET hash = excluded.hash, vector = excluded.vector",
+                    params![v.page, v.heading, model, v.hash, bytes],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .context("sqlite task panicked")?
     }
 }
 

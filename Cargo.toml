@@ -9,7 +9,9 @@ aho-corasick = "1"
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 axum = { version = "0.8", features = ["multipart"] }
+fastembed = { version = "7.1", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 hex = "0.4.3"
+hf-hub = { version = "0.5", default-features = false, features = ["ureq", "rustls-tls"] }
 jieba-rs = "0.11"
 neo4rs = "=0.9.0-rc.10"
 petgraph = "0.8"

@@ -32,6 +32,19 @@ pub struct Config {
     pub jobs: JobsConfig,
     #[serde(default)]
     pub converter: ConverterConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
+}
+
+/// The local embedding model for meaning-based search (design, "Search signals").
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingConfig {
+    /// `jina-embeddings-v2-base-zh`, the one model the service runs. Unset, pages get no
+    /// vectors and searches in `semantic` or `both` mode answer 503. Its files are downloaded
+    /// into `<data>/models` on first start.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// The document converter (design, "Files are turned into Markdown first").
@@ -300,17 +313,44 @@ pub struct SearchConfig {
     /// Read-tracker sessions expire after this many idle minutes.
     #[serde(default = "default_session_idle_minutes")]
     pub session_idle_minutes: u64,
+    /// The mode of a search that doesn't say.
+    #[serde(default)]
+    pub default_mode: crate::search::Mode,
+    /// The memory-to-knowledge hop.
+    #[serde(default)]
+    pub hop: HopConfig,
     /// Switches for experiments; leave unset in normal use.
     #[serde(default)]
     pub ablation: crate::search::Ablation,
 }
 
+/// The memory-to-knowledge hop (design, "How one search runs", step 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HopConfig {
+    /// How many of the top memories lead to the knowledge pages they are anchored to.
+    pub top_memories: usize,
+}
+
+impl Default for HopConfig {
+    fn default() -> Self {
+        Self { top_memories: 3 }
+    }
+}
+
 impl SearchConfig {
-    /// 16 hex digits identifying the settings that shape search results (slot sizes and
-    /// ablation switches), recorded in traces and replay reports.
-    pub fn fingerprint(&self) -> String {
+    /// 16 hex digits identifying the settings that shape search results (slot sizes, default
+    /// mode, hop, ablation switches and the embedding model), recorded in traces and replay
+    /// reports.
+    pub fn fingerprint(&self, embedding_model: Option<&str>) -> String {
         use sha2::{Digest, Sha256};
-        let shaping = serde_json::json!({ "slots": self.slots, "ablation": self.ablation });
+        let shaping = serde_json::json!({
+            "slots": self.slots,
+            "ablation": self.ablation,
+            "default_mode": self.default_mode,
+            "hop": self.hop,
+            "embedding": embedding_model,
+        });
         hex::encode(&Sha256::digest(shaping.to_string().as_bytes())[..8])
     }
 }
@@ -320,6 +360,8 @@ impl Default for SearchConfig {
         Self {
             slots: crate::search::SlotSizes::default(),
             session_idle_minutes: default_session_idle_minutes(),
+            default_mode: crate::search::Mode::default(),
+            hop: HopConfig::default(),
             ablation: crate::search::Ablation::default(),
         }
     }
@@ -567,6 +609,20 @@ impl Config {
         if f.is_empty() || f.contains(['/', '\\']) || f.starts_with('.') {
             anyhow::bail!("store.file_name must be a plain file name, got {f:?}");
         }
+        if let Some(m) = &self.embedding.model
+            && !crate::embed::known_model(m)
+        {
+            anyhow::bail!(
+                "embedding.model must be {:?}, got {m:?}",
+                crate::embed::MODEL
+            );
+        }
+        if self.search.default_mode.needs_meaning() && self.embedding.model.is_none() {
+            anyhow::bail!(
+                "search.default_mode {:?} needs an [embedding] model",
+                self.search.default_mode
+            );
+        }
         let s = &self.search.slots;
         let max = crate::search::MAX_SLOT;
         if s.memories > max || s.knowledge > max || s.relations > max {
@@ -672,6 +728,21 @@ slots = { memories = 40, knowledge = 2, relations = 6 }
             "the key never reaches a log"
         );
         assert!(ModelConfig::from_toml_str("modle = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn a_meaning_based_default_mode_needs_the_model() {
+        let err = Config::from_toml_str("[search]\ndefault_mode = \"semantic\"\n").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("needs an [embedding] model"),
+            "{err:#}"
+        );
+        Config::from_toml_str("[search]\ndefault_mode = \"auto\"\n").unwrap();
+        Config::from_toml_str(
+            "[search]\ndefault_mode = \"both\"\n[embedding]\nmodel = \"jina-embeddings-v2-base-zh\"\n",
+        )
+        .unwrap();
+        assert!(Config::from_toml_str("[embedding]\nmodel = \"multilingual-e5-small\"\n").is_err());
     }
 
     #[test]

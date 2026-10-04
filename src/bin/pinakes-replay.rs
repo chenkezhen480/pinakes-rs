@@ -91,13 +91,25 @@ async fn main() -> anyhow::Result<()> {
     let mut records = TraceReader::new(files);
     // Replays read today's graph: graph data has no history (design, "Search traces and
     // replay").
+    // Searches in the meaning-based modes need the embedding model the service uses.
+    let embedder = pinakes::load_embedder(&config);
     let tenants = Tenants::new(
         config.tenants_dir(),
         config.store.file_name.clone(),
         Duration::from_secs(60),
     )
-    .graph_backend(pinakes::graph::GraphBackend::from_config(&config));
-    let report = replay(&tenants, &config.search, wiki, records.by_ref()).await?;
+    .graph_backend(pinakes::graph::GraphBackend::from_config(&config))
+    .embedder(embedder.clone())
+    // The service may be running on the same folder: a replay never writes its stores.
+    .without_storing_vectors();
+    let report = replay(
+        &tenants,
+        &config.search,
+        embedder.as_deref(),
+        wiki,
+        records.by_ref(),
+    )
+    .await?;
     for e in &records.errors {
         eprintln!("could not read {e}");
     }

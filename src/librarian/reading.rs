@@ -829,6 +829,7 @@ fn concept_item(
         keywords,
         entities: job.entities.clone(),
         first_pages,
+        read: Vec::new(),
         task: Some(format!(
             "File the concept \"{}\" (lines {from}-{to}) as `{}`: update that page if it exists, \
              create it if not, from its extract. If the extract holds something that belongs to \

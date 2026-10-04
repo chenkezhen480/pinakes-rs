@@ -58,7 +58,12 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Storage sits behind the `Store` and `GraphStore` traits, from M1 on.
 - Every Neo4j node and edge carries the tenant id, and every Cypher query filters on it.
 - Every search stage gets a tracing span with its timing.
-- Embeddings use the e5 prefixes: `"query: "` for queries, `"passage: "` for stored text.
+- Languages are Chinese and English only. Embeddings use jina-embeddings-v2-base-zh (`src/embed.rs`,
+  fixed revision, no prefixes), chosen on the test set (design.md "As built in M5"). Page vectors
+  are built when the snapshot is (`search::vectors`) and kept in SQLite by page, heading and text
+  hash. Tests use `common::embed::Fake`; the real model runs with
+  `PINAKES_TEST_EMBEDDING=1 cargo test --test meaning_testset -- --nocapture` (downloads it into
+  `target/models` the first time; skipped without the variable).
 - The librarian never writes graph data, and every memory page has at least one anchor.
 - A graph schema backs many graph spaces. Only creating or changing a schema writes the wiki (via
   the librarian); creating a space or writing nodes and edges never does. Structural schema fields

@@ -26,6 +26,8 @@ struct Key {
 pub struct ReadState {
     whole: HashSet<String>,
     headings: HashSet<(String, String)>,
+    /// Each page read, whole or by a heading, in the order first read.
+    order: Vec<String>,
 }
 
 impl ReadState {
@@ -39,6 +41,11 @@ impl ReadState {
             self.headings
                 .contains(&(page.to_owned(), normalize(h.trim())))
         })
+    }
+
+    /// Every page read, whole or by one heading, the most recently first read first.
+    pub fn pages(&self) -> Vec<String> {
+        self.order.iter().rev().cloned().collect()
     }
 }
 
@@ -137,6 +144,9 @@ impl ReadTracker {
         entry.last_used = Instant::now();
         let state = &mut entry.state;
         let already = state.has_read(page, heading);
+        if !state.order.iter().any(|p| p == page) {
+            state.order.push(page.to_owned());
+        }
         match heading {
             None => {
                 state.whole.insert(page.to_owned());
@@ -154,6 +164,19 @@ impl ReadTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pages_come_most_recently_read_first() {
+        let t = ReadTracker::new(Duration::from_secs(1800));
+        t.record(None, "s", "expertise/b", None);
+        t.record(None, "s", "expertise/a", Some("Steps"));
+        t.record(None, "s", "expertise/c", None);
+        t.record(None, "s", "expertise/b", Some("Again"));
+        assert_eq!(
+            t.state(None, "s").pages(),
+            vec!["expertise/c", "expertise/a", "expertise/b"]
+        );
+    }
 
     #[test]
     fn remembers_reads_per_session_and_user() {

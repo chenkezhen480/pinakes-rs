@@ -3,12 +3,14 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use pinakes::config::Config;
+use pinakes::embed::Embedder;
 use pinakes::llm::Llm;
 use pinakes::tenants::tenant_dir_name;
 use pinakes::{AppState, router};
@@ -27,6 +29,8 @@ pub struct TestApp {
     extra_config: String,
     /// The librarian's LLM, kept across restarts.
     llm: Option<Llm>,
+    /// The embedding model, kept across restarts.
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 /// Who is calling: an API key, plus the user, groups and audience headers the host would send.
@@ -91,15 +95,30 @@ impl TestApp {
         Self::build(extra, Some(llm))
     }
 
+    /// A service with extra config TOML whose pages and queries are embedded by `embedder`.
+    pub fn with_embedder(extra: &str, embedder: Arc<dyn Embedder>) -> Self {
+        Self::build_with(extra, Some(super::llm::describer().llm()), Some(embedder))
+    }
+
+    /// A service whose librarian calls `llm` and whose pages and queries `embedder` embeds.
+    pub fn with_llm_and_embedder(llm: Llm, embedder: Arc<dyn Embedder>) -> Self {
+        Self::build_with("", Some(llm), Some(embedder))
+    }
+
     fn build(extra: &str, llm: Option<Llm>) -> Self {
+        Self::build_with(extra, llm, None)
+    }
+
+    fn build_with(extra: &str, llm: Option<Llm>, embedder: Option<Arc<dyn Embedder>>) -> Self {
         let data = tempfile::tempdir().unwrap();
-        let (router, state) = Self::make_router(&data, extra, llm.clone());
+        let (router, state) = Self::make_router(&data, extra, llm.clone(), embedder.clone());
         Self {
             data,
             router,
             state,
             extra_config: extra.to_owned(),
             llm,
+            embedder,
         }
     }
 
@@ -107,22 +126,31 @@ impl TestApp {
         &self.state.config
     }
 
-    fn make_router(data: &TempDir, extra: &str, llm: Option<Llm>) -> (Router, AppState) {
+    fn make_router(
+        data: &TempDir,
+        extra: &str,
+        llm: Option<Llm>,
+        embedder: Option<Arc<dyn Embedder>>,
+    ) -> (Router, AppState) {
         let cfg = Config::from_toml_str(&format!(
             "[data]\ndir = {:?}\n{extra}",
             data.path().to_str().unwrap()
         ))
         .unwrap();
         std::fs::create_dir_all(cfg.tenants_dir()).unwrap();
-        let state = AppState::with_llm(cfg, Some(ADMIN), llm);
+        let state = AppState::with_models(cfg, Some(ADMIN), llm, embedder);
         (router(state.clone()), state)
     }
 
     /// Starts a fresh service over the same data folder, as after a restart: tenants load
     /// again from their files, and so do their search snapshots.
     pub fn restart(&mut self) {
-        (self.router, self.state) =
-            Self::make_router(&self.data, &self.extra_config, self.llm.clone());
+        (self.router, self.state) = Self::make_router(
+            &self.data,
+            &self.extra_config,
+            self.llm.clone(),
+            self.embedder.clone(),
+        );
     }
 
     /// Restarts over the same data folder with other extra config TOML.

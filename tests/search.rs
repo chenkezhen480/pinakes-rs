@@ -63,7 +63,7 @@ async fn bad_requests_are_rejected() {
     let c = w.caller("shopline", None);
     for body in [
         json!({ "query": "" }),
-        json!({ "query": "refund", "mode": "semantic" }),
+        json!({ "query": "refund", "mode": "meaning" }),
         json!({ "query": "refund", "slots": { "memories": 21 } }),
         json!({ "query": "refund", "tenant": "other" }),
         json!({ "query": "refund", "keywords": ["x".repeat(101)] }),
@@ -72,6 +72,20 @@ async fn bad_requests_are_rejected() {
         let (status, resp) = w.app.post(c, "/search", body.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body} → {resp}");
     }
+    // Without an embedding model the meaning-based modes are off; `auto` runs on keywords.
+    for mode in ["semantic", "both"] {
+        let (status, resp) = w
+            .app
+            .post(c, "/search", json!({ "query": "refund", "mode": mode }))
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{mode}: {resp}");
+    }
+    let (status, resp) = w
+        .app
+        .post(c, "/search", json!({ "query": "refund", "mode": "auto" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(resp["mode"], "auto");
     let (status, _) = w
         .app
         .post(

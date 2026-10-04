@@ -46,6 +46,9 @@ struct ExperienceIn {
     entities: Vec<String>,
     #[serde(default)]
     date: Option<String>,
+    /// The session the agent searched and read with during the task (see [`read_pages`]).
+    #[serde(default)]
+    session: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +64,9 @@ struct DecisionIn {
     entities: Vec<String>,
     #[serde(default)]
     date: Option<String>,
+    /// The session the agent searched and read with while deciding.
+    #[serde(default)]
+    session: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +110,8 @@ struct Parsed {
     entities: Vec<String>,
     /// For a document: its title, its text and the id the caller sent.
     document: Option<(String, String, Option<String>)>,
+    /// The read-tracker session the record names (experience and decisions).
+    session: Option<String>,
 }
 
 fn field(what: &str, s: &str, max: usize) -> Result<String, ApiError> {
@@ -137,6 +145,37 @@ fn entities(list: &[String]) -> Result<Vec<String>, ApiError> {
         .map(|e| e.trim().to_owned())
         .filter(|e| !e.is_empty())
         .collect())
+}
+
+fn session(s: &Option<String>) -> Result<Option<String>, ApiError> {
+    match s {
+        None => Ok(None),
+        Some(s) => {
+            crate::search::validate_session(s).map_err(ApiError::BadRequest)?;
+            Ok(Some(s.clone()))
+        }
+    }
+}
+
+/// The knowledge pages (expertise and schema descriptions) the caller's session read during
+/// the task: what the memory most likely relied on. The librarian offers those the new page
+/// may anchor to (up to 8) as anchors, so the memory-to-knowledge hop leads back to them.
+fn read_pages(scope: &Scope, session: Option<&str>) -> Vec<String> {
+    let Some(session) = session else {
+        return Vec::new();
+    };
+    scope
+        .read_state(Some(session))
+        .pages()
+        .into_iter()
+        .filter(|p| {
+            crate::wiki::PagePath::parse(p).is_ok_and(|p| {
+                p.kind().is_some_and(|k| {
+                    crate::search::catalog::Slot::of(k) == crate::search::catalog::Slot::Knowledge
+                })
+            })
+        })
+        .collect()
 }
 
 fn date(d: &Option<String>) -> Result<(), ApiError> {
@@ -178,6 +217,7 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 keywords: vec![task],
                 entities: entities(&r.entities)?,
                 document: None,
+                session: session(&r.session)?,
             }
         }
         Kind::Decision => {
@@ -196,6 +236,7 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 keywords: vec![topic],
                 entities: entities(&r.entities)?,
                 document: None,
+                session: session(&r.session)?,
             }
         }
         Kind::Expertise => {
@@ -218,6 +259,7 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 keywords: vec![title.clone()],
                 entities: entities(&r.entities)?,
                 document: Some((title, content, id)),
+                session: None,
             }
         }
         Kind::Preference => {
@@ -228,6 +270,7 @@ fn parse_kind(kind: Kind, body: &serde_json::Value) -> Result<Parsed, ApiError> 
                 keywords: Vec::new(),
                 entities: entities(&r.entities)?,
                 document: None,
+                session: None,
             }
         }
         Kind::Graph => unreachable!("graph inserts have their own endpoints"),
@@ -307,6 +350,11 @@ async fn insert(
         ));
     }
     let parsed = parse_kind(kind, &record)?;
+    // The session only says which reads to look at; it is no part of what happened, so it is
+    // neither kept with the record nor shown to the librarian.
+    if let Some(o) = record.as_object_mut() {
+        o.remove("session");
+    }
     let asked = audience_header(&app, &headers)?;
     let mut target = audience(kind, &scope, asked.as_deref())?;
     let librarian = app.librarian()?;
@@ -372,6 +420,7 @@ async fn insert(
     let job = Ingest {
         target,
         writer: scope.clone(),
+        read: read_pages(&scope, parsed.session.as_deref()),
         record,
         source,
         query: parsed.query,
