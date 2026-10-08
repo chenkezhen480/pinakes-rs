@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use pinakes::config::Config;
 use pinakes::embed::Embedder;
@@ -134,11 +134,12 @@ impl TestApp {
         llm: Option<Llm>,
         embedder: Option<Arc<dyn Embedder>>,
     ) -> (Router, AppState) {
-        let cfg = Config::from_toml_str(&format!(
+        let mut cfg = Config::from_toml_str(&format!(
             "[data]\ndir = {:?}\n{extra}",
             data.path().to_str().unwrap()
         ))
         .unwrap();
+        cfg.load_jwt_key(std::path::Path::new(".")).unwrap();
         std::fs::create_dir_all(cfg.tenants_dir()).unwrap();
         let state = AppState::with_models(cfg, Some(ADMIN), llm, embedder);
         (router(state.clone()), state)
@@ -264,6 +265,18 @@ impl TestApp {
             );
         req = with_caller(req, caller);
         self.send(req.body(Body::from(body)).unwrap()).await
+    }
+
+    /// Any request, answered with its status, headers and body as text.
+    pub async fn send_raw(&self, req: Request<Body>) -> (StatusCode, HeaderMap, String) {
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let (status, headers) = (resp.status(), resp.headers().clone());
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {

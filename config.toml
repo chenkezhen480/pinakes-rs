@@ -11,7 +11,7 @@ port = 8080
 dir = "./data"                 # the Docker image will point this at its /data volume (M7)
 
 [identity]
-mode = "api_key"               # "jwt" arrives in M7
+mode = "api_key"               # or "jwt"
 deployment = "multi_tenant"    # or "personal": one person, default tenant and user below
 default_tenant = "000000"      # personal: created on first start, key in <data>/personal-api-key.txt
 default_user = "admin"         # personal: the user when no user header is sent (no admin rights)
@@ -20,10 +20,15 @@ user_header = "X-User-Id"
 group_header = "X-User-Groups"
 audience_header = "X-Audience" # who an insert is for: tenant, user or group:<id>
 admin_key_env = "PINAKES_ADMIN_KEY"
-# jwt mode (M7):
-# public_key_file = "keys/auth.pem"
+# jwt mode: `Authorization: Bearer <token>` signed by the host; tenant, user and groups come
+# from its claims (the tenant must exist: POST /admin/tenants), the audience header stays.
+# public_key_file = "keys/auth.pem"   # the host's public key (PEM), relative to this file
+# algorithm = "RS256"                 # RS256/384/512, PS256/384/512, ES256/384 or EdDSA
 # tenant_claim = "tenant_id"
 # user_claim = "sub"
+# groups_claim = "groups"             # a list of group ids
+# issuer = "https://auth.example"     # when set, tokens must carry this `iss`
+# audience = "pinakes"                # when set, tokens must carry this `aud`; unset: none allowed
 
 [store]                        # one SQLite file per tenant, WAL mode
 file_name = "pinakes.sqlite"

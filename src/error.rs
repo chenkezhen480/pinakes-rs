@@ -49,21 +49,25 @@ impl ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, code) = self.status_and_code();
-        let message = match &self {
+impl ApiError {
+    /// The error body, `{"error": {"code", "message"}}`; an internal error is logged and its
+    /// details are left out.
+    pub fn body(&self) -> serde_json::Value {
+        let (_, code) = self.status_and_code();
+        let message = match self {
             ApiError::Internal(err) => {
                 tracing::error!(error = ?err, "internal error");
                 "internal error".to_string()
             }
             other => other.to_string(),
         };
-        (
-            status,
-            Json(json!({ "error": { "code": code, "message": message } })),
-        )
-            .into_response()
+        json!({ "error": { "code": code, "message": message } })
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status_and_code().0, Json(self.body())).into_response()
     }
 }
 

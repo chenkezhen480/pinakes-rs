@@ -4,6 +4,7 @@
 pub mod api;
 pub mod config;
 pub mod convert;
+pub mod dev;
 pub mod embed;
 pub mod error;
 pub mod graph;
@@ -12,6 +13,7 @@ pub mod jobs;
 pub mod kinds;
 pub mod librarian;
 pub mod llm;
+pub mod mcp;
 pub mod par;
 pub mod search;
 pub mod store;
@@ -51,13 +53,17 @@ pub struct AppInner {
     /// The librarian, or why it is off. Set at startup; turned on later when the key is
     /// entered at the prompt (`main.rs`).
     librarian: std::sync::RwLock<Result<Arc<librarian::Librarian>, llm::Missing>>,
+    /// Cancelled when the service stops, so long-lived streams (MCP) end and shutdown completes.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl AppState {
     /// `admin_key` is the service admin key; `None` or empty disables the `/admin` routes. The
     /// librarian's model comes from `[librarian]` and its key from the environment; without
     /// them the service still starts with the librarian off, and the writes that need it
-    /// answer 503 until [`AppState::set_llm`] turns it on.
+    /// answer 503 until [`AppState::set_llm`] turns it on. The embedding model loads in the
+    /// background (call this inside the runtime): meaning-based searches answer 503 until it is
+    /// in, and the tenants opened meanwhile get their page vectors when it is.
     pub fn new(config: Config, admin_key: Option<&str>) -> Self {
         let llm = llm::client(&config.librarian, config.librarian.llm.key());
         match &llm {
@@ -68,8 +74,40 @@ impl AppState {
             ),
             Err(e) => tracing::warn!(error = %e, "the librarian is off"),
         }
-        let embedder = load_embedder(&config);
-        Self::build(config, admin_key, llm, embedder)
+        let model = config
+            .embedding
+            .model
+            .is_some()
+            .then(|| Arc::new(embed::Background::default()));
+        let embedder = model.clone().map(|m| m as Arc<dyn embed::Embedder>);
+        let state = Self::build(config, admin_key, llm, embedder);
+        if let Some(model) = model {
+            state.load_in_background(model);
+        }
+        state
+    }
+
+    fn load_in_background(&self, model: Arc<embed::Background>) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let config = state.config.clone();
+            let loaded = tokio::task::spawn_blocking(move || load_embedder_model(&config)).await;
+            let loaded = match loaded {
+                Ok(Some(loaded)) => loaded,
+                // Why it failed is already logged.
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::error!(error = %e, "loading the embedding model panicked; semantic search is off");
+                    return;
+                }
+            };
+            model.set(loaded);
+            for tenant in state.tenants.open_tenants().await {
+                if let Err(e) = tenant.add_missing_vectors().await {
+                    tracing::error!(tenant = %tenant.dir_name, error = %format!("{e:#}"), "page vectors not added");
+                }
+            }
+        });
     }
 
     /// Like [`AppState::new`] with the librarian's model given, as tests give a scripted one;
@@ -120,6 +158,7 @@ impl AppState {
                 config.jobs.keep_finished_minutes.saturating_mul(60),
             )),
             librarian: std::sync::RwLock::new(librarian),
+            shutdown: Default::default(),
             search_fingerprint: config
                 .search
                 .fingerprint(embedder.as_ref().map(|e| e.model())),
@@ -159,6 +198,10 @@ impl AppState {
 /// Loads `[embedding] model`, downloading its files into `<data>/models` the first time. When
 /// it can't be loaded the service still starts, and meaning-based searches answer 503.
 pub fn load_embedder(config: &Config) -> Option<Arc<dyn embed::Embedder>> {
+    load_embedder_model(config).map(|m| Arc::new(m) as Arc<dyn embed::Embedder>)
+}
+
+fn load_embedder_model(config: &Config) -> Option<embed::FastEmbedder> {
     let name = config.embedding.model.as_deref()?;
     let dir = config.data.dir.join("models");
     let started = std::time::Instant::now();
@@ -169,7 +212,7 @@ pub fn load_embedder(config: &Config) -> Option<Arc<dyn embed::Embedder>> {
                 ms = started.elapsed().as_millis() as u64,
                 "embedding model loaded"
             );
-            Some(Arc::new(e))
+            Some(e)
         }
         Err(e) => {
             tracing::error!(model = name, error = %format!("{e:#}"), "semantic search is off");

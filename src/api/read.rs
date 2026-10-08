@@ -20,7 +20,7 @@ use crate::search::{SearchSnapshot, validate_session};
 use crate::trace::Endpoint;
 use crate::wiki::{Page, PagePath, WikiError};
 
-const MAX_IDS: usize = 20;
+pub(crate) const MAX_IDS: usize = 20;
 /// Source ids are `sources/<name>`, with `#L<from>-<to>` for lines of a document; a
 /// `heading` doesn't apply to them.
 pub(crate) const SOURCE_PREFIX: &str = "sources/";

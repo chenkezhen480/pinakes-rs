@@ -245,6 +245,18 @@ impl Tenant {
         Ok(())
     }
 
+    /// Builds the open snapshot again if it was built before the embedding model was in, so
+    /// its pages get their vectors. A tenant not open gets them when it opens.
+    pub async fn add_missing_vectors(&self) -> anyhow::Result<()> {
+        let _building = self.building.lock().await;
+        let lacking = self.current_snapshot().is_some_and(|s| s.vectors.is_none());
+        if lacking {
+            let next = self.open_snapshot().await?;
+            *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(next));
+        }
+        Ok(())
+    }
+
     fn index_dir(&self) -> Option<PathBuf> {
         self.writable
             .then(|| self.dir.join("index").join("tantivy"))
@@ -370,7 +382,8 @@ impl Tenant {
         previous: Option<&Arc<SearchSnapshot>>,
     ) -> anyhow::Result<SearchSnapshot> {
         use crate::search::vectors::{Earlier, build};
-        let Some(embedder) = self.embedder.clone() else {
+        // A model still loading adds the vectors when it is in (`add_missing_vectors`).
+        let Some(embedder) = self.embedder.clone().filter(|e| e.ready()) else {
             return Ok(snapshot);
         };
         let off = |e: anyhow::Error| {
@@ -650,11 +663,15 @@ impl Tenants {
         }
     }
 
+    /// The tenants in memory now.
+    pub async fn open_tenants(&self) -> Vec<Arc<Tenant>> {
+        self.open.read().await.values().cloned().collect()
+    }
+
     /// Releases the search snapshots and graphs of open tenants no request used for `idle`
     /// (see [`Tenant::release_if_idle`]).
     pub async fn release_idle(&self, idle: Duration) {
-        let open: Vec<Arc<Tenant>> = self.open.read().await.values().cloned().collect();
-        for tenant in open {
+        for tenant in self.open_tenants().await {
             tenant.release_if_idle(idle);
         }
     }
@@ -736,6 +753,18 @@ impl Tenants {
             .has_key_hash(&hash_api_key(api_key))
             .await
             .then_some(tenant))
+    }
+
+    /// The tenant with this id, if the service has it (JWT mode names tenants by id).
+    pub async fn by_id(&self, tenant_id: &str) -> anyhow::Result<Option<Arc<Tenant>>> {
+        if validate_id("tenant", tenant_id).is_err() {
+            return Ok(None);
+        }
+        // Folder names are hashes: the tenant found must be the one named.
+        Ok(self
+            .open_by_dir(&tenant_dir_name(tenant_id))
+            .await?
+            .filter(|t| t.id == tenant_id))
     }
 
     /// Opens a tenant by its folder name (`t_` plus 16 hex digits), for offline tools such as

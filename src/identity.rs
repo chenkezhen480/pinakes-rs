@@ -1,7 +1,8 @@
 //! Who is calling: the `Scope` (tenant, optional user, groups) every read and write path takes.
 //!
 //! In API key mode the tenant comes from the key, and the user and groups from headers set by the
-//! calling backend. A `Scope` can only be made here, from credentials, never from a request body.
+//! calling backend. In JWT mode all three come from the claims of a token the host signed. A
+//! `Scope` can only be made here, from credentials, never from a request body.
 
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
-use crate::config::Deployment;
+use crate::config::{Deployment, IdentityMode};
 use crate::error::ApiError;
 use crate::tenants::{Tenant, group_dir_name, user_dir_name, validate_id};
 use crate::wiki::{Audience, PagePath};
@@ -124,8 +125,13 @@ fn parse_groups(value: Option<&HeaderValue>) -> Result<Vec<Group>, ApiError> {
     let text = value
         .to_str()
         .map_err(|_| ApiError::BadRequest("group header is not valid text".into()))?;
+    groups(text.split(','))
+}
+
+/// Groups from their ids: blanks skipped, repeats dropped, each checked.
+fn groups<'a>(ids: impl Iterator<Item = &'a str>) -> Result<Vec<Group>, ApiError> {
     let mut groups: Vec<Group> = Vec::new();
-    for id in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    for id in ids.map(str::trim).filter(|s| !s.is_empty()) {
         validate_id("group", id).map_err(ApiError::BadRequest)?;
         if !groups.iter().any(|g| g.id == id) {
             groups.push(Group {
@@ -140,6 +146,108 @@ fn parse_groups(value: Option<&HeaderValue>) -> Result<Vec<Group>, ApiError> {
         )));
     }
     Ok(groups)
+}
+
+fn user(id: &str) -> Result<User, ApiError> {
+    let id = id.trim();
+    validate_id("user", id).map_err(ApiError::BadRequest)?;
+    Ok(User {
+        id: id.to_owned(),
+        dir: user_dir_name(id),
+    })
+}
+
+type Claims = serde_json::Map<String, serde_json::Value>;
+
+/// The key JWT mode checks tokens with, and its algorithm.
+pub struct JwtKey {
+    key: jsonwebtoken::DecodingKey,
+    algorithm: jsonwebtoken::Algorithm,
+}
+
+impl std::fmt::Debug for JwtKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JwtKey({:?})", self.algorithm)
+    }
+}
+
+impl JwtKey {
+    /// A public key in PEM for an asymmetric algorithm. Shared-secret algorithms (HS256…) are
+    /// refused: the service only ever checks tokens, it never makes them.
+    pub fn new(algorithm: &str, pem: &[u8]) -> anyhow::Result<Self> {
+        use jsonwebtoken::{Algorithm as A, DecodingKey};
+        let algorithm: A = algorithm
+            .parse()
+            .map_err(|_| anyhow::anyhow!("unknown JWT algorithm {algorithm:?}"))?;
+        let key = match algorithm {
+            A::RS256 | A::RS384 | A::RS512 | A::PS256 | A::PS384 | A::PS512 => {
+                DecodingKey::from_rsa_pem(pem)
+            }
+            A::ES256 | A::ES384 => DecodingKey::from_ec_pem(pem),
+            A::EdDSA => DecodingKey::from_ed_pem(pem),
+            other => anyhow::bail!("{other:?} needs a shared secret; use a public-key algorithm"),
+        }
+        .map_err(|e| anyhow::anyhow!("not a {algorithm:?} public key: {e}"))?;
+        Ok(Self { key, algorithm })
+    }
+
+    /// The claims of a token signed with this key, unexpired, with the configured issuer and
+    /// audience. Every failure is the same 401.
+    fn claims(&self, token: &str, cfg: &crate::config::IdentityConfig) -> Result<Claims, ApiError> {
+        let mut v = jsonwebtoken::Validation::new(self.algorithm);
+        // A token may not be used before its `nbf`, when it has one.
+        v.validate_nbf = true;
+        // A configured issuer or audience must be present, not only right when present.
+        let mut required = vec!["exp"];
+        if let Some(iss) = &cfg.issuer {
+            v.set_issuer(&[iss]);
+            required.push("iss");
+        }
+        match &cfg.audience {
+            Some(aud) => {
+                v.set_audience(&[aud]);
+                required.push("aud");
+            }
+            None => v.validate_aud = false,
+        }
+        v.set_required_spec_claims(&required);
+        let claims = jsonwebtoken::decode::<Claims>(token, &self.key, &v)
+            .map_err(|e| {
+                tracing::debug!(error = %e, "token refused");
+                ApiError::Unauthorized
+            })?
+            .claims;
+        // A token meant for some audience isn't meant for a service that names none.
+        if cfg.audience.is_none() && claims.contains_key("aud") {
+            tracing::debug!("token refused: it names an audience and none is configured");
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(claims)
+    }
+}
+
+/// A string claim, if present; any other type makes the token malformed.
+fn string_claim<'a>(claims: &'a Claims, name: &str) -> Result<Option<&'a str>, ApiError> {
+    match claims.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(_) => Err(ApiError::BadRequest(format!(
+            "token claim {name} is not a string"
+        ))),
+    }
+}
+
+/// The group ids of a list claim; absent is none.
+fn groups_claim(claims: &Claims, name: &str) -> Result<Vec<Group>, ApiError> {
+    let bad = || ApiError::BadRequest(format!("token claim {name} is not a list of strings"));
+    match claims.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(ids)) => {
+            let ids: Option<Vec<&str>> = ids.iter().map(|v| v.as_str()).collect();
+            groups(ids.ok_or_else(bad)?.into_iter())
+        }
+        Some(_) => Err(bad()),
+    }
 }
 
 /// The API key from the configured header. For `Authorization`, the `Bearer` scheme is required
@@ -164,33 +272,51 @@ impl FromRequestParts<AppState> for Scope {
     #[tracing::instrument(name = "resolve_identity", skip_all)]
     async fn from_request_parts(parts: &mut Parts, app: &AppState) -> Result<Self, ApiError> {
         let cfg = &app.config.identity;
-        let key = api_key(&parts.headers, &cfg.key_header).ok_or(ApiError::Unauthorized)?;
-        let tenant = app
-            .tenants
-            .authenticate(key)
-            .await?
-            .ok_or(ApiError::Unauthorized)?;
-
-        let user = match parts.headers.get(cfg.user_header.as_str()) {
-            // A personal deployment has one person, so no header means that person.
+        let credential = api_key(&parts.headers, &cfg.key_header).ok_or(ApiError::Unauthorized)?;
+        let (tenant, user, groups) = match cfg.mode {
+            IdentityMode::ApiKey => {
+                let tenant = app
+                    .tenants
+                    .authenticate(credential)
+                    .await?
+                    .ok_or(ApiError::Unauthorized)?;
+                let user = match parts.headers.get(cfg.user_header.as_str()) {
+                    None => None,
+                    Some(v) => Some(user(v.to_str().map_err(|_| {
+                        ApiError::BadRequest("user id header is not valid text".into())
+                    })?)?),
+                };
+                let groups = parse_groups(parts.headers.get(cfg.group_header.as_str()))?;
+                (tenant, user, groups)
+            }
+            IdentityMode::Jwt => {
+                // `Config::load` reads the key; a config made another way may lack it.
+                let key = cfg.jwt.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("JWT mode without a key: load the config with Config::load")
+                })?;
+                let claims = key.claims(credential, cfg)?;
+                let tenant_id =
+                    string_claim(&claims, &cfg.tenant_claim)?.ok_or(ApiError::Unauthorized)?;
+                // A tenant the token names but the service doesn't have is a stranger too.
+                let tenant = app
+                    .tenants
+                    .by_id(tenant_id)
+                    .await?
+                    .ok_or(ApiError::Unauthorized)?;
+                let user = string_claim(&claims, &cfg.user_claim)?
+                    .map(user)
+                    .transpose()?;
+                (tenant, user, groups_claim(&claims, &cfg.groups_claim)?)
+            }
+        };
+        // A personal deployment has one person, so no user means that person.
+        let user = match user {
             None if cfg.deployment == Deployment::Personal => Some(User {
                 id: cfg.default_user.clone(),
                 dir: user_dir_name(&cfg.default_user),
             }),
-            None => None,
-            Some(v) => {
-                let id = v
-                    .to_str()
-                    .map_err(|_| ApiError::BadRequest("user id header is not valid text".into()))?
-                    .trim();
-                validate_id("user", id).map_err(ApiError::BadRequest)?;
-                Some(User {
-                    id: id.to_owned(),
-                    dir: user_dir_name(id),
-                })
-            }
+            u => u,
         };
-        let groups = parse_groups(parts.headers.get(cfg.group_header.as_str()))?;
         tracing::debug!(
             tenant = %tenant.dir_name,
             user = user.as_ref().map(|u| u.dir.as_str()),

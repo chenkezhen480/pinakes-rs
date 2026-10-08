@@ -1,13 +1,13 @@
 //! HTTP handlers. Every tenant route takes a `Scope`; admin routes take `Admin`.
 
 mod admin;
-mod graph;
+pub(crate) mod graph;
 mod ingest;
-mod insert;
+pub(crate) mod insert;
 mod jobs;
 mod pages;
 pub(crate) mod read;
-mod search;
+pub(crate) mod search;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -15,7 +15,13 @@ use axum::routing::{get, post};
 use crate::AppState;
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let mcp = Router::new()
+        .nest_service("/mcp", crate::mcp::service(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::mcp::authenticate,
+        ));
+    let api = Router::new()
         .route("/health", get(health))
         .route("/pages", get(pages::list))
         .route("/pages/{*path}", get(pages::get).put(pages::put))
@@ -43,7 +49,14 @@ pub fn router(state: AppState) -> Router {
             post(ingest::data).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
         .route("/admin/tenants", post(admin::create_tenant))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(mcp);
+    // The test chat, only when asked for (`PINAKES_DEV=1`).
+    if crate::dev::enabled() {
+        api.merge(crate::dev::router(state))
+    } else {
+        api
+    }
 }
 
 async fn health() -> &'static str {

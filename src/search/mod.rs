@@ -875,7 +875,7 @@ pub fn check_meaning(
 ) -> Result<(), NoMeaning> {
     if mode.needs_meaning() && !has_meaning(snap, embedder) {
         return Err(NoMeaning(
-            "semantic search is off: no embedding model is loaded, or this tenant's page vectors could not be built ([embedding] model; see the service log)",
+            "semantic search is off: no embedding model is loaded (it loads in the background after the service starts), or this tenant's page vectors could not be built ([embedding] model; see the service log)",
         ));
     }
     Ok(())
@@ -887,7 +887,7 @@ fn meaning<'a>(
     embedder: Option<&'a dyn Embedder>,
 ) -> Option<(&'a vectors::Vectors, &'a dyn Embedder)> {
     match (&snap.vectors, embedder) {
-        (Some(v), Some(e)) if v.model == e.model() => Some((v, e)),
+        (Some(v), Some(e)) if v.model == e.model() && e.ready() => Some((v, e)),
         _ => None,
     }
 }

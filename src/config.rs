@@ -472,6 +472,29 @@ pub struct IdentityConfig {
     /// Environment variable holding the service admin key. Unset or empty disables `/admin`.
     #[serde(default = "default_admin_key_env")]
     pub admin_key_env: String,
+    /// JWT mode: the public key (PEM) the host signs tokens with, relative to the config file.
+    #[serde(default)]
+    pub public_key_file: Option<PathBuf>,
+    /// JWT mode: the signing algorithm: RS256/384/512, PS256/384/512, ES256/384 or EdDSA.
+    #[serde(default = "default_jwt_algorithm")]
+    pub algorithm: String,
+    /// JWT mode: the claims holding the tenant id, the user id and the group ids (a list).
+    #[serde(default = "default_tenant_claim")]
+    pub tenant_claim: String,
+    #[serde(default = "default_user_claim")]
+    pub user_claim: String,
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    /// JWT mode: when set, a token's `iss` must be this.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    /// JWT mode: when set, a token's `aud` must name this; when unset, a token with an `aud`
+    /// is refused.
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// JWT mode: the key, read by [`Config::load_jwt_key`].
+    #[serde(skip)]
+    pub jwt: Option<std::sync::Arc<crate::identity::JwtKey>>,
 }
 
 impl Default for IdentityConfig {
@@ -486,6 +509,14 @@ impl Default for IdentityConfig {
             group_header: default_group_header(),
             audience_header: default_audience_header(),
             admin_key_env: default_admin_key_env(),
+            public_key_file: None,
+            algorithm: default_jwt_algorithm(),
+            tenant_claim: default_tenant_claim(),
+            user_claim: default_user_claim(),
+            groups_claim: default_groups_claim(),
+            issuer: None,
+            audience: None,
+            jwt: None,
         }
     }
 }
@@ -540,6 +571,18 @@ fn default_audience_header() -> String {
 fn default_admin_key_env() -> String {
     "PINAKES_ADMIN_KEY".into()
 }
+fn default_jwt_algorithm() -> String {
+    "RS256".into()
+}
+fn default_tenant_claim() -> String {
+    "tenant_id".into()
+}
+fn default_user_claim() -> String {
+    "sub".into()
+}
+fn default_groups_claim() -> String {
+    "groups".into()
+}
 fn default_session_idle_minutes() -> u64 {
     30
 }
@@ -592,8 +635,26 @@ impl Config {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;
         let mut cfg = Self::from_toml_str(&text)?;
-        cfg.load_model_file(path.parent().unwrap_or(Path::new(".")))?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        cfg.load_model_file(base)?;
+        cfg.load_jwt_key(base)?;
         Ok(cfg)
+    }
+
+    /// In JWT mode, reads the public key (`[identity] public_key_file`, relative to `base`) for
+    /// the configured algorithm. A key that can't be read or doesn't fit the algorithm is an
+    /// error: the service doesn't start without the means to check its callers.
+    pub fn load_jwt_key(&mut self, base: &Path) -> anyhow::Result<()> {
+        let id = &mut self.identity;
+        if id.mode != IdentityMode::Jwt {
+            return Ok(());
+        }
+        let file = base.join(id.public_key_file.as_ref().expect("checked by validate"));
+        let pem = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+        let key = crate::identity::JwtKey::new(&id.algorithm, &pem)
+            .with_context(|| format!("in {}", file.display()))?;
+        id.jwt = Some(std::sync::Arc::new(key));
+        Ok(())
     }
 
     /// Reads the model file (`[librarian] model_file`, relative to `base`). A missing file is
@@ -621,10 +682,10 @@ impl Config {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        if self.identity.mode == IdentityMode::Jwt {
-            anyhow::bail!("identity.mode = \"jwt\" is not implemented yet (milestone M7)");
-        }
         let id = &self.identity;
+        if id.mode == IdentityMode::Jwt && id.public_key_file.is_none() {
+            anyhow::bail!("identity.mode = \"jwt\" needs identity.public_key_file");
+        }
         crate::tenants::validate_id("identity.default_tenant", &id.default_tenant)
             .map_err(anyhow::Error::msg)?;
         crate::tenants::validate_id("identity.default_user", &id.default_user)
@@ -777,6 +838,14 @@ slots = { memories = 40, knowledge = 2, relations = 6 }
                 .unwrap();
         assert_eq!(cfg.search.slots, crate::search::SlotSizes::default());
         assert_eq!(cfg.librarian.model_file, PathBuf::from("model.conf"));
+        // The image's config is the same apart from where things are.
+        let docker = Config::from_toml_str(
+            &std::fs::read_to_string(root.join("docker/config.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(docker.data.dir, PathBuf::from("/data"));
+        assert_eq!(docker.neo4j.uri, "bolt://neo4j:7687");
+        assert_eq!(docker.search.default_mode, cfg.search.default_mode);
         // The example is what a deployment copies to model.conf.
         cfg.librarian.model_file = PathBuf::from("model.conf.example");
         cfg.load_model_file(root).unwrap();
@@ -814,7 +883,7 @@ slots = { memories = 40, knowledge = 2, relations = 6 }
     }
 
     #[test]
-    fn jwt_mode_is_rejected_until_m7() {
+    fn jwt_mode_needs_a_public_key_file() {
         assert!(Config::from_toml_str("[identity]\nmode = \"jwt\"\n").is_err());
     }
 

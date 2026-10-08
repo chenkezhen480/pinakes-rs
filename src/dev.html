@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinakes test chat</title>
+<style>
+  :root { --bg: #fafaf7; --fg: #1d1d1b; --muted: #6b6b66; --line: #deddd6; --accent: #2f5d8a; --bad: #a33; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #181816; --fg: #e8e6df; --muted: #9a988f; --line: #33322e; --accent: #8ab4dc; --bad: #e07a7a; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 8px 0 16px; }
+  .who { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-bottom: 8px; }
+  input, textarea, button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 64px; }
+  button { cursor: pointer; border-color: var(--accent); color: var(--accent); }
+  .step { border-left: 3px solid var(--line); padding: 4px 12px; margin: 12px 0; }
+  .step .why { color: var(--muted); }
+  .step code { font-size: 13px; }
+  details pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 360px; overflow: auto; }
+  .answer { border-left-color: var(--accent); white-space: pre-wrap; }
+  .error { border-left-color: var(--bad); color: var(--bad); }
+  .hits { margin: 4px 0; padding-left: 18px; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pinakes test chat</h1>
+  <div class="who">
+    <input id="key" placeholder="API key or token" type="password">
+    <input id="user" placeholder="X-User-Id (optional)">
+    <input id="groups" placeholder="X-User-Groups (optional)">
+  </div>
+  <form id="ask">
+    <textarea id="q" placeholder="Ask a question about this tenant's knowledge"></textarea>
+    <button>Ask</button>
+  </form>
+  <div id="log"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+for (const id of ["key", "user", "groups"]) {
+  try { $(id).value = localStorage.getItem("pinakes-" + id) || ""; } catch (e) {}
+  $(id).addEventListener("change", () => { try { localStorage.setItem("pinakes-" + id, $(id).value); } catch (e) {} });
+}
+const add = (cls, html) => { const d = document.createElement("div"); d.className = "step " + cls; d.innerHTML = html; $("log").append(d); return d; };
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function slots(r) {
+  if (!r || !r.memories) return "";
+  const list = (name, s) => `<div>${name} (${s.coverage}): <ul class="hits">${s.hits.map((h) => `<li><code>${esc(h.page)}</code> — ${esc(h.summary || "")}</li>`).join("")}</ul></div>`;
+  const edges = r.relations.edges.map((e) => `<li><code>${esc(e.from)} —${esc(e.type)}→ ${esc(e.to)}</code></li>`).join("");
+  return list("memories", r.memories) + list("knowledge", r.knowledge) + (edges ? `<div>relations: <ul class="hits">${edges}</ul></div>` : "");
+}
+const on = {
+  step: (d) => add("", `<b>${d.n}. ${esc(d.tool)}</b> <code>${esc(JSON.stringify(d.arguments))}</code><div class="why">${esc(d.thought)}</div>`),
+  result: (d) => add("", `${slots(d.result)}<details><summary>result of ${d.n}</summary><pre>${esc(JSON.stringify(d.result, null, 2))}</pre></details>`),
+  answer: (d) => add("answer", esc(d.text)),
+  error: (d) => add("error", esc(d.message)),
+};
+$("ask").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("log").innerHTML = "";
+  const headers = { "Content-Type": "application/json", "Authorization": "Bearer " + $("key").value.trim() };
+  if ($("user").value.trim()) headers["X-User-Id"] = $("user").value.trim();
+  if ($("groups").value.trim()) headers["X-User-Groups"] = $("groups").value.trim();
+  const resp = await fetch("/dev/chat", { method: "POST", headers, body: JSON.stringify({ question: $("q").value }) });
+  if (!resp.ok) { add("error", esc(resp.status + " " + await resp.text())); return; }
+  const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      let name = "message", data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) name = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (on[name] && data) on[name](JSON.parse(data));
+    }
+  }
+});
+</script>
+</body>
+</html>

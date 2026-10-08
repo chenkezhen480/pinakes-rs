@@ -64,14 +64,40 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, "listening");
+    if pinakes::dev::enabled() {
+        tracing::info!("test chat at http://{addr}/dev");
+    }
+    let shutdown = state.shutdown.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            stop_signal().await;
+            shutdown.cancel();
         })
         .await?;
     // Lines still queued when the server stops are written before exiting.
     tokio::task::spawn_blocking(move || state.traces.flush()).await?;
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM, which `docker stop` sends: either stops the service cleanly, so queued
+/// trace lines are written. In a container the service is process 1, which the system doesn't
+/// stop for an unhandled SIGTERM.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(e) => tracing::warn!(error = %e, "SIGTERM can't be watched; only Ctrl-C stops"),
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// The librarian is the core of every write, so when only its key is missing the service asks

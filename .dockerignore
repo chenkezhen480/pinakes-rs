@@ -1,0 +1,8 @@
+.git
+target
+data
+model.conf
+converter
+testset
+tests
+docs

@@ -1,8 +1,43 @@
-# Neo4j for development and the M3 graph tests: `NEO4J_PASSWORD=... docker compose up -d neo4j`.
-# The document converter: `docker compose up -d --build converter` ([converter] url in
-# config.toml). The pinakes service itself joins this file in M7. Ports are bound to 127.0.0.1
-# only.
+# The whole service: `NEO4J_PASSWORD=... docker compose up -d --build` starts Pinakes, Neo4j and
+# the document converter. Before the first start, copy model.conf.example to model.conf (the
+# librarian's model and key; mounted, never built into the image). The admin key comes from
+# PINAKES_ADMIN_KEY. All of Pinakes' own data sits in the pinakes-data volume.
+#
+# For development on the host (`cargo run`, `cargo test`), start only what the service needs:
+# `docker compose up -d neo4j` and `docker compose --profile dev up -d --build converter-dev`.
+# Published ports are bound to 127.0.0.1 only; set PINAKES_PORT (such as 8080) to expose the
+# service on every interface. Search traces name the code that answered: build with
+# `PINAKES_GIT_COMMIT=$(git rev-parse --short=12 HEAD)`, or they say `unknown`.
 services:
+  pinakes:
+    build:
+      context: .
+      args:
+        PINAKES_GIT_COMMIT: ${PINAKES_GIT_COMMIT:-unknown}
+    ports:
+      - "${PINAKES_PORT:-127.0.0.1:8080}:8080"
+    volumes:
+      - pinakes-data:/data
+      - type: bind
+        source: ./model.conf
+        target: /app/model.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
+      PINAKES_ADMIN_KEY: ${PINAKES_ADMIN_KEY:-}
+      # A Hugging Face mirror for the embedding model's first download, if needed.
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      converter:
+        condition: service_started
+    networks: [default, internal]
+    restart: unless-stopped
+
   neo4j:
     # Pinned: the version the neo4rs driver (0.9.0-rc.10) is tested against here.
     image: neo4j:5.26.28
@@ -12,11 +47,32 @@ services:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
     volumes: ["neo4j-data:/data"]
+    # The service connects once at startup, so it starts only when Neo4j answers queries.
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#neo4j/}\" 'RETURN 1' >/dev/null"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
 
   converter:
     # Uploads are untrusted: no root, nothing writable but a small /tmp, no capabilities,
-    # bounded memory and processes. Network egress is cut in M7, when the service joins this
-    # file and the converter moves to an internal network with it.
+    # bounded memory and processes, and no way out: the internal network reaches only Pinakes.
+    build: ./converter
+    networks: [internal]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 64
+    restart: unless-stopped
+
+  # The same converter on 127.0.0.1:8090, for the service running on the host and for
+  # `PINAKES_TEST_CONVERTER` (a published port needs a network with a way out).
+  converter-dev:
+    profiles: [dev]
     build: ./converter
     ports:
       - "127.0.0.1:8090:8090"
@@ -28,5 +84,10 @@ services:
     pids_limit: 64
     restart: unless-stopped
 
+networks:
+  internal:
+    internal: true
+
 volumes:
+  pinakes-data:
   neo4j-data:

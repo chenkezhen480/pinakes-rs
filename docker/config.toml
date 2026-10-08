@@ -1,0 +1,80 @@
+# The configuration the Docker image runs with (`docker compose up`); config.toml in the
+# repository root is for running the service on the host. Secrets stay in the environment
+# (PINAKES_ADMIN_KEY, NEO4J_PASSWORD); the librarian's model and key are in model.conf, which
+# docker-compose.yml mounts next to this file.
+
+[server]
+host = "0.0.0.0"               # inside the container; compose decides what the host exposes
+port = 8080
+
+[data]
+dir = "/data"                  # the pinakes-data volume
+
+[identity]
+mode = "api_key"               # or "jwt"
+deployment = "multi_tenant"    # or "personal": one person, default tenant and user below
+default_tenant = "000000"      # personal: created on first start, key in <data>/personal-api-key.txt
+default_user = "admin"         # personal: the user when no user header is sent (no admin rights)
+key_header = "Authorization"   # "Bearer <key>"
+user_header = "X-User-Id"
+group_header = "X-User-Groups"
+audience_header = "X-Audience" # who an insert is for: tenant, user or group:<id>
+admin_key_env = "PINAKES_ADMIN_KEY"
+# jwt mode: `Authorization: Bearer <token>` signed by the host; tenant, user and groups come
+# from its claims (the tenant must exist: POST /admin/tenants), the audience header stays.
+# public_key_file = "keys/auth.pem"   # the host's public key (PEM), relative to this file
+# algorithm = "RS256"                 # RS256/384/512, PS256/384/512, ES256/384 or EdDSA
+# tenant_claim = "tenant_id"
+# user_claim = "sub"
+# groups_claim = "groups"             # a list of group ids
+# issuer = "https://auth.example"     # when set, tokens must carry this `iss`
+# audience = "pinakes"                # when set, tokens must carry this `aud`; unset: none allowed
+
+[store]                        # one SQLite file per tenant, WAL mode
+file_name = "pinakes.sqlite"
+
+[librarian]                    # the only LLM the service calls, never on the read path
+model_file = "model.conf"      # mounted from the repository root by docker-compose.yml
+max_tokens = 16000             # per reply
+timeout_secs = 300             # per call
+related_pages = 8              # related pages the librarian is shown (5 to 10 in the design)
+read_window_tokens = 20000     # how much of a document one read sees; grows for a long concept
+
+[converter]                    # files to Markdown, on the compose file's internal network
+url = "http://converter:8090"
+timeout_secs = 120
+
+[search]
+slots = { memories = 3, knowledge = 3, relations = 5 }   # hits per slot by default, max 20
+session_idle_minutes = 30      # read-tracker sessions expire after this idle time
+languages = ["en", "zh"]
+default_mode = "keyword"       # keyword, semantic, both or auto, when a search doesn't say
+hop = { top_memories = 3 }     # the top memories whose knowledge anchors join the knowledge slot
+
+[trace]                        # search traces: <tenant>/logs/search-<date>.jsonl
+enabled = true
+retention_days = 30            # 0 keeps them forever
+
+[embedding]                    # local; downloaded into /data/models on first start, in the background
+model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: no vectors, semantic modes answer 503
+
+[graph]
+backend = "neo4j"              # or "sqlite": graph.sqlite in each tenant folder, no Neo4j needed
+max_depth = 3                  # deepest /graph walk a caller may ask for
+max_nodes = 100                # most nodes a /graph walk returns
+
+[neo4j]
+uri = "bolt://neo4j:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"   # the variable holding the password
+
+[acquisition]                  # off by default, opt-in per tenant
+enabled = false
+providers = []
+daily_token_budget = 200000
+
+[cache]                        # tenants in memory
+idle_minutes = 30              # a tenant unused this long frees its search snapshot and graph; 0 never
+
+[jobs]                         # the per-tenant write queue; job status lives in memory
+keep_finished_minutes = 60     # finished jobs stay visible at /jobs/{id} this long

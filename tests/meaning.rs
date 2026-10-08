@@ -250,6 +250,79 @@ async fn keyword_search_carries_on_when_page_vectors_fail() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{resp}");
 }
 
+/// A model that isn't loaded yet, as `embed::Background` before its files are in.
+struct Gated {
+    fake: Arc<Fake>,
+    ready: std::sync::atomic::AtomicBool,
+}
+
+impl pinakes::embed::Embedder for Gated {
+    fn model(&self) -> &str {
+        self.fake.model()
+    }
+
+    fn dim(&self) -> usize {
+        self.fake.dim()
+    }
+
+    fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        anyhow::ensure!(self.ready(), "not loaded");
+        self.fake.embed(texts)
+    }
+
+    fn ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// While the model loads, searches run on keywords and the meaning-based modes answer 503; once
+/// it is in, the tenants opened meanwhile get their page vectors.
+#[tokio::test]
+async fn a_tenant_opened_while_the_model_loads_gets_its_vectors_after() {
+    let gated = Arc::new(Gated {
+        fake: Fake::new(),
+        ready: false.into(),
+    });
+    let mut app = TestApp::with_embedder("", gated.clone());
+    let key = app.create_tenant("acme").await;
+    WikiFs::new(app.wiki_dir("acme"))
+        .write(&page(
+            "expertise/returns",
+            "Returns policy",
+            &[],
+            "# Returns policy\n\nSeven days.\n",
+        ))
+        .unwrap();
+    app.restart();
+    let search = |mode: &'static str| {
+        let app = &app;
+        let key = &key;
+        async move {
+            app.post(
+                Caller::new(key),
+                "/search",
+                json!({ "query": "returns policy", "mode": mode }),
+            )
+            .await
+        }
+    };
+    assert_eq!(search("keyword").await.0, StatusCode::OK);
+    let (status, resp) = search("semantic").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{resp}");
+    assert!(
+        gated.fake.seen().is_empty(),
+        "nothing embedded before the model is in"
+    );
+
+    gated.ready.store(true, std::sync::atomic::Ordering::SeqCst);
+    for t in app.state.tenants.open_tenants().await {
+        t.add_missing_vectors().await.unwrap();
+    }
+    let (status, resp) = search("semantic").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(hits(&resp, "knowledge")[0].0, "expertise/returns");
+}
+
 /// With an embedding model, the librarian's related-page search ranks by meaning too: a record
 /// whose words match no page still gets the page closest in meaning shown and offered as an
 /// anchor. Without the model it doesn't.

@@ -42,9 +42,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   tenant's `wiki_writer` lock; code, never the LLM, writes `kind`, `updated` and `sources`.
 - Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
 - Uploaded files go through the converter container (`converter/`, MarkItDown); the service
-  never parses Word, PDF or HTML itself. Start it with `NEO4J_PASSWORD=... docker compose up -d
-  --build converter`; `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test convert`
-  runs a real Word file through it (skipped without the variable).
+  never parses Word, PDF or HTML itself. In the compose stack it sits on an internal network with
+  no egress; for the host, start `NEO4J_PASSWORD=... docker compose --profile dev up -d --build
+  converter-dev` (127.0.0.1:8090); `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test
+  convert` runs a real Word file through it (skipped without the variable).
 - Expertise documents get ids from the service (`d_…`), never from the host. A new version
   finds the pages of earlier ones through the raw records they cite (`sources`), not by
   similarity. Code never interprets a document's structure; the model reads it from the top
@@ -55,6 +56,12 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Every page has one audience — tenant, group or user — given by its folder (`groups/g_…`,
   `users/u_…`). `Kind::audiences()` and the path layout must agree. A page may anchor only to
   pages and nodes everyone who can read it can see.
+- MCP tools (`src/mcp.rs`) call the HTTP handlers they stand for; their descriptions live in
+  `prompts/tools/` and teach the retrieval strategy. Keep their parameters few; `session` comes
+  back from `search` and is passed on (MCP 2026-07-28 has no protocol sessions; an older
+  client's `Mcp-Session-Id` stands in). Trying them with a real agent: Pi (`pi`, with
+  `pi-mcp-extension`, `.pi/mcp.json` naming `/mcp` and the key/user headers), run with
+  `< /dev/null` in `-p` mode or it waits for stdin.
 - `/search` is the only search entry. `/graph`, `/graph/path` and `/read` only take ids that `/search` returns.
 - No LLM calls on the read path (`/search`, `/graph`, `/read`, `/pages`).
 - Searches read only the in-memory copies; never query SQLite or Neo4j on the read path.
@@ -81,6 +88,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   (`tenants::tenant_dir_name`, `group_dir_name`, `user_dir_name`), never from raw ids.
 - A page another user or group owns, or another tenant's anything, is reported as not found
   (404), never as forbidden, so callers can't probe for existence.
+
+- The whole stack: `NEO4J_PASSWORD=... docker compose up -d --build` (needs `model.conf`;
+  the image's config is `docker/config.toml`, kept in step with `config.toml`). The test chat
+  (`/dev`) exists only with `PINAKES_DEV=1`.
 
 ## Layout
 

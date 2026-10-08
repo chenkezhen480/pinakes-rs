@@ -249,6 +249,11 @@ impl Librarian {
         }
     }
 
+    /// The librarian's model, which the test chat (`dev`) borrows.
+    pub fn llm(&self) -> Llm {
+        self.llm.clone()
+    }
+
     fn prompt(&self, system: &str, user: String, schema: serde_json::Value) -> Prompt {
         Prompt {
             system: system.to_owned(),

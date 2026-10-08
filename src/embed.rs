@@ -10,7 +10,7 @@
 //! no prefixes.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Context;
 
@@ -45,6 +45,11 @@ pub trait Embedder: Send + Sync {
 
     /// One unit-length vector per text.
     fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>>;
+
+    /// Whether it can embed now; a model still loading can't (see [`Background`]).
+    fn ready(&self) -> bool {
+        true
+    }
 }
 
 /// The cosine similarity of two unit-length vectors.
@@ -62,18 +67,54 @@ fn unit(mut v: Vec<f32>) -> Vec<f32> {
     v
 }
 
+/// The model, loaded after the service starts listening, so a first start that downloads it
+/// (about 640 MB) doesn't keep the port closed. Until it is in, it embeds nothing: snapshots are
+/// built without vectors and the meaning-based modes answer 503; the open tenants get their
+/// vectors once it arrives (`AppState::new`).
+#[derive(Default)]
+pub struct Background {
+    model: OnceLock<FastEmbedder>,
+}
+
+impl Background {
+    pub fn set(&self, model: FastEmbedder) {
+        let _ = self.model.set(model);
+    }
+}
+
+impl Embedder for Background {
+    fn model(&self) -> &str {
+        MODEL_ID
+    }
+
+    fn dim(&self) -> usize {
+        DIM
+    }
+
+    fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        match self.model.get() {
+            Some(m) => m.embed(texts),
+            None => anyhow::bail!("the embedding model is not loaded"),
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.model.get().is_some()
+    }
+}
+
 /// The model, run by fastembed. Its files are downloaded into `cache_dir` on first use.
 pub struct FastEmbedder {
     model: Mutex<fastembed::TextEmbedding>,
 }
 
 impl FastEmbedder {
-    /// Loads the model, downloading its files (about 640 MB) into `cache_dir` the first time;
-    /// a broken download resumes, up to three tries per file. Slow: call it off the async
-    /// threads.
+    /// Loads the model, downloading its files (about 640 MB) into `cache_dir` the first time,
+    /// from Hugging Face or the mirror `HF_ENDPOINT` names; a broken download resumes, up to
+    /// three tries per file. Slow: call it off the async threads.
     pub fn load(cache_dir: &Path) -> anyhow::Result<Self> {
         use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
-        let api = ApiBuilder::new()
+        let api = ApiBuilder::from_env()
             .with_cache_dir(cache_dir.to_path_buf())
             .with_progress(false)
             .with_retries(3)
