@@ -13,7 +13,7 @@ pub mod sqlite;
 pub mod store;
 pub mod walk;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
@@ -189,6 +189,93 @@ pub struct GraphSnapshot {
     type_names: HashMap<(String, String), Vec<String>>,
     /// Every node's normalized name and aliases, for keywords that are part of a name.
     all_names: Vec<(String, NodeIndex)>,
+    /// For each pair of adjacent characters, the `all_names` entries holding it, in order: a
+    /// keyword is looked for only in the names holding its rarest pair.
+    name_pairs: HashMap<(char, char), Vec<u32>>,
+    /// The sum of every node's and edge's hash: what the version says about the data, kept
+    /// up to date by a write without hashing the whole graph again.
+    data_sum: u128,
+}
+
+/// A graph and its node ids, while a snapshot is being made.
+struct Parts {
+    graph: DiGraph<NodeData, EdgeData>,
+    by_id: HashMap<String, NodeIndex>,
+    data_sum: u128,
+}
+
+impl Parts {
+    /// Adds nodes (replacing the name and aliases of a node already there) and edges (once
+    /// each), skipping nodes of unknown spaces and edges with a missing end.
+    fn add(
+        &mut self,
+        space_by_name: &HashMap<String, usize>,
+        nodes: Vec<NodeRecord>,
+        edges: Vec<EdgeRecord>,
+    ) {
+        for n in nodes {
+            let Some(&space) = space_by_name.get(&n.space) else {
+                tracing::warn!(space = %n.space, "skipping a node of an unknown space");
+                continue;
+            };
+            let id = node_ref(&n.space, &n.ty, &n.key);
+            let hash = record_hash(&n);
+            match self.by_id.get(&id) {
+                Some(&ix) => {
+                    let d = &mut self.graph[ix];
+                    let old = record_hash(&NodeRecord {
+                        space: n.space.clone(),
+                        ty: d.ty.clone(),
+                        key: d.key.clone(),
+                        name: d.name.clone(),
+                        aliases: d.aliases.clone(),
+                    });
+                    self.data_sum = self.data_sum.wrapping_sub(old).wrapping_add(hash);
+                    d.name = n.name;
+                    d.aliases = n.aliases;
+                }
+                None => {
+                    let ix = self.graph.add_node(NodeData {
+                        space,
+                        ty: n.ty,
+                        key: n.key,
+                        name: n.name,
+                        aliases: n.aliases,
+                        id: id.clone(),
+                    });
+                    self.by_id.insert(id, ix);
+                    self.data_sum = self.data_sum.wrapping_add(hash);
+                }
+            }
+        }
+        for e in edges {
+            let from = self
+                .by_id
+                .get(&node_ref(&e.space, &e.from_type, &e.from_key));
+            let to = self.by_id.get(&node_ref(&e.space, &e.to_type, &e.to_key));
+            let (Some(&from), Some(&to)) = (from, to) else {
+                tracing::warn!(space = %e.space, relation = %e.ty, "skipping an edge with a missing end");
+                continue;
+            };
+            if self
+                .graph
+                .edges_connecting(from, to)
+                .any(|x| x.weight().ty == e.ty)
+            {
+                continue;
+            }
+            self.data_sum = self.data_sum.wrapping_add(record_hash(&e));
+            self.graph.add_edge(from, to, EdgeData { ty: e.ty });
+        }
+    }
+}
+
+/// 128 bits of a SHA-256 over a record as JSON.
+fn record_hash(record: &impl serde::Serialize) -> u128 {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_vec(record).unwrap_or_default();
+    let digest = Sha256::digest(&json);
+    u128::from_le_bytes(digest[..16].try_into().expect("16 bytes"))
 }
 
 /// A keyword that is part of more node names than this is too general to name a node.
@@ -202,40 +289,42 @@ impl GraphSnapshot {
     /// Builds the in-memory copy. Nodes of unknown spaces and edges with a missing end are
     /// skipped with a warning; the write path never produces them.
     pub fn build(schemas: Vec<SchemaDef>, spaces: Vec<SpaceDef>, data: GraphData) -> Self {
-        let schemas: BTreeMap<String, SchemaDef> =
-            schemas.into_iter().map(|s| (s.schema.clone(), s)).collect();
         let mut spaces: Vec<SpaceDef> = spaces;
         spaces.sort_by(|a, b| a.space.cmp(&b.space));
+        let space_by_name: HashMap<String, usize> = spaces
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.space.clone(), i))
+            .collect();
+        let mut parts = Parts {
+            graph: DiGraph::new(),
+            by_id: HashMap::new(),
+            data_sum: 0,
+        };
+        parts.add(&space_by_name, data.nodes, data.edges);
+        Self::derive(schemas, spaces, parts)
+    }
+
+    /// The indexes over a graph: names for the matcher, numeric keys, type names, the names
+    /// for partial matches, and the version.
+    fn derive(schemas: Vec<SchemaDef>, spaces: Vec<SpaceDef>, parts: Parts) -> Self {
+        let schemas: BTreeMap<String, SchemaDef> =
+            schemas.into_iter().map(|s| (s.schema.clone(), s)).collect();
         let spaces: Vec<SpaceEntry> = spaces.into_iter().map(SpaceEntry::new).collect();
         let space_by_name: HashMap<String, usize> = spaces
             .iter()
             .enumerate()
             .map(|(i, s)| (s.def.space.clone(), i))
             .collect();
-
-        let mut graph = DiGraph::new();
-        let mut by_id = HashMap::new();
+        let Parts {
+            graph,
+            by_id,
+            data_sum,
+        } = parts;
         let mut names: Vec<(String, Target)> = Vec::new();
         let mut numeric_keys: HashMap<String, Vec<NodeIndex>> = HashMap::new();
         let mut all_names = Vec::new();
-        for n in data.nodes {
-            let Some(&space) = space_by_name.get(&n.space) else {
-                tracing::warn!(space = %n.space, "skipping a node of an unknown space");
-                continue;
-            };
-            let id = node_ref(&n.space, &n.ty, &n.key);
-            if by_id.contains_key(&id) {
-                continue;
-            }
-            let ix = graph.add_node(NodeData {
-                space,
-                ty: n.ty,
-                key: n.key,
-                name: n.name,
-                aliases: n.aliases,
-                id: id.clone(),
-            });
-            by_id.insert(id, ix);
+        for ix in graph.node_indices() {
             let d = &graph[ix];
             // A name that is only the key (the default when none was sent) is matched by the
             // key rules below, never as a name: a bare 1042 or "support" names nothing.
@@ -260,18 +349,6 @@ impl GraphSnapshot {
                 names.push((d.key.clone(), target()));
             }
         }
-        let mut seen_edges = HashSet::new();
-        for e in data.edges {
-            let from = by_id.get(&node_ref(&e.space, &e.from_type, &e.from_key));
-            let to = by_id.get(&node_ref(&e.space, &e.to_type, &e.to_key));
-            let (Some(&from), Some(&to)) = (from, to) else {
-                tracing::warn!(space = %e.space, relation = %e.ty, "skipping an edge with a missing end");
-                continue;
-            };
-            if seen_edges.insert((from, to, e.ty.clone())) {
-                graph.add_edge(from, to, EdgeData { ty: e.ty });
-            }
-        }
         for (i, s) in spaces.iter().enumerate() {
             names.extend(s.def.name.iter().map(|n| (n.clone(), Target::Space(i))));
             names.extend(s.def.aliases.iter().map(|a| (a.clone(), Target::Space(i))));
@@ -285,8 +362,19 @@ impl GraphSnapshot {
                 type_names.insert((s.schema.clone(), ty.clone()), list);
             }
         }
-        let mut snapshot = Self {
-            version: String::new(),
+        let mut name_pairs: HashMap<(char, char), Vec<u32>> = HashMap::new();
+        for (i, (name, _)) in all_names.iter().enumerate() {
+            let chars: Vec<char> = name.chars().collect();
+            for w in chars.windows(2) {
+                let list = name_pairs.entry((w[0], w[1])).or_default();
+                if list.last() != Some(&(i as u32)) {
+                    list.push(i as u32);
+                }
+            }
+        }
+        let version = version_of(&schemas, &spaces, data_sum);
+        Self {
+            version,
             schemas,
             spaces,
             space_by_name,
@@ -296,13 +384,9 @@ impl GraphSnapshot {
             numeric_keys,
             type_names,
             all_names,
-        };
-        // Hashed from what the snapshot holds, not the input: dropped and repeated records
-        // don't change it, so the same graph always has the same version.
-        let schemas: Vec<SchemaDef> = snapshot.schemas.values().cloned().collect();
-        let spaces: Vec<SpaceDef> = snapshot.spaces.iter().map(|s| s.def.clone()).collect();
-        snapshot.version = version_of(&schemas, &spaces, &snapshot.data());
-        snapshot
+            name_pairs,
+            data_sum,
+        }
     }
 
     /// Builds the next snapshot from `current` off the async threads.
@@ -321,24 +405,19 @@ impl GraphSnapshot {
     }
 
     /// The same schemas and spaces with nodes and edges added; a node with the type and key of
-    /// a stored one in the same space replaces it.
+    /// a stored one in the same space replaces its name and aliases. The graph is copied and
+    /// changed, not built again from its records.
     pub fn with_data(&self, nodes: Vec<NodeRecord>, edges: Vec<EdgeRecord>) -> Self {
-        let mut data = self.data();
-        {
-            let new: HashSet<(&str, &str, &str)> = nodes
-                .iter()
-                .map(|n| (n.space.as_str(), n.ty.as_str(), n.key.as_str()))
-                .collect();
-            data.nodes
-                .retain(|n| !new.contains(&(n.space.as_str(), n.ty.as_str(), n.key.as_str())));
-        }
-        data.nodes.extend(nodes);
-        // `build` keeps one copy of each edge.
-        data.edges.extend(edges);
-        Self::build(
+        let mut parts = Parts {
+            graph: self.graph.clone(),
+            by_id: self.by_id.clone(),
+            data_sum: self.data_sum,
+        };
+        parts.add(&self.space_by_name, nodes, edges);
+        Self::derive(
             self.schemas.values().cloned().collect(),
             self.spaces.iter().map(|s| s.def.clone()).collect(),
-            data,
+            parts,
         )
     }
 
@@ -459,8 +538,21 @@ impl GraphSnapshot {
         if (cjk && n < 3) || (!cjk && n < 4) {
             return Vec::new();
         }
+        // Only names holding every pair of the keyword's characters can hold the keyword; look
+        // in those holding its rarest pair.
+        let chars: Vec<char> = keyword.chars().collect();
+        let mut rarest: Option<&Vec<u32>> = None;
+        for w in chars.windows(2) {
+            let Some(list) = self.name_pairs.get(&(w[0], w[1])) else {
+                return Vec::new();
+            };
+            if rarest.is_none_or(|r| list.len() < r.len()) {
+                rarest = Some(list);
+            }
+        }
         let mut out = Vec::new();
-        for (name, ix) in &self.all_names {
+        for &i in rarest.into_iter().flatten() {
+            let (name, ix) = &self.all_names[i as usize];
             if out.contains(ix) || !visible.node(self, *ix) {
                 continue;
             }
@@ -510,27 +602,24 @@ impl def::Usage for GraphSnapshot {
     }
 }
 
-/// 16 hex digits of a SHA-256 over the schemas, spaces, nodes and edges, in a stable order.
-fn version_of(schemas: &[SchemaDef], spaces: &[SpaceDef], data: &GraphData) -> String {
+/// 16 hex digits of a SHA-256 over the schemas, the spaces and the sum of the data's record
+/// hashes: the same graph has the same version however its records arrived.
+fn version_of(
+    schemas: &BTreeMap<String, SchemaDef>,
+    spaces: &[SpaceEntry],
+    data_sum: u128,
+) -> String {
     use sha2::{Digest, Sha256};
-    let mut schemas: Vec<&SchemaDef> = schemas.iter().collect();
-    schemas.sort_by(|a, b| a.schema.cmp(&b.schema));
-    let mut spaces: Vec<&SpaceDef> = spaces.iter().collect();
-    spaces.sort_by(|a, b| a.space.cmp(&b.space));
-    let mut nodes: Vec<&NodeRecord> = data.nodes.iter().collect();
-    nodes.sort_by(|a, b| (&a.space, &a.ty, &a.key).cmp(&(&b.space, &b.ty, &b.key)));
-    let mut edges: Vec<&EdgeRecord> = data.edges.iter().collect();
-    edges.sort();
+    let spaces: Vec<&SpaceDef> = spaces.iter().map(|s| &s.def).collect();
     let mut h = Sha256::new();
     for part in [
-        serde_json::to_string(&schemas),
+        serde_json::to_string(schemas),
         serde_json::to_string(&spaces),
-        serde_json::to_string(&nodes),
-        serde_json::to_string(&edges),
     ] {
         h.update(part.unwrap_or_default().as_bytes());
         h.update([0u8]);
     }
+    h.update(data_sum.to_le_bytes());
     hex::encode(&h.finalize()[..8])
 }
 
@@ -644,6 +733,13 @@ mod tests {
         assert_eq!(more.graph[n].name, "Lin Xiao");
         assert_eq!(more.graph.edge_count(), 2, "edges survive a node update");
         assert_ne!(more.version, g.version);
+        // Changed in place or built from its records, the same graph has the same version.
+        let rebuilt = GraphSnapshot::build(
+            more.schemas.values().cloned().collect(),
+            more.spaces.iter().map(|s| s.def.clone()).collect(),
+            more.data(),
+        );
+        assert_eq!(rebuilt.version, more.version);
 
         // Writing edges that are already there changes nothing, the version included.
         let same = g.with_data(vec![], g.data().edges);

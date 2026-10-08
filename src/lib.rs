@@ -12,6 +12,7 @@ pub mod jobs;
 pub mod kinds;
 pub mod librarian;
 pub mod llm;
+pub mod par;
 pub mod search;
 pub mod store;
 pub mod tenants;
@@ -232,6 +233,30 @@ impl AppState {
             }
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+impl AppState {
+    /// Every minute, releases the in-memory copies of tenants idle longer than `[cache]
+    /// idle_minutes`. Stops when the state is dropped.
+    pub fn start_cache_sweeper(&self) {
+        let idle = self.config.cache.idle_minutes;
+        if idle == 0 {
+            return;
+        }
+        let idle = std::time::Duration::from_secs(idle.saturating_mul(60));
+        let state = Arc::downgrade(&self.0);
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
+            every.tick().await;
+            loop {
+                every.tick().await;
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                state.tenants.release_idle(idle).await;
+            }
+        });
     }
 }
 

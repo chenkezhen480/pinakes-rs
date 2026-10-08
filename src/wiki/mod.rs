@@ -4,12 +4,13 @@ mod history;
 mod page;
 mod path;
 
-pub use history::History;
+pub use history::{History, object_name};
 pub use page::{FrontMatter, Page};
 pub use path::{Audience, PagePath};
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Serialize;
 
@@ -41,6 +42,23 @@ pub struct PageSummary {
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
+}
+
+/// When a page file was last written and how long it is, as its folder lists it: how a later
+/// look at the folder tells a changed page from an unchanged one without reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    pub modified: SystemTime,
+    pub len: u64,
+}
+
+impl Stamp {
+    fn of(meta: &std::fs::Metadata) -> io::Result<Self> {
+        Ok(Self {
+            modified: meta.modified()?,
+            len: meta.len(),
+        })
+    }
 }
 
 /// The `wiki/` folder of one tenant. It only ever touches paths built from a validated
@@ -143,24 +161,78 @@ impl WikiFs {
         Ok(out)
     }
 
-    /// Every page of the tenant, for every audience, except `index` and `log`. Only the search
-    /// snapshot uses this; it filters by the caller's scope on every query.
+    /// Every page of the tenant, for every audience, except `index` and `log`, in path order.
+    /// Only the search snapshot uses this; it filters by the caller's scope on every query.
     pub fn all_pages(&self) -> Result<Vec<Page>, WikiError> {
+        Ok(self
+            .read_stamped(self.stamps()?)?
+            .into_iter()
+            .map(|(page, _)| page)
+            .collect())
+    }
+
+    /// Every page file of the tenant, for every audience, except `index` and `log`, with its
+    /// stamp, in path order. Reads folders only, never a page.
+    pub fn stamps(&self) -> Result<Vec<(PagePath, Stamp)>, WikiError> {
         let groups = self.subdirs("groups")?;
         let users = self.subdirs("users")?;
-        let mut out = self.read_all(self.page_paths(&groups, &users)?)?;
-        out.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut out = self.page_files(&groups, &users)?;
+        out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
 
+    /// One page file's stamp, or `None` when there is no such page.
+    pub fn stamp(&self, path: &PagePath) -> Result<Option<Stamp>, WikiError> {
+        match std::fs::metadata(self.file_for(path)) {
+            Ok(meta) if meta.is_file() => Ok(Some(Stamp::of(&meta)?)),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Reads pages with the stamps they were listed with, spread over the cores, in the order
+    /// given; missing pages are skipped, malformed ones logged and skipped.
+    pub fn read_stamped(
+        &self,
+        list: Vec<(PagePath, Stamp)>,
+    ) -> Result<Vec<(Page, Stamp)>, WikiError> {
+        crate::par::map(list, |(path, stamp)| match self.read(&path) {
+            Ok(page) => Ok(Some((page, stamp))),
+            Err(WikiError::NotFound) => Ok(None),
+            Err(WikiError::Malformed { path, reason }) => {
+                tracing::warn!(%path, %reason, "skipping malformed page");
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        })
+        .into_iter()
+        .filter_map(Result::transpose)
+        .collect()
+    }
+
     /// The paths of the pages that exist for the tenant and for the given group and user
-    /// folders. The one place that walks the wiki layout; it agrees with `PagePath::parse`, and
-    /// names that aren't valid page paths (such as raw ids) are left out.
+    /// folders.
     fn page_paths(
         &self,
         group_dirs: &[String],
         user_dirs: &[String],
     ) -> Result<Vec<PagePath>, WikiError> {
+        Ok(self
+            .page_files(group_dirs, user_dirs)?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
+    }
+
+    /// The pages that exist for the tenant and for the given group and user folders, with their
+    /// stamps. The one place that walks the wiki layout; it agrees with `PagePath::parse`, and
+    /// names that aren't valid page paths (such as raw ids) are left out.
+    fn page_files(
+        &self,
+        group_dirs: &[String],
+        user_dirs: &[String],
+    ) -> Result<Vec<(PagePath, Stamp)>, WikiError> {
         let mut dirs: Vec<String> = ["experience", "expertise", "graph"]
             .map(String::from)
             .to_vec();
@@ -171,17 +243,23 @@ impl WikiFs {
             }
         }
         for user in user_dirs {
-            rels.push(format!("users/{user}/preferences"));
+            let rel = format!("users/{user}/preferences");
+            match std::fs::metadata(self.root.join(format!("{rel}.md"))) {
+                Ok(meta) if meta.is_file() => rels.push((rel, Stamp::of(&meta)?)),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
             dirs.push(format!("users/{user}/decisions"));
         }
         for dir in &dirs {
-            for stem in self.page_stems(dir)? {
-                rels.push(format!("{dir}/{stem}"));
+            for (stem, stamp) in self.page_stems(dir)? {
+                rels.push((format!("{dir}/{stem}"), stamp));
             }
         }
         Ok(rels
-            .iter()
-            .filter_map(|r| PagePath::parse(r).ok())
+            .into_iter()
+            .filter_map(|(r, stamp)| PagePath::parse(&r).ok().map(|p| (p, stamp)))
             .collect())
     }
 
@@ -219,7 +297,9 @@ impl WikiFs {
         Ok(out)
     }
 
-    fn page_stems(&self, rel_dir: &str) -> Result<Vec<String>, WikiError> {
+    /// The page files of one folder, by name without `.md`, with their stamps. On Windows the
+    /// listing carries each file's size and time, so no file is opened.
+    fn page_stems(&self, rel_dir: &str) -> Result<Vec<(String, Stamp)>, WikiError> {
         let entries = match std::fs::read_dir(self.root.join(rel_dir)) {
             Ok(e) => e,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -236,7 +316,7 @@ impl WikiFs {
                 .to_str()
                 .and_then(|n| n.strip_suffix(".md"))
             {
-                out.push(stem.to_owned());
+                out.push((stem.to_owned(), Stamp::of(&entry.metadata()?)?));
             }
         }
         Ok(out)

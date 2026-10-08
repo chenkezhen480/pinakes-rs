@@ -307,7 +307,7 @@ async fn tenants_can_build_vectors_without_storing_them() {
         std::time::Duration::from_secs(60),
     )
     .embedder(Some(w.fake.clone()))
-    .without_storing_vectors();
+    .read_only();
     let tenant = tenants.authenticate(&w.key).await.unwrap().unwrap();
     let snap = tenant.snapshot().await.unwrap();
     assert_eq!(snap.vectors.as_ref().map(|v| v.len()), Some(5));

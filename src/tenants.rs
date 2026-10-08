@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -18,6 +19,7 @@ use crate::search::SearchSnapshot;
 use crate::search::tracker::ReadTracker;
 use crate::store::{SqliteStore, Store};
 use crate::wiki::{History, WikiFs};
+use crate::wiki::{Page, PagePath, Stamp};
 
 const MAX_ID_LEN: usize = 256;
 const HASH_HEX_LEN: usize = 16;
@@ -105,10 +107,13 @@ pub struct Tenant {
     /// Which pages each agent session has read.
     pub reads: ReadTracker,
     keep_history: bool,
+    /// Saves wiki versions to the history one at a time, off the request path.
+    history_saves: Arc<HistorySaves>,
     /// Embeds the wiki's pages when the snapshot is built, if a model is configured.
     embedder: Option<Arc<dyn Embedder>>,
-    /// Whether new page vectors are written to SQLite.
-    store_vectors: bool,
+    /// Whether the tenant's folder may be written: page vectors to SQLite and the search index
+    /// to `index/tantivy/` (off for tools such as replays that read a live folder).
+    writable: bool,
     /// Where this tenant's graph nodes and edges are stored.
     pub graph_store: Arc<dyn GraphStore>,
     /// The in-memory graph searches and walks read, loaded on first use.
@@ -121,6 +126,24 @@ pub struct Tenant {
     /// Held while wiki pages are written and the tenant re-indexed (librarian jobs, schema
     /// descriptions), so writes never interleave. LLM calls happen outside it.
     pub wiki_writer: Mutex<()>,
+    /// When a request last used the search snapshot or the graph.
+    last_used: std::sync::Mutex<Instant>,
+}
+
+/// The history saves of one tenant: one at a time, and how many are queued or running.
+#[derive(Default)]
+struct HistorySaves {
+    lock: std::sync::Mutex<()>,
+    pending: AtomicUsize,
+}
+
+/// Counts a save as finished when dropped, also when the save panics.
+struct Done<'a>(&'a AtomicUsize);
+
+impl Drop for Done<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// How long after a failed graph load requests fail at once rather than try again.
@@ -145,6 +168,43 @@ impl Tenant {
         self.keep_history.then(|| History::new(&self.dir))
     }
 
+    fn touch(&self) {
+        *self.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
+
+    /// Lets go of the search snapshot and the graph when no request used them for `idle` and
+    /// nothing is building or writing them; the next request loads them again. Says whether it
+    /// did.
+    pub fn release_if_idle(&self, idle: Duration) -> bool {
+        let unused = self
+            .last_used
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .elapsed();
+        if unused < idle {
+            return false;
+        }
+        let (Ok(_b), Ok(_l), Ok(_g), Ok(_w)) = (
+            self.building.try_lock(),
+            self.graph_loading.try_lock(),
+            self.graph_writer.try_lock(),
+            self.wiki_writer.try_lock(),
+        ) else {
+            return false;
+        };
+        let search = self
+            .search
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let graph = self.graph.write().unwrap_or_else(|e| e.into_inner()).take();
+        let released = search.is_some() || graph.is_some();
+        if released {
+            tracing::info!(tenant = %self.dir_name, idle_s = unused.as_secs(), "tenant released from memory");
+        }
+        released
+    }
+
     fn current_snapshot(&self) -> Option<Arc<SearchSnapshot>> {
         self.search
             .read()
@@ -155,6 +215,7 @@ impl Tenant {
     /// The current search snapshot, built from the wiki on first use. Concurrent first
     /// searches wait for one build instead of each running their own.
     pub async fn snapshot(&self) -> anyhow::Result<Arc<SearchSnapshot>> {
+        self.touch();
         if let Some(s) = self.current_snapshot() {
             return Ok(s);
         }
@@ -162,29 +223,153 @@ impl Tenant {
         if let Some(s) = self.current_snapshot() {
             return Ok(s);
         }
-        let snapshot = Arc::new(self.build_snapshot().await?);
+        let snapshot = Arc::new(self.open_snapshot().await?);
         *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
         Ok(snapshot)
     }
 
-    /// Rebuilds the search snapshot from the wiki files and swaps it in. Searches already
-    /// running finish on the old one.
+    /// Brings the search snapshot in line with the wiki files after a write and swaps it in:
+    /// only pages whose files changed since (by their stamps) are read and indexed again.
+    /// Searches already running finish on the old one.
     #[tracing::instrument(name = "reindex", skip_all, fields(tenant = %self.dir_name))]
     pub async fn reindex(&self) -> anyhow::Result<()> {
         let _building = self.building.lock().await;
-        let snapshot = self.build_snapshot().await?;
-        *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(snapshot));
+        let next = match self.current_snapshot() {
+            Some(current) => match self.update_snapshot(current).await? {
+                Some(next) => next,
+                None => return Ok(()),
+            },
+            None => self.open_snapshot().await?,
+        };
+        *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(next));
         Ok(())
     }
 
-    /// Builds the search snapshot from the wiki files, with the pages' vectors when a model is
-    /// configured: earlier ones for unchanged text (from the current snapshot, or from SQLite
-    /// when the tenant opens), new ones (then stored) for the rest. If the vectors can't be
-    /// made, the snapshot has none: keyword search and writes carry on, and the meaning-based
-    /// modes answer 503 until the next build.
-    async fn build_snapshot(&self) -> anyhow::Result<SearchSnapshot> {
+    fn index_dir(&self) -> Option<PathBuf> {
+        self.writable
+            .then(|| self.dir.join("index").join("tantivy"))
+    }
+
+    /// Builds the snapshot when the tenant opens: every page read, the index on disk brought up
+    /// to date, the vectors from SQLite (embedding what they lack).
+    async fn open_snapshot(&self) -> anyhow::Result<SearchSnapshot> {
+        let (wiki, index_dir) = (self.wiki(), self.index_dir());
+        let started = Instant::now();
+        let snapshot = tokio::task::spawn_blocking(move || -> anyhow::Result<SearchSnapshot> {
+            let listing = wiki.stamps()?;
+            // Pages whose files are as the index last saw them come from the index, in one
+            // read; only the others are read from their files.
+            let mut cached = match &index_dir {
+                Some(dir) => crate::search::index::PageIndex::cached_pages(dir).unwrap_or_else(|e| {
+                    tracing::warn!(error = %format!("{e:#}"), "the index's copy of the pages can't be read; reading every page");
+                    Default::default()
+                }),
+                None => Default::default(),
+            };
+            let (mut known, mut unknown) = (Vec::new(), Vec::new());
+            for (path, stamp) in listing {
+                match cached.remove(path.as_str()) {
+                    Some((s, text)) if s == stamp => known.push((path, stamp, text)),
+                    _ => unknown.push((path, stamp)),
+                }
+            }
+            drop(cached);
+            let from_index = known.len();
+            let parsed = crate::par::map(known, |(path, stamp, text)| {
+                match Page::parse(path.clone(), &text) {
+                    Ok(page) => Ok((page, Some(stamp))),
+                    Err(_) => Err((path, stamp)),
+                }
+            });
+            let mut pages = Vec::with_capacity(parsed.len() + unknown.len());
+            for p in parsed {
+                match p {
+                    Ok(page) => pages.push(page),
+                    Err(miss) => unknown.push(miss),
+                }
+            }
+            tracing::info!(from_index, from_files = unknown.len(), "pages read");
+            pages.extend(
+                wiki.read_stamped(unknown)?
+                    .into_iter()
+                    .map(|(p, s)| (p, Some(s))),
+            );
+            SearchSnapshot::open(pages, index_dir.as_deref())
+        })
+        .await
+        .context("building the search snapshot panicked")??;
+        tracing::info!(
+            tenant = %self.dir_name,
+            pages = snapshot.catalog.pages.len(),
+            ms = started.elapsed().as_millis() as u64,
+            "search snapshot opened"
+        );
+        let snapshot = self.with_vectors(snapshot, None).await?;
+        self.save_history(&snapshot, None, HashMap::new());
+        Ok(snapshot)
+    }
+
+    /// The next snapshot after pages changed on disk, or `None` when nothing did.
+    async fn update_snapshot(
+        &self,
+        current: Arc<SearchSnapshot>,
+    ) -> anyhow::Result<Option<SearchSnapshot>> {
+        let wiki = self.wiki();
+        let base = current.clone();
+        let next = tokio::task::spawn_blocking(
+            move || -> anyhow::Result<Option<(SearchSnapshot, HashMap<String, String>)>> {
+                let changes = base.changes(wiki.stamps()?);
+                if changes.is_empty() {
+                    return Ok(None);
+                }
+                let listed: Vec<String> =
+                    changes.changed.iter().map(|(p, _)| p.to_string()).collect();
+                let changed = wiki.read_stamped(changes.changed)?;
+                // A listed file that is gone or malformed by now leaves the snapshot, as a full
+                // build would skip it.
+                let read: std::collections::HashSet<String> =
+                    changed.iter().map(|(p, _)| p.path.to_string()).collect();
+                let mut removed = changes.removed;
+                removed.extend(
+                    listed
+                        .into_iter()
+                        .filter(|p| !read.contains(p) && base.catalog.get(p).is_some()),
+                );
+                // The history save runs later; it gets the changed pages' text as read now.
+                let texts: HashMap<String, String> = changed
+                    .iter()
+                    .map(|(p, _)| (p.path.to_string(), p.render()))
+                    .collect();
+                let changed = changed.into_iter().map(|(p, s)| (p, Some(s))).collect();
+                let reread = |path: &PagePath| -> anyhow::Result<Option<(Page, Stamp)>> {
+                    let Some(stamp) = wiki.stamp(path)? else {
+                        return Ok(None);
+                    };
+                    Ok(wiki.read_stamped(vec![(path.clone(), stamp)])?.pop())
+                };
+                Ok(Some((base.update(changed, removed, reread)?, texts)))
+            },
+        )
+        .await
+        .context("updating the search snapshot panicked")??;
+        let Some((next, texts)) = next else {
+            return Ok(None);
+        };
+        let next = self.with_vectors(next, Some(&current)).await?;
+        self.save_history(&next, Some(&current.version), texts);
+        Ok(Some(next))
+    }
+
+    /// Adds the pages' vectors when a model is configured: earlier ones for unchanged text
+    /// (from the previous snapshot, or from SQLite when the tenant opens), new ones (then
+    /// stored) for the rest. If the vectors can't be made, the snapshot has none: keyword
+    /// search and writes carry on, and the meaning-based modes answer 503 until the next build.
+    async fn with_vectors(
+        &self,
+        snapshot: SearchSnapshot,
+        previous: Option<&Arc<SearchSnapshot>>,
+    ) -> anyhow::Result<SearchSnapshot> {
         use crate::search::vectors::{Earlier, build};
-        let snapshot = build_snapshot(self.wiki(), self.history()).await?;
         let Some(embedder) = self.embedder.clone() else {
             return Ok(snapshot);
         };
@@ -195,15 +380,23 @@ impl Tenant {
                 "page vectors could not be built; semantic search is off for this tenant"
             );
         };
-        let previous = self.current_snapshot().filter(|s| {
+        let previous = previous.cloned().filter(|s| {
             s.vectors
                 .as_ref()
                 .is_some_and(|v| v.model == embedder.model())
         });
+        let started = Instant::now();
         let stored = match previous {
             Some(_) => Vec::new(),
             None => match self.store.embeddings(embedder.model()).await {
-                Ok(stored) => stored,
+                Ok(stored) => {
+                    tracing::info!(
+                        vectors = stored.len(),
+                        ms = started.elapsed().as_millis() as u64,
+                        "stored page vectors read"
+                    );
+                    stored
+                }
                 Err(e) => {
                     off(e);
                     return Ok(snapshot);
@@ -212,8 +405,10 @@ impl Tenant {
         };
         let started = Instant::now();
         let (built, mut snapshot) = tokio::task::spawn_blocking(move || {
-            let earlier = match previous.as_ref().and_then(|p| p.vectors.as_ref()) {
-                Some(v) => Earlier::Snapshot(v),
+            let earlier = match previous.as_ref() {
+                Some(p) => {
+                    Earlier::Snapshot(p.vectors.as_ref().expect("checked above"), &p.catalog)
+                }
                 None => Earlier::Stored(stored),
             };
             (build(&snapshot.catalog, earlier, &*embedder), snapshot)
@@ -227,7 +422,7 @@ impl Tenant {
                 return Ok(snapshot);
             }
         };
-        if self.store_vectors && (!built.put.is_empty() || !built.drop.is_empty()) {
+        if self.writable && (!built.put.is_empty() || !built.drop.is_empty()) {
             tracing::info!(
                 embedded = built.put.len(),
                 removed = built.drop.len(),
@@ -247,6 +442,48 @@ impl Tenant {
         Ok(snapshot)
     }
 
+    /// Keeps the snapshot's wiki version in the history, when it is kept, as the change since
+    /// `base` when that version is stored. Runs in the background, one save at a time: a first
+    /// save of a large wiki writes every page once and takes a while. Pages not stored yet
+    /// come from `texts`, else from their files. A failure only logs.
+    fn save_history(
+        &self,
+        snapshot: &SearchSnapshot,
+        base: Option<&str>,
+        texts: HashMap<String, String>,
+    ) {
+        let Some(history) = self.history() else {
+            return;
+        };
+        let version = snapshot.version.clone();
+        let base = base.map(str::to_owned);
+        let pages: std::collections::BTreeMap<String, String> = snapshot
+            .catalog
+            .pages
+            .iter()
+            .map(|p| (p.path.to_string(), p.hash.clone()))
+            .collect();
+        let (wiki, saves) = (self.wiki(), self.history_saves.clone());
+        saves.pending.fetch_add(1, Ordering::SeqCst);
+        // A thread of its own, not tokio's blocking pool, so a long save never holds up the
+        // service's shutdown; objects and manifests are written whole, so a save cut short
+        // leaves no broken version behind.
+        std::thread::spawn(move || {
+            let _one_at_a_time = saves.lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _done = Done(&saves.pending);
+            let text = |path: &str| {
+                if let Some(t) = texts.get(path) {
+                    return Some(t.clone());
+                }
+                let path = PagePath::parse(path).ok()?;
+                wiki.read(&path).ok().map(|p| p.render())
+            };
+            if let Err(e) = history.save(&version, base.as_deref(), &pages, text) {
+                tracing::warn!(%version, error = %e, "could not keep this wiki version");
+            }
+        });
+    }
+
     fn current_graph(&self) -> Option<Arc<GraphSnapshot>> {
         self.graph.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -257,6 +494,7 @@ impl Tenant {
     /// After a failed load, calls fail at once for [`GRAPH_RETRY_AFTER`] instead of each
     /// waiting on an unreachable store again; requests queued behind the failed load too.
     pub async fn graph(&self) -> anyhow::Result<Arc<GraphSnapshot>> {
+        self.touch();
         if let Some(g) = self.current_graph() {
             return Ok(g);
         }
@@ -347,8 +585,8 @@ pub struct Tenants {
     keep_history: bool,
     graph_backend: GraphBackend,
     embedder: Option<Arc<dyn Embedder>>,
-    /// Store new page vectors in each tenant's SQLite file (off for replays, which only read).
-    store_vectors: bool,
+    /// Whether tenants' folders may be written (off for replays, which only read).
+    writable: bool,
     /// Open tenants. The lock is only ever held for a map lookup or insert, never across disk
     /// work, so loading one tenant can't stall requests for the others.
     open: RwLock<HashMap<String, Arc<Tenant>>>,
@@ -369,7 +607,7 @@ impl Tenants {
             keep_history: false,
             graph_backend: GraphBackend::Sqlite,
             embedder: None,
-            store_vectors: true,
+            writable: true,
             open: RwLock::new(HashMap::new()),
             creating: Mutex::new(()),
         }
@@ -394,11 +632,31 @@ impl Tenants {
         self
     }
 
-    /// Keeps the page vectors a snapshot build makes in memory only, never writing the tenants'
-    /// SQLite files: for tools such as `pinakes-replay` that read a live data folder.
-    pub fn without_storing_vectors(mut self) -> Self {
-        self.store_vectors = false;
+    /// Never writes the tenants' folders: page vectors stay in memory, search indexes are built
+    /// in memory. For tools such as `pinakes-replay` that read a live data folder.
+    pub fn read_only(mut self) -> Self {
+        self.writable = false;
         self
+    }
+
+    /// Waits until the wiki versions open tenants are saving to their history are saved, for
+    /// tools and tests that read the history right after a search.
+    pub async fn history_saved(&self) {
+        let open: Vec<Arc<Tenant>> = self.open.read().await.values().cloned().collect();
+        for tenant in open {
+            while tenant.history_saves.pending.load(Ordering::SeqCst) > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    /// Releases the search snapshots and graphs of open tenants no request used for `idle`
+    /// (see [`Tenant::release_if_idle`]).
+    pub async fn release_idle(&self, idle: Duration) {
+        let open: Vec<Arc<Tenant>> = self.open.read().await.values().cloned().collect();
+        for tenant in open {
+            tenant.release_if_idle(idle);
+        }
     }
 
     /// The graph backend tenants open their stores from.
@@ -544,33 +802,18 @@ impl Tenants {
             building: Mutex::new(()),
             reads: ReadTracker::new(self.session_idle),
             keep_history: self.keep_history,
+            history_saves: Arc::new(HistorySaves::default()),
             embedder: self.embedder.clone(),
-            store_vectors: self.store_vectors,
+            writable: self.writable,
             graph_store,
             graph: std::sync::RwLock::new(None),
             graph_loading: Mutex::new(()),
             graph_failed_at: std::sync::Mutex::new(None),
             graph_writer: Mutex::new(()),
             wiki_writer: Mutex::new(()),
+            last_used: std::sync::Mutex::new(Instant::now()),
         })
     }
-}
-
-/// Reads every page of a wiki and builds its search snapshot, off the async threads. With a
-/// history, the version is stored there first; failing to store it only logs a warning.
-async fn build_snapshot(wiki: WikiFs, history: Option<History>) -> anyhow::Result<SearchSnapshot> {
-    tokio::task::spawn_blocking(move || {
-        let pages = wiki.all_pages()?;
-        if let Some(history) = history {
-            let version = crate::search::version_of(&pages);
-            if let Err(e) = history.save(&version, &pages) {
-                tracing::warn!(%version, error = %e, "could not keep this wiki version");
-            }
-        }
-        SearchSnapshot::build(pages)
-    })
-    .await
-    .context("building the search snapshot panicked")?
 }
 
 fn build_tenant_dir(
@@ -736,5 +979,154 @@ mod tests {
         assert_eq!(tenant.snapshot().await.unwrap().catalog.pages.len(), 1);
         // A search that started earlier still holds the old snapshot.
         assert!(before.catalog.pages.is_empty());
+    }
+
+    /// Pages a keyword search finds for a tenant-wide caller, by path.
+    async fn found(tenant: &Arc<Tenant>, query: &str) -> Vec<String> {
+        let snap = tenant.snapshot().await.unwrap();
+        let scope = crate::identity::Scope::offline(tenant.clone(), None, Vec::new());
+        let req: crate::search::SearchRequest =
+            serde_json::from_value(serde_json::json!({ "query": query })).unwrap();
+        let resp = crate::search::search(
+            &snap,
+            &GraphSnapshot::empty(),
+            &scope,
+            &req,
+            &crate::config::SearchConfig::default(),
+            &Default::default(),
+            None,
+        )
+        .unwrap();
+        resp.memories
+            .hits
+            .iter()
+            .chain(&resp.knowledge.hits)
+            .map(|h| h.page.clone())
+            .collect()
+    }
+
+    fn page(path: &str, title: &str, aliases: &[&str], body: &str) -> crate::wiki::Page {
+        let mut p = crate::wiki::Page::new(crate::wiki::PagePath::parse(path).unwrap());
+        p.front.title = Some(title.into());
+        p.front.aliases = aliases.iter().map(|a| (*a).into()).collect();
+        p.body = format!("# {title}\n\n{body}\n");
+        p
+    }
+
+    /// The index lives in the tenant's folder and follows the files: a write re-reads only the
+    /// changed page, nothing changed leaves the snapshot as it is, and after a restart a page
+    /// edited by hand meanwhile is found by its new text, also when the edit gave the tenant a
+    /// new term.
+    #[tokio::test]
+    async fn the_index_on_disk_follows_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60));
+        let created = open().create("acme", "initial").await.unwrap();
+        let tenant = created.tenant.clone();
+        let wiki = tenant.wiki();
+        wiki.write(&page(
+            "expertise/returns",
+            "退货规则",
+            &[],
+            "签收后七天无理由退货。",
+        ))
+        .unwrap();
+        wiki.write(&page(
+            "expertise/tracking",
+            "物流查询",
+            &[],
+            "用运单号查询轨迹。",
+        ))
+        .unwrap();
+        tenant.reindex().await.unwrap();
+        // The index keeps each page with its file's stamp, so a restart need not read them.
+        let cached =
+            crate::search::index::PageIndex::cached_pages(&tenant.dir.join("index/tantivy"))
+                .unwrap();
+        for (path, stamp) in wiki.stamps().unwrap() {
+            assert_eq!(cached[path.as_str()].0, stamp, "{path}");
+        }
+        assert_eq!(
+            found(&tenant, "无理由退货").await,
+            vec!["expertise/returns"]
+        );
+
+        let before = tenant.snapshot().await.unwrap();
+        tenant.reindex().await.unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &tenant.snapshot().await.unwrap()),
+            "nothing changed"
+        );
+        wiki.write(&page(
+            "expertise/returns",
+            "退货规则",
+            &[],
+            "生鲜不支持无理由退货。",
+        ))
+        .unwrap();
+        tenant.reindex().await.unwrap();
+        let after = tenant.snapshot().await.unwrap();
+        let entry = |s: &SearchSnapshot, p: &str| s.catalog.get(p).unwrap().1 as *const _;
+        assert_eq!(
+            entry(&before, "expertise/tracking"),
+            entry(&after, "expertise/tracking"),
+            "an unchanged page keeps its entry"
+        );
+        assert_eq!(found(&tenant, "生鲜").await, vec!["expertise/returns"]);
+
+        // Edited by hand while the service is down: a new term, and new text.
+        drop((tenant, created.tenant, before, after));
+        wiki.write(&page("expertise/terms", "术语", &["快递单号"], "术语表。"))
+            .unwrap();
+        wiki.write(&page(
+            "expertise/tracking",
+            "物流查询",
+            &[],
+            "用快递单号查询轨迹。",
+        ))
+        .unwrap();
+        let tenant = open()
+            .authenticate(&created.api_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            found(&tenant, "快递单号")
+                .await
+                .contains(&"expertise/tracking".to_string())
+        );
+        assert!(found(&tenant, "运单号").await.is_empty());
+        let (_, tracking) = tenant
+            .snapshot()
+            .await
+            .unwrap()
+            .catalog
+            .get("expertise/tracking")
+            .map(|(i, e)| (i, e.body.words.clone()))
+            .unwrap();
+        assert!(tracking.contains("快递单号"), "split with the new term");
+    }
+
+    /// An idle tenant lets go of its snapshot and graph, never while a write holds it, and
+    /// loads them again on the next request.
+    #[tokio::test]
+    async fn idle_tenants_are_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let tenants = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60));
+        let tenant = tenants.create("acme", "initial").await.unwrap().tenant;
+        tenant.snapshot().await.unwrap();
+        tenant.graph().await.unwrap();
+        assert!(
+            !tenant.release_if_idle(Duration::from_secs(3600)),
+            "used just now"
+        );
+        {
+            let _writing = tenant.wiki_writer.lock().await;
+            assert!(!tenant.release_if_idle(Duration::ZERO));
+        }
+        tenants.release_idle(Duration::ZERO).await;
+        assert!(tenant.current_snapshot().is_none() && tenant.current_graph().is_none());
+        tenant.snapshot().await.unwrap();
+        assert!(tenant.current_snapshot().is_some());
     }
 }

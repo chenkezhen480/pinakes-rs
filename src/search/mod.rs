@@ -27,7 +27,10 @@ pub mod tokenize;
 pub mod tracker;
 pub mod vectors;
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
 
 use petgraph::graph::NodeIndex;
 
@@ -45,7 +48,7 @@ use crate::embed::Embedder;
 use crate::graph::{EntityRef, GraphSnapshot, Visible};
 use crate::identity::Scope;
 use crate::kinds::Kind;
-use crate::wiki::{Page, PagePath};
+use crate::wiki::{Page, PagePath, Stamp};
 
 /// Most hits a caller may ask for in one slot.
 pub const MAX_SLOT: usize = 20;
@@ -71,27 +74,65 @@ const STRONG_SHARE: f32 = 0.5;
 const MEANING_FLOOR: f32 = 0.25;
 
 /// Everything a search reads, built from a tenant's wiki. Replaced whole when pages change, so
-/// running searches keep the snapshot they started with.
+/// running searches keep the snapshot they started with; the next one shares every unchanged
+/// page with it.
 pub struct SearchSnapshot {
     /// A hash of the pages it was built from, so a trace says which wiki a search ran on.
     pub version: String,
     pub catalog: Catalog,
-    analyzer: Analyzer,
+    analyzer: Arc<Analyzer>,
     names: NameMatcher,
     index: PageIndex,
     /// The pages' vectors, when an embedding model is configured.
     pub vectors: Option<vectors::Vectors>,
 }
 
+/// Pages that changed since a snapshot was built, from a fresh listing of the wiki.
+#[derive(Debug, Default)]
+pub struct Changes {
+    /// New or rewritten page files, with their stamps.
+    pub changed: Vec<(PagePath, Stamp)>,
+    /// Pages whose files are gone.
+    pub removed: Vec<String>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.removed.is_empty()
+    }
+}
+
 impl SearchSnapshot {
+    /// From a list of pages, with its index in memory: a past wiki version (replays) or tests.
     pub fn build(pages: Vec<Page>) -> anyhow::Result<Self> {
-        let version = version_of(&pages);
-        let analyzer = Analyzer::new(Catalog::terms_of(&pages));
-        let catalog = Catalog::build(pages, &analyzer);
+        Self::open(pages.into_iter().map(|p| (p, None)).collect(), None)
+    }
+
+    pub fn empty() -> anyhow::Result<Self> {
+        Self::build(Vec::new())
+    }
+
+    /// A tenant's snapshot when it opens, from its pages as read with their stamps. With
+    /// `index_dir` the index lives there and only pages changed since it was written are
+    /// indexed again; without, it is built in memory. Pages are parsed on all cores.
+    pub fn open(
+        pages: Vec<(Page, Option<Stamp>)>,
+        index_dir: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let terms: Vec<String> = pages
+            .iter()
+            .flat_map(|(p, _)| catalog::page_terms(p))
+            .collect();
+        let analyzer = Arc::new(Analyzer::new(terms));
+        let built = catalog::entries(pages, &analyzer);
+        let catalog = Catalog::from_entries(built.iter().map(|(e, _)| e.clone()).collect());
         let names = NameMatcher::build(&catalog);
-        let index = PageIndex::build(&catalog, &analyzer)?;
+        let index = match index_dir {
+            Some(dir) => PageIndex::open(dir, &built, &analyzer)?,
+            None => PageIndex::build(&catalog, &analyzer)?,
+        };
         Ok(Self {
-            version,
+            version: catalog.version(),
             catalog,
             analyzer,
             names,
@@ -100,26 +141,108 @@ impl SearchSnapshot {
         })
     }
 
-    pub fn empty() -> anyhow::Result<Self> {
-        Self::build(Vec::new())
+    /// Which pages of a fresh listing differ from what this snapshot holds: files with another
+    /// stamp, new files, and pages whose files are gone.
+    pub fn changes(&self, listing: Vec<(PagePath, Stamp)>) -> Changes {
+        let mut out = Changes::default();
+        let mut seen: HashSet<&str> = HashSet::with_capacity(listing.len());
+        for (path, stamp) in listing {
+            match self.catalog.get(path.as_str()) {
+                Some((_, entry)) => {
+                    seen.insert(entry.path.as_str());
+                    if entry.stamp != Some(stamp) {
+                        out.changed.push((path, stamp));
+                    }
+                }
+                None => out.changed.push((path, stamp)),
+            }
+        }
+        out.removed = self
+            .catalog
+            .pages
+            .iter()
+            .filter(|p| !seen.contains(p.path.as_str()))
+            .map(|p| p.path.to_string())
+            .collect();
+        out
     }
-}
 
-/// The version of a set of pages: 16 hex digits of a SHA-256 over every page's path and text.
-/// A search snapshot built from the pages has this version, and the wiki history stores them
-/// under it.
-pub fn version_of(pages: &[Page]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut sorted: Vec<&Page> = pages.iter().collect();
-    sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut h = Sha256::new();
-    for page in sorted {
-        h.update(page.path.as_str().as_bytes());
-        h.update([0u8]);
-        h.update(page.render().as_bytes());
-        h.update([0u8]);
+    /// The next snapshot after pages changed: `changed` holds their new text (with stamps),
+    /// `removed` the pages that are gone. Every other page keeps its entry and its place in the
+    /// index. When the change alters the tenant's term list, the pages whose text holds an
+    /// added or dropped term are tokenized again too, read afresh with `read` (`None` when the
+    /// page is gone). Vectors are left out; the caller adds them.
+    pub fn update(
+        &self,
+        changed: Vec<(Page, Option<Stamp>)>,
+        mut removed: Vec<String>,
+        read: impl Fn(&PagePath) -> anyhow::Result<Option<(Page, Stamp)>>,
+    ) -> anyhow::Result<Self> {
+        let mut touched: HashSet<String> = removed.iter().cloned().collect();
+        touched.extend(changed.iter().map(|(p, _)| p.path.to_string()));
+        let kept = |e: &&Arc<PageEntry>| !touched.contains(e.path.as_str());
+        let mut terms: Vec<String> = self
+            .catalog
+            .pages
+            .iter()
+            .filter(kept)
+            .flat_map(|e| e.terms.iter().cloned())
+            .collect();
+        terms.extend(changed.iter().flat_map(|(p, _)| catalog::page_terms(p)));
+        let next = Analyzer::new(terms);
+        let mut todo = changed;
+        let analyzer = if next.terms() == self.analyzer.terms() {
+            self.analyzer.clone()
+        } else {
+            // Tokens depend on the term list: pages holding a term that came or went are split
+            // differently now. Schema pages are always made again (their type names are terms
+            // in fields outside the head and body text).
+            let (old, new): (HashSet<&String>, HashSet<&String>) = (
+                self.analyzer.terms().iter().collect(),
+                next.terms().iter().collect(),
+            );
+            let differ: Vec<&String> = old.symmetric_difference(&new).copied().collect();
+            let ac = aho_corasick::AhoCorasick::new(&differ)?;
+            let affected: Vec<PagePath> = self
+                .catalog
+                .pages
+                .iter()
+                .filter(kept)
+                .filter(|e| {
+                    e.kind == Kind::Graph || ac.is_match(&e.head.norm) || ac.is_match(&e.body.norm)
+                })
+                .map(|e| e.path.clone())
+                .collect();
+            for path in affected {
+                touched.insert(path.to_string());
+                match read(&path)? {
+                    Some((page, stamp)) => todo.push((page, Some(stamp))),
+                    None => removed.push(path.to_string()),
+                }
+            }
+            Arc::new(next)
+        };
+        let fresh = catalog::entries(todo, &analyzer);
+        let mut entries: Vec<Arc<PageEntry>> = self
+            .catalog
+            .pages
+            .iter()
+            .filter(|e| !touched.contains(e.path.as_str()))
+            .cloned()
+            .collect();
+        entries.extend(fresh.iter().map(|(e, _)| e.clone()));
+        let catalog = Catalog::from_entries(entries);
+        let names = NameMatcher::build(&catalog);
+        let index = self.index.update(&removed, &fresh, &analyzer)?;
+        Ok(Self {
+            version: catalog.version(),
+            catalog,
+            analyzer,
+            names,
+            index,
+            vectors: None,
+        })
     }
-    hex::encode(&h.finalize()[..8])
 }
 
 // ---- request and response ------------------------------------------------------------------
@@ -993,46 +1116,63 @@ pub fn search(
 
     // 3 and 4. Search and ranking, per channel.
     let audiences = scope.audience_keys();
-    let mut query_vector: Option<Vec<f32>> = None;
+    // Meaning: the query's similarity to every page the caller may see, found once and shared
+    // by both slots.
+    let mut by_meaning: Option<Vec<(usize, f32)>> = None;
+    let mut by_keywords: HashMap<Slot, Vec<(f32, usize)>> = HashMap::new();
     let mut run_channel = |slot: Slot,
                            mode: Mode,
                            timings: &mut Vec<(&'static str, u64)>|
      -> anyhow::Result<Vec<Candidate>> {
         let mut by_ord: HashMap<usize, (Option<f32>, Option<f32>)> = HashMap::new();
         if matches!(mode, Mode::Keyword | Mode::Both) {
-            let span = tracing::info_span!("keyword_search", slot = slot.as_str());
-            let _enter = span.enter();
-            let queries = keywords
-                .iter()
-                .map(|k| {
-                    let words: &[Tok] = if ablation.words { &k.words } else { &[] };
-                    let bigrams: &[Tok] = if ablation.bigrams { &k.bigrams } else { &[] };
-                    snap.index.keyword_query(words, bigrams, k.weight)
-                })
-                .collect();
-            for (score, ord) in snap.index.search(queries, &audiences, slot, CANDIDATES)? {
+            // A slot `auto` searches again with both rankings reuses its keyword hits.
+            if let Entry::Vacant(e) = by_keywords.entry(slot) {
+                let span = tracing::info_span!("keyword_search", slot = slot.as_str());
+                let _enter = span.enter();
+                let queries = keywords
+                    .iter()
+                    .map(|k| {
+                        let words: &[Tok] = if ablation.words { &k.words } else { &[] };
+                        let bigrams: &[Tok] = if ablation.bigrams { &k.bigrams } else { &[] };
+                        snap.index.keyword_query(words, bigrams, k.weight)
+                    })
+                    .collect();
+                e.insert(snap.index.search(
+                    queries,
+                    &audiences,
+                    slot,
+                    CANDIDATES,
+                    &snap.catalog,
+                )?);
+            }
+            for &(score, ord) in &by_keywords[&slot] {
                 by_ord.entry(ord).or_default().0 = Some(score);
             }
         }
         if matches!(mode, Mode::Semantic | Mode::Both)
             && let Some((vectors, embedder)) = meaning
         {
-            if query_vector.is_none() {
+            if by_meaning.is_none() {
                 let started = std::time::Instant::now();
                 let v = tracing::info_span!("embed_query")
                     .in_scope(|| embedder.embed(&[req.query.trim().to_owned()]))?;
-                query_vector = v.into_iter().next();
                 timings.push(("embed_query", micros(started)));
+                let q = v.into_iter().next().unwrap_or_default();
+                let started = std::time::Instant::now();
+                by_meaning = Some(tracing::info_span!("meaning_search").in_scope(|| {
+                    vectors.best(&q, |ord| {
+                        audiences.contains(&snap.catalog.pages[ord].audience)
+                    })
+                }));
+                timings.push(("meaning_search", micros(started)));
             }
-            let span = tracing::info_span!("meaning_search", slot = slot.as_str());
-            let _enter = span.enter();
-            let q = query_vector.as_deref().unwrap_or_default();
-            let found = vectors.best(q, |ord| {
-                let page = &snap.catalog.pages[ord];
-                page.slot == slot && audiences.contains(&page.audience)
-            });
+            let found = by_meaning
+                .iter()
+                .flatten()
+                .filter(|(ord, _)| snap.catalog.pages[*ord].slot == slot);
             // In `both` mode every keyword candidate gets its similarity too.
-            for (rank, (ord, sim)) in found.into_iter().enumerate() {
+            for (rank, &(ord, sim)) in found.enumerate() {
                 match by_ord.get_mut(&ord) {
                     Some(e) => e.1 = Some(sim),
                     None if rank < CANDIDATES => {
@@ -1104,10 +1244,11 @@ pub fn search(
         };
         Ok((cands, coverage))
     };
-    // A slot's time leaves out embedding the query, which has its own entry.
+    // A slot's time leaves out embedding the query and comparing it with the page vectors,
+    // which have their own entries.
     let embedded = |t: &[(&'static str, u64)]| -> u64 {
         t.iter()
-            .filter(|(k, _)| *k == "embed_query")
+            .filter(|(k, _)| matches!(*k, "embed_query" | "meaning_search"))
             .map(|(_, v)| v)
             .sum()
     };
@@ -1703,7 +1844,13 @@ mod tests {
             })
             .collect();
         snap.index
-            .search(queries, &["tenant".to_string()], Slot::Knowledge, 10)
+            .search(
+                queries,
+                &["tenant".to_string()],
+                Slot::Knowledge,
+                10,
+                &snap.catalog,
+            )
             .unwrap()
             .into_iter()
             .map(|(_, i)| snap.catalog.pages[i].path.to_string())
@@ -1818,5 +1965,155 @@ mod tests {
         assert!(words.contains(&"物流单号".to_string()), "{words:?}");
         let tracking = "expertise/tracking".to_string();
         assert!(rank(&snap, &["物流单号"], true, false).contains(&tracking));
+    }
+
+    fn page(path: &str, title: &str, aliases: &[&str], body: &str) -> Page {
+        let mut p = Page::new(PagePath::parse(path).unwrap());
+        p.front.title = Some(title.into());
+        p.front.aliases = aliases.iter().map(|a| (*a).into()).collect();
+        p.body = format!("# {title}\n\n{body}\n");
+        p
+    }
+
+    /// What searches read of each page: path, hash, and the words of its head, body and lines.
+    type Shape = Vec<(String, String, Vec<String>, Vec<String>, Vec<Vec<String>>)>;
+
+    fn shape(snap: &SearchSnapshot) -> Shape {
+        let sorted = |set: &HashSet<String>| {
+            let mut v: Vec<String> = set.iter().cloned().collect();
+            v.sort();
+            v
+        };
+        snap.catalog
+            .pages
+            .iter()
+            .map(|p| {
+                let lines = p
+                    .sections
+                    .iter()
+                    .flat_map(|s| s.lines.iter().map(|l| sorted(&l.words)))
+                    .collect();
+                (
+                    p.path.to_string(),
+                    p.hash.clone(),
+                    sorted(&p.head.words),
+                    sorted(&p.body.words),
+                    lines,
+                )
+            })
+            .collect()
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    /// A snapshot updated with a few changed pages holds what one built from scratch holds,
+    /// also when the change gives the tenant a new term: the pages whose text holds it are
+    /// split again. The snapshot it came from stays as it was.
+    #[test]
+    fn an_updated_snapshot_equals_a_full_build() {
+        let stamp = Stamp {
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            len: 0,
+        };
+        let tracking = page(
+            "expertise/tracking",
+            "物流查询",
+            &[],
+            "用物流单号查询轨迹。",
+        );
+        let first = SearchSnapshot::build(vec![
+            page("expertise/terms", "术语", &[], "术语表。"),
+            tracking.clone(),
+            page("expertise/gone", "旧说明", &[], "过时的内容。"),
+        ])
+        .unwrap();
+        let whole = |snap: &SearchSnapshot| {
+            let (_, e) = snap.catalog.get("expertise/tracking").unwrap();
+            e.body.words.contains("物流单号")
+        };
+        assert!(!whole(&first));
+
+        // 物流单号 becomes a term, a page comes and one goes.
+        let terms = page("expertise/terms", "术语", &["物流单号"], "术语表。");
+        let new = page("expertise/labels", "面单", &[], "物流单号印在面单上。");
+        let disk = vec![terms.clone(), tracking, new.clone()];
+        let read = |path: &PagePath| -> anyhow::Result<Option<(Page, Stamp)>> {
+            Ok(disk
+                .iter()
+                .find(|p| p.path == *path)
+                .map(|p| (p.clone(), stamp)))
+        };
+        let updated = first
+            .update(
+                vec![(terms, Some(stamp)), (new, Some(stamp))],
+                vec!["expertise/gone".into()],
+                read,
+            )
+            .unwrap();
+        let full = SearchSnapshot::build(disk.clone()).unwrap();
+        assert_eq!(updated.version, full.version);
+        assert_eq!(shape(&updated), shape(&full));
+        assert_eq!(updated.analyzer.terms(), full.analyzer.terms());
+        assert!(
+            whole(&updated),
+            "the page holding the new term was split again"
+        );
+        let found = sorted(rank(&updated, &["物流单号"], true, false));
+        assert_eq!(found, sorted(rank(&full, &["物流单号"], true, false)));
+        assert_eq!(
+            found,
+            vec!["expertise/labels", "expertise/terms", "expertise/tracking"]
+        );
+        assert!(rank(&updated, &["过时"], true, true).is_empty());
+
+        // The earlier snapshot still answers as before.
+        assert!(first.catalog.get("expertise/gone").is_some());
+        assert!(!whole(&first));
+        assert_eq!(rank(&first, &["过时"], true, true), vec!["expertise/gone"]);
+
+        // A change that leaves the terms alone keeps every other page's entry as it is.
+        let again = updated
+            .update(
+                vec![(
+                    page("expertise/labels", "面单", &[], "改了一行。"),
+                    Some(stamp),
+                )],
+                Vec::new(),
+                |_: &PagePath| panic!("no page needs reading again"),
+            )
+            .unwrap();
+        let (_, before) = updated.catalog.get("expertise/tracking").unwrap();
+        let (_, after) = again.catalog.get("expertise/tracking").unwrap();
+        assert!(std::ptr::eq(before, after));
+        assert_ne!(again.version, updated.version);
+    }
+
+    #[test]
+    fn changes_compare_stamps() {
+        let at = |secs: u64, len: u64| Stamp {
+            modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            len,
+        };
+        let snap = SearchSnapshot::open(
+            vec![
+                (page("expertise/a", "A", &[], "a"), Some(at(1, 10))),
+                (page("expertise/b", "B", &[], "b"), Some(at(1, 10))),
+                (page("expertise/c", "C", &[], "c"), Some(at(1, 10))),
+            ],
+            None,
+        )
+        .unwrap();
+        let path = |p: &str| PagePath::parse(p).unwrap();
+        let changes = snap.changes(vec![
+            (path("expertise/a"), at(1, 10)),
+            (path("expertise/b"), at(2, 10)),
+            (path("expertise/d"), at(1, 10)),
+        ]);
+        let changed: Vec<String> = changes.changed.iter().map(|(p, _)| p.to_string()).collect();
+        assert_eq!(changed, vec!["expertise/b", "expertise/d"]);
+        assert_eq!(changes.removed, vec!["expertise/c"]);
     }
 }

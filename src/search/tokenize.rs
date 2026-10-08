@@ -38,6 +38,8 @@ enum Seg<'a> {
 pub struct Analyzer {
     /// The tenant's Chinese terms, leftmost-longest. `None` when it has none.
     terms: Option<AhoCorasick>,
+    /// The same terms, sorted.
+    list: Vec<String>,
 }
 
 impl Analyzer {
@@ -48,15 +50,20 @@ impl Analyzer {
             .into_iter()
             .filter(|t| all_cjk(t) && t.chars().count() >= 2)
             .collect();
-        let mut terms: Vec<String> = set.into_iter().collect();
-        terms.sort();
-        let terms = (!terms.is_empty()).then(|| {
+        let mut list: Vec<String> = set.into_iter().collect();
+        list.sort();
+        let terms = (!list.is_empty()).then(|| {
             AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
-                .build(&terms)
+                .build(&list)
                 .expect("term automaton builds")
         });
-        Self { terms }
+        Self { terms, list }
+    }
+
+    /// The terms it keeps whole, sorted.
+    pub fn terms(&self) -> &[String] {
+        &self.list
     }
 
     fn segments<'a>(&self, run: &'a str) -> Vec<Seg<'a>> {

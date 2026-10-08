@@ -71,5 +71,8 @@ enabled = false
 providers = []
 daily_token_budget = 200000
 
+[cache]                        # (M6) tenants in memory
+idle_minutes = 30              # a tenant unused this long frees its search snapshot and graph; 0 never
+
 [jobs]                         # the per-tenant write queue; job status lives in memory
 keep_finished_minutes = 60     # finished jobs stay visible at /jobs/{id} this long

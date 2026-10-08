@@ -1,14 +1,18 @@
 //! The in-memory copy of a tenant's pages that searches read: front matter, the body split into
 //! sections and lines, and normalized text for matching keywords. Built from the wiki files.
+//!
+//! Entries are shared between snapshots: after a write, the next snapshot keeps every unchanged
+//! page's entry and builds only the changed ones.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_norway::Value;
 
 use super::text::normalize;
 use super::tokenize::Analyzer;
 use crate::kinds::Kind;
-use crate::wiki::{Audience, Page, PagePath};
+use crate::wiki::{Audience, Page, PagePath, Stamp, object_name};
 
 /// The slot a page comes back in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,13 +122,23 @@ pub struct PageEntry {
     /// Title, aliases, keywords and summary.
     pub head: FieldText,
     pub body: FieldText,
+    /// The page's object name in the wiki history (a hash of the page as written), which tells
+    /// a later build whether it changed.
+    pub hash: String,
+    /// 64 bits of a SHA-256 over the path: how the search index names the page.
+    pub key: u64,
+    /// The stamp of the file it was read from; none for pages from the history.
+    pub stamp: Option<Stamp>,
+    /// The terms it gives the tenant's tokenizer (see [`page_terms`]).
+    pub terms: Vec<String>,
 }
 
 /// All pages of one tenant, in path order.
 #[derive(Debug, Default)]
 pub struct Catalog {
-    pub pages: Vec<PageEntry>,
+    pub pages: Vec<Arc<PageEntry>>,
     by_path: HashMap<String, usize>,
+    by_key: HashMap<u64, usize>,
     /// Entity anchors (`schema:type`, `space:type/key`) to the pages anchored to them.
     anchored: HashMap<String, Vec<usize>>,
     /// Every `schema:type` the schema pages define.
@@ -133,20 +147,66 @@ pub struct Catalog {
     relations: Vec<RelationTypeEntry>,
 }
 
+/// Catalog entries for pages, each with the page's text as written, built on all cores, in the
+/// order given. Pages without a kind (`index`, `log`) are skipped.
+pub fn entries(
+    pages: Vec<(Page, Option<Stamp>)>,
+    analyzer: &Analyzer,
+) -> Vec<(Arc<PageEntry>, String)> {
+    crate::par::map(pages, |(page, stamp)| {
+        let kind = page.path.kind()?;
+        let text = page.render();
+        Some((
+            Arc::new(entry_for(page, kind, &text, stamp, analyzer)),
+            text,
+        ))
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The terms a page gives the tenant's tokenizer: titles, aliases, keywords and node type names
+/// of tenant-level pages. Group and user pages give none, so one user's private terms never
+/// change how anyone else's text is split; bigrams still cover them.
+pub fn page_terms(page: &Page) -> Vec<String> {
+    if !matches!(page.path.audience(), Audience::Tenant) {
+        return Vec::new();
+    }
+    let f = &page.front;
+    let mut out: Vec<String> = f.title.iter().map(|t| normalize(t)).collect();
+    out.extend(f.aliases.iter().map(|t| normalize(t)));
+    out.extend(f.keywords.iter().map(|t| normalize(t)));
+    for nt in node_types(&f.extra) {
+        out.extend(nt.names.iter().map(|t| normalize(t)));
+    }
+    out
+}
+
 impl Catalog {
     /// Builds entries from pages. Pages without a kind (`index`, `log`) are skipped.
     pub fn build(pages: Vec<Page>, analyzer: &Analyzer) -> Self {
+        let pages = pages.into_iter().map(|p| (p, None)).collect();
+        Self::from_entries(
+            entries(pages, analyzer)
+                .into_iter()
+                .map(|(e, _)| e)
+                .collect(),
+        )
+    }
+
+    /// A catalog of entries, put in path order.
+    pub fn from_entries(mut entries: Vec<Arc<PageEntry>>) -> Self {
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
         let mut out = Catalog::default();
-        for page in pages {
-            let Some(kind) = page.path.kind() else {
-                continue;
-            };
-            let entry = entry_for(page, kind, analyzer);
+        for entry in entries {
             let ord = out.pages.len();
             out.by_path.insert(entry.path.as_str().to_owned(), ord);
+            out.by_key.insert(entry.key, ord);
             for anchor in entry.about.iter().filter(|a| a.contains(':')) {
+                // Ords only grow, so a page's repeated anchor is the list's last entry.
                 let list = out.anchored.entry(anchor.clone()).or_default();
-                if !list.contains(&ord) {
+                if list.last() != Some(&ord) {
                     list.push(ord);
                 }
             }
@@ -173,32 +233,50 @@ impl Catalog {
         self.anchored.get(entity).map_or(&[], Vec::as_slice)
     }
 
-    pub fn get(&self, path: &str) -> Option<(usize, &PageEntry)> {
-        self.by_path.get(path).map(|&i| (i, &self.pages[i]))
+    /// A page's position by its key (see [`PageEntry::key`]).
+    pub fn by_key(&self, key: u64) -> Option<usize> {
+        self.by_key.get(&key).copied()
     }
 
-    /// Every term the tenant-level pages name: titles, aliases, keywords and node type names,
-    /// for the tokenizer's term list. Group and user pages are left out, so one user's private
-    /// terms never change how anyone else's text is split; bigrams still cover them.
+    pub fn get(&self, path: &str) -> Option<(usize, &PageEntry)> {
+        self.by_path.get(path).map(|&i| (i, &*self.pages[i]))
+    }
+
+    /// Every term the pages give the tenant's tokenizer (see [`page_terms`]).
     pub fn terms_of(pages: &[Page]) -> Vec<String> {
-        let mut out = Vec::new();
-        for page in pages
-            .iter()
-            .filter(|p| matches!(p.path.audience(), Audience::Tenant))
-        {
-            let f = &page.front;
-            out.extend(f.title.iter().map(|t| normalize(t)));
-            out.extend(f.aliases.iter().map(|t| normalize(t)));
-            out.extend(f.keywords.iter().map(|t| normalize(t)));
-            for nt in node_types(&page.front.extra) {
-                out.extend(nt.names.iter().map(|t| normalize(t)));
-            }
+        pages.iter().flat_map(page_terms).collect()
+    }
+
+    /// The version of the pages: 16 hex digits of a SHA-256 over every page's path and hash. A
+    /// search snapshot built from them has this version, and the wiki history stores them under
+    /// it.
+    pub fn version(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for page in &self.pages {
+            h.update(page.path.as_str().as_bytes());
+            h.update([0u8]);
+            h.update(page.hash.as_bytes());
+            h.update([0u8]);
         }
-        out
+        hex::encode(&h.finalize()[..8])
     }
 }
 
-fn entry_for(page: Page, kind: Kind, analyzer: &Analyzer) -> PageEntry {
+fn entry_for(
+    page: Page,
+    kind: Kind,
+    text: &str,
+    stamp: Option<Stamp>,
+    analyzer: &Analyzer,
+) -> PageEntry {
+    let hash = object_name(text);
+    let key = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(page.path.as_str().as_bytes());
+        u64::from_le_bytes(digest[..8].try_into().expect("8 bytes"))
+    };
+    let terms = page_terms(&page);
     let f = page.front;
     let title = f
         .title
@@ -248,6 +326,10 @@ fn entry_for(page: Page, kind: Kind, analyzer: &Analyzer) -> PageEntry {
         schema_text,
         head,
         body,
+        hash,
+        key,
+        stamp,
+        terms,
     }
 }
 

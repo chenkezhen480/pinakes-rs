@@ -20,7 +20,7 @@ pub fn is_cjk(c: char) -> bool {
         | '\u{20000}'..='\u{2A6DF}')
 }
 
-fn is_word_char(c: char) -> bool {
+pub fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() && !is_cjk(c)
 }
 

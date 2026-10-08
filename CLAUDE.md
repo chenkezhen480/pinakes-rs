@@ -17,6 +17,9 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Graph tests against Neo4j (M3 on): `NEO4J_PASSWORD=... docker compose up -d neo4j`, then
   `PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset`.
   Without `PINAKES_TEST_NEO4J_URI` that test is skipped; the SQLite backend always runs.
+- The speed benchmark (M6): `PINAKES_BENCH_PAGES=1000,10000,100000 PINAKES_BENCH_SETTLE=240 cargo
+  test --release --test bench -- --ignored --nocapture` (100k pages take about 10 minutes; results
+  in design.md "As built in M6"). Don't build or run other heavy work while it runs.
 - Run the server bound to `127.0.0.1` locally; binding `0.0.0.0` pops a Windows Firewall dialog.
   Start it with `run_in_background`, never with `&` inside a foreground command (that hangs the tool).
 

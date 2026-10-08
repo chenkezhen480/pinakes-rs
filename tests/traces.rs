@@ -148,6 +148,8 @@ async fn replay_reports_what_changed() {
     for body in questions.values() {
         app.post(Caller::new(&key), "/search", body.clone()).await;
     }
+    // Wiki versions are saved in the background; replays read them.
+    app.state.tenants.history_saved().await;
     let records = traces(&app);
     let cfg = app.config().search.clone();
     let (root, store_file) = (
@@ -245,6 +247,8 @@ async fn replay_reports_the_search_config() {
         json!({ "query": "退款", "keywords": ["退款"] }),
     )
     .await;
+    // Wiki versions are saved in the background; replays read them.
+    app.state.tenants.history_saved().await;
     let records = traces(&app);
     let mut other = app.config().search.clone();
     other.ablation.pin_names = false;

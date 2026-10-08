@@ -34,6 +34,30 @@ pub struct Config {
     pub converter: ConverterConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+/// Open tenants in memory (design, "How it stays fast").
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    /// A tenant no request used for this long gives up its search snapshot and graph; the next
+    /// request loads them again. 0 keeps them for as long as the service runs.
+    #[serde(default = "default_idle_minutes")]
+    pub idle_minutes: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            idle_minutes: default_idle_minutes(),
+        }
+    }
+}
+
+fn default_idle_minutes() -> u64 {
+    30
 }
 
 /// The local embedding model for meaning-based search (design, "Search signals").

@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let app = pinakes::router(state.clone());
+    state.start_cache_sweeper();
     ask_for_key(&state);
 
     let listener = tokio::net::TcpListener::bind(&addr)

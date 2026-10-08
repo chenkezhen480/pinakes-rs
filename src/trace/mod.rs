@@ -374,7 +374,7 @@ mod tests {
         let mut page = crate::wiki::Page::new(crate::wiki::PagePath::parse("expertise/a").unwrap());
         page.body = "a\n".into();
         History::new(&tenant)
-            .save("00000000000000dd", &[page])
+            .save_pages("00000000000000dd", &[page])
             .unwrap();
         remove_expired(dir.path(), &now_rfc3339()[..10], u32::MAX);
         assert!(
@@ -420,10 +420,10 @@ mod tests {
         let mut page = crate::wiki::Page::new(crate::wiki::PagePath::parse("expertise/a").unwrap());
         page.body = "a\n".into();
         history
-            .save("00000000000000aa", std::slice::from_ref(&page))
+            .save_pages("00000000000000aa", std::slice::from_ref(&page))
             .unwrap();
         history
-            .save("00000000000000bb", std::slice::from_ref(&page))
+            .save_pages("00000000000000bb", std::slice::from_ref(&page))
             .unwrap();
         // Make both versions look old.
         let old = SystemTime::now() - Duration::from_secs(90 * 86_400);
@@ -459,7 +459,7 @@ mod tests {
         let history = History::new(&tenant);
         let mut page = crate::wiki::Page::new(crate::wiki::PagePath::parse("expertise/a").unwrap());
         page.body = "a\n".into();
-        history.save("00000000000000cc", &[page]).unwrap();
+        history.save_pages("00000000000000cc", &[page]).unwrap();
         let manifest = tenant.join("history/versions/00000000000000cc.json");
         std::fs::File::options()
             .write(true)

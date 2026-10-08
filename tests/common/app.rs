@@ -21,7 +21,6 @@ use tower::ServiceExt;
 pub const ADMIN: &str = "test-admin-key";
 
 pub struct TestApp {
-    pub data: TempDir,
     pub router: Router,
     /// The state behind `router`, for startup work and flushing traces.
     pub state: AppState,
@@ -31,6 +30,9 @@ pub struct TestApp {
     llm: Option<Llm>,
     /// The embedding model, kept across restarts.
     embedder: Option<Arc<dyn Embedder>>,
+    /// Last, so it is dropped after the service that holds its files open (Windows can't
+    /// delete open files).
+    pub data: TempDir,
 }
 
 /// Who is calling: an API key, plus the user, groups and audience headers the host would send.

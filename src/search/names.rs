@@ -1,14 +1,17 @@
-//! The name matcher: known names in one Aho-Corasick automaton, found in a query in one pass.
-//! The wiki's matcher holds every page title and alias and every node and relation type name of
-//! its schemas; the graph's holds node names and aliases and graph space names. A search runs
-//! both and merges their hits with [`find_in`].
+//! The name matcher: every known name, found in a query. The wiki's matcher holds every page
+//! title and alias and every node and relation type name of its schemas; the graph's holds node
+//! names and aliases and graph space names. A search runs both and merges their hits with
+//! [`find_in`].
+//!
+//! Names are kept in a hash map, and a text is matched by looking up each of its pieces that
+//! starts and ends on a word boundary, up to the longest name. A query is short, so that is a
+//! few thousand lookups at most, and the map is built in milliseconds after every write; an
+//! Aho-Corasick automaton took seconds to build over 100,000 node names (measured in M6).
 
 use std::collections::HashMap;
 
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
-
 use super::catalog::Catalog;
-use super::text::{has_cjk, normalize, on_word_boundary};
+use super::text::{has_cjk, is_word_char, normalize};
 
 /// What a name points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +38,10 @@ pub struct NameHit<'a> {
 
 #[derive(Default)]
 pub struct NameMatcher {
-    ac: Option<AhoCorasick>,
-    names: Vec<String>,
-    targets: Vec<Vec<Target>>,
+    /// Normalized name → what it names.
+    names: HashMap<String, Vec<Target>>,
+    /// The longest name, in characters.
+    longest: usize,
 }
 
 /// Names too short to route on: under two Chinese characters or three other characters. A
@@ -62,16 +66,11 @@ impl NameMatcher {
                 list.push(target);
             }
         }
-        let mut entries: Vec<(String, Vec<Target>)> = by_name.into_iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let (names, targets): (Vec<String>, Vec<Vec<Target>>) = entries.into_iter().unzip();
-        let ac = (!names.is_empty()).then(|| {
-            AhoCorasickBuilder::new()
-                .match_kind(MatchKind::Standard)
-                .build(&names)
-                .expect("name automaton builds")
-        });
-        Self { ac, names, targets }
+        let longest = by_name.keys().map(|n| n.chars().count()).max().unwrap_or(0);
+        Self {
+            names: by_name,
+            longest,
+        }
     }
 
     /// The wiki's names: page titles and aliases, and the node and relation types of its
@@ -108,23 +107,37 @@ impl NameMatcher {
         text: &str,
         visible: &impl Fn(&Target) -> bool,
     ) -> Vec<(usize, usize, NameHit<'a>)> {
-        let Some(ac) = &self.ac else {
-            return Vec::new();
-        };
-        ac.find_overlapping_iter(text)
-            .filter(|m| on_word_boundary(text, m.start(), m.end()))
-            .filter_map(|m| {
-                let p = m.pattern().as_usize();
-                let targets: Vec<&Target> = self.targets[p].iter().filter(|t| visible(t)).collect();
-                (!targets.is_empty()).then(|| {
-                    let hit = NameHit {
-                        name: &self.names[p],
-                        targets,
-                    };
-                    (m.start(), m.end(), hit)
-                })
-            })
-            .collect()
+        let mut out = Vec::new();
+        if self.names.is_empty() {
+            return out;
+        }
+        // Character starts, and whether each character belongs to a word. A piece is on word
+        // boundaries unless a word character at its edge touches one outside it.
+        let chars: Vec<(usize, bool)> = text
+            .char_indices()
+            .map(|(i, c)| (i, is_word_char(c)))
+            .collect();
+        let at = |i: usize| chars.get(i).map_or(text.len(), |c| c.0);
+        let joined = |i: usize| i > 0 && i < chars.len() && chars[i - 1].1 && chars[i].1;
+        for s in 0..chars.len() {
+            if joined(s) {
+                continue;
+            }
+            for e in s + 1..=(s + self.longest).min(chars.len()) {
+                if joined(e) {
+                    continue;
+                }
+                let (start, end) = (at(s), at(e));
+                let Some((name, targets)) = self.names.get_key_value(&text[start..end]) else {
+                    continue;
+                };
+                let targets: Vec<&Target> = targets.iter().filter(|t| visible(t)).collect();
+                if !targets.is_empty() {
+                    out.push((start, end, NameHit { name, targets }));
+                }
+            }
+        }
+        out
     }
 }
 

@@ -286,7 +286,7 @@ pub async fn replay(
                                     let today = tenant.snapshot().await?;
                                     let earlier = match today.vectors.as_ref() {
                                         Some(v) if v.model == embedder.model() => {
-                                            Earlier::Snapshot(v)
+                                            Earlier::Snapshot(v, &today.catalog)
                                         }
                                         _ => Earlier::Stored(
                                             tenant.store.embeddings(embedder.model()).await?,

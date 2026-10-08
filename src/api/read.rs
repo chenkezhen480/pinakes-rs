@@ -330,7 +330,7 @@ fn link_summaries(snapshot: &SearchSnapshot, scope: &Scope, page: &Page) -> Vec<
                     .filter(|e| scope.can_see(&e.path))
                     .collect();
                 named.sort_by_key(|e| e.audience != "tenant");
-                named.into_iter().next()
+                named.into_iter().next().map(|e| &**e)
             });
         if let Some(e) = entry
             && e.path != page.path
