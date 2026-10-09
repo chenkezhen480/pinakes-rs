@@ -27,6 +27,10 @@ const RISK: &str = "QUOKKA4410";
 const TENANT: &str = "KEEPME5150";
 /// The name of a node in lily's private graph space.
 const LEADS: &str = "PANGOLIN8820";
+/// Lily's private graph space (found lowercased, as the index keeps tokens).
+const SPACE: &str = "zebra7731";
+/// What lily keeps searching for and never finds.
+const SOUGHT: &str = "OKAPI3366";
 
 /// A librarian that files each record as one page holding its text.
 fn filer() -> Arc<FakeLlm> {
@@ -138,6 +142,14 @@ fn files_with(dir: &Path, needle: &str, skip: &[&str]) -> Vec<String> {
     out
 }
 
+/// Runs lint and waits for it.
+async fn lint(app: &TestApp, caller: Caller<'_>) {
+    app.state.traces.flush();
+    let resp = ok(app, caller, "/lint", json!({})).await;
+    let job = app.wait_job(caller, resp["job"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "done", "{job}");
+}
+
 /// Stored page vectors whose page starts with `prefix`.
 fn vectors_under(tenant_dir: &Path, prefix: &str) -> i64 {
     let db = rusqlite::Connection::open(tenant_dir.join("pinakes.sqlite")).unwrap();
@@ -186,7 +198,7 @@ async fn deleting_a_user_and_a_group_leaves_nothing_of_theirs() {
         &app,
         lily,
         "/ingest/graph/space",
-        new_space("leads", "private"),
+        new_space(SPACE, "private"),
     )
     .await;
     ok(
@@ -203,7 +215,7 @@ async fn deleting_a_user_and_a_group_leaves_nothing_of_theirs() {
         &app,
         lily,
         "/ingest/graph/data",
-        json!({ "space": "leads", "nodes": [{ "type": "customer", "key": "c1", "name": LEADS }] }),
+        json!({ "space": SPACE, "nodes": [{ "type": "customer", "key": "c1", "name": LEADS }] }),
     )
     .await;
 
@@ -241,6 +253,17 @@ async fn deleting_a_user_and_a_group_leaves_nothing_of_theirs() {
         pages_of(&found).iter().any(|p| p.starts_with(&lily_dir)),
         "{found}"
     );
+    // Searches that keep coming back weak: lint reports them to lily alone.
+    for _ in 0..3 {
+        ok(
+            &app,
+            lily,
+            "/search",
+            json!({ "query": SOUGHT, "keywords": [SOUGHT] }),
+        )
+        .await;
+    }
+    lint(&app, host).await;
     app.state.tenants.history_saved().await;
 
     let dir = app.tenant_dir("acme");
@@ -252,6 +275,14 @@ async fn deleting_a_user_and_a_group_leaves_nothing_of_theirs() {
         );
     }
     assert!(!files_with(&dir, LEADS, &[]).is_empty());
+    let leads = json!({ "query": "who is the lead", "keywords": [LEADS] });
+    let found = ok(&app, lily, "/search", leads.clone()).await;
+    let node = json!(format!("{SPACE}:customer/c1"));
+    assert_eq!(found["entities"], json!([node]), "{found}");
+    assert!(
+        !files_with(&dir, SOUGHT, &["logs"]).is_empty(),
+        "lily's weak keyword is a lint finding"
+    );
     assert!(vectors_under(&dir, &lily_dir) > 0);
 
     let (status, body) = app.delete(host, "/users/lily").await;
@@ -259,14 +290,26 @@ async fn deleting_a_user_and_a_group_leaves_nothing_of_theirs() {
     assert_eq!(body["user"], "lily");
     assert_eq!(body["pages_deleted"], 2, "{body}");
     assert_eq!(body["sources_deleted"], 2, "{body}");
-    assert_eq!(body["spaces_deleted"], json!(["leads"]), "{body}");
+    assert_eq!(body["spaces_deleted"], json!([SPACE]), "{body}");
     assert_eq!(body["spaces_changed"], json!(["shop", "vault"]), "{body}");
 
     // After: nowhere, except the search traces, which are kept by design.
     assert_eq!(files_with(&dir, LILY, &["logs"]), Vec::<String>::new());
     assert_eq!(files_with(&dir, LEADS, &["logs"]), Vec::<String>::new());
+    // Lint doesn't bring her search terms back from the traces kept until they expire.
+    lint(&app, host).await;
+    for marker in [LILY, LEADS, SPACE, SOUGHT] {
+        assert_eq!(
+            files_with(&dir, marker, &["logs"]),
+            Vec::<String>::new(),
+            "{marker}"
+        );
+    }
     assert_eq!(vectors_under(&dir, &lily_dir), 0);
-    assert!(space(&dir, "leads").is_none());
+    assert!(space(&dir, SPACE).is_none());
+    // The graph in memory follows: the private space's node is gone from search.
+    let found = ok(&app, lily, "/search", leads).await;
+    assert_eq!(found["entities"], json!([]), "{found}");
     assert!(space(&dir, "shop").unwrap().get("owner").is_none());
     assert_eq!(
         space(&dir, "vault").unwrap()["members"],
@@ -292,7 +335,11 @@ async fn deleting_a_user_and_a_group_leaves_nothing_of_theirs() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["pages_deleted"], 0, "{body}");
 
-    // A group is deleted by the admin.
+    // A group is deleted by the admin, with the tenant out of memory this time: its index is
+    // purged on disk rather than through an open snapshot.
+    let tenant = app.state.tenants.by_id("acme").await.unwrap().unwrap();
+    assert!(tenant.release_if_idle(std::time::Duration::ZERO));
+    drop(tenant);
     let (status, _) = app.delete(host, "/admin/tenants/acme/groups/risk").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, body) = app.delete_admin("/admin/tenants/acme/groups/risk").await;

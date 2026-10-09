@@ -126,6 +126,11 @@ const MIGRATIONS: &[&str] = &[
 pub struct SqliteStore {
     /// `None` once closed (the tenant is being deleted): every call then fails.
     conn: Arc<Mutex<Option<Connection>>>,
+    /// Whether the store holds no vectors of other embedding models: set when they were
+    /// removed, or when reading this model's vectors found none. The model doesn't change while
+    /// the service runs, so they are looked for at most once (that reads the whole table, over
+    /// a second at 100,000 pages), never at every write.
+    other_models_cleared: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SqliteStore {
@@ -187,6 +192,7 @@ impl SqliteStore {
         migrate(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(Some(conn))),
+            other_models_cleared: Arc::default(),
         })
     }
 
@@ -216,6 +222,21 @@ impl SqliteStore {
         .await
         .context("sqlite task panicked")?
     }
+}
+
+/// Copies the write-ahead log into the database and truncates it, so old copies of deleted
+/// rows leave it; a reader still in the log makes it busy, so it is tried again three times.
+pub(crate) fn checkpoint(conn: &Connection) -> anyhow::Result<()> {
+    for attempt in 0..4 {
+        let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        if busy == 0 {
+            return Ok(());
+        }
+        if attempt < 3 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    anyhow::bail!("the write-ahead log is still in use: deleted rows may remain in it; try again")
 }
 
 fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
@@ -253,6 +274,30 @@ impl Store for SqliteStore {
         self.with_conn(|c| {
             let mut stmt = c.prepare("SELECT hash FROM api_keys")?;
             stmt.query_map([], |r| r.get(0))?.collect()
+        })
+        .await
+    }
+
+    async fn meta(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let key = key.to_owned();
+        self.with_conn(move |c| {
+            c.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()
+        })
+        .await
+    }
+
+    async fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let (key, value) = (key.to_owned(), value.to_owned());
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map(|_| ())
         })
         .await
     }
@@ -607,9 +652,11 @@ impl Store for SqliteStore {
                 "DELETE FROM lint_findings WHERE audience = ?1",
                 params![audience],
             )?;
+            // A user's own actions, whose details can hold names they chose.
+            tx.execute("DELETE FROM audit_log WHERE actor = ?1", params![audience])?;
             tx.commit()?;
             // Old copies of the rows also leave the write-ahead log.
-            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            checkpoint(c)?;
             Ok(())
         })
         .await
@@ -723,24 +770,37 @@ impl Store for SqliteStore {
 
     async fn embeddings(&self, model: &str) -> anyhow::Result<Vec<StoredVector>> {
         let model = model.to_owned();
+        let cleared = self.other_models_cleared.clone();
         self.with_conn(move |c| {
-            let mut stmt =
-                c.prepare("SELECT page, heading, hash, vector FROM embeddings WHERE model = ?1")?;
-            let rows = stmt.query_map(params![model], |r| {
-                let bytes: Vec<u8> = r.get(3)?;
-                Ok(StoredVector {
-                    page: r.get(0)?,
-                    heading: r.get(1)?,
-                    hash: r.get(2)?,
+            // Every row is read once anyway (the model isn't a key prefix), so this read also
+            // tells whether another model's rows are there; without any, `sync_embeddings`
+            // needn't look for them. Another model's vectors are never read.
+            let mut stmt = c.prepare("SELECT model, page, heading, hash, vector FROM embeddings")?;
+            let mut rows = stmt.query([])?;
+            let (mut out, mut others) = (Vec::new(), false);
+            while let Some(r) = rows.next()? {
+                let ours = matches!(r.get_ref(0)?, rusqlite::types::ValueRef::Text(m) if m == model.as_bytes());
+                if !ours {
+                    others = true;
+                    continue;
+                }
+                let bytes: Vec<u8> = r.get(4)?;
+                out.push(StoredVector {
+                    page: r.get(1)?,
+                    heading: r.get(2)?,
+                    hash: r.get(3)?,
                     vector: bytes
                         .as_chunks::<4>()
                         .0
                         .iter()
                         .map(|b| f32::from_le_bytes(*b))
                         .collect(),
-                })
-            })?;
-            rows.collect()
+                });
+            }
+            if !others {
+                cleared.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(out)
         })
         .await
     }
@@ -752,9 +812,14 @@ impl Store for SqliteStore {
         drop: Vec<(String, String)>,
     ) -> anyhow::Result<()> {
         let model = model.to_owned();
+        let cleared = self.other_models_cleared.clone();
         self.with_conn_mut(move |conn| {
+            use std::sync::atomic::Ordering;
             let tx = conn.transaction()?;
-            tx.execute("DELETE FROM embeddings WHERE model != ?1", params![model])?;
+            let clear = !cleared.load(Ordering::SeqCst);
+            if clear {
+                tx.execute("DELETE FROM embeddings WHERE model != ?1", params![model])?;
+            }
             for (page, heading) in &drop {
                 tx.execute(
                     "DELETE FROM embeddings WHERE page = ?1 AND heading = ?2 AND model = ?3",
@@ -772,6 +837,9 @@ impl Store for SqliteStore {
                 )?;
             }
             tx.commit()?;
+            if clear {
+                cleared.store(true, Ordering::SeqCst);
+            }
             Ok(())
         })
         .await
@@ -913,5 +981,36 @@ mod tests {
         let path = dir.path().join("pinakes.sqlite");
         drop(SqliteStore::create(&path).unwrap());
         assert!(SqliteStore::create(&path).is_err());
+    }
+
+    #[tokio::test]
+    async fn another_models_vectors_go_once_the_model_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pinakes.sqlite");
+        SqliteStore::create_for_tenant(&path, "acme", "abc", "initial").unwrap();
+        let v = |page: &str| StoredVector {
+            page: page.into(),
+            heading: String::new(),
+            hash: "h".into(),
+            vector: vec![0.5, -0.25],
+        };
+        let store = SqliteStore::open_existing(&path).unwrap();
+        store
+            .sync_embeddings("old", vec![v("expertise/a"), v("expertise/b")], Vec::new())
+            .await
+            .unwrap();
+        // A later start with another model: none of the old rows are read as its own, and its
+        // first write removes them.
+        drop(store);
+        let store = SqliteStore::open_existing(&path).unwrap();
+        assert!(store.embeddings("new").await.unwrap().is_empty());
+        store
+            .sync_embeddings("new", vec![v("expertise/a")], Vec::new())
+            .await
+            .unwrap();
+        assert!(store.embeddings("old").await.unwrap().is_empty());
+        let now = store.embeddings("new").await.unwrap();
+        assert_eq!(now.len(), 1);
+        assert_eq!(now[0].vector, vec![0.5, -0.25]);
     }
 }

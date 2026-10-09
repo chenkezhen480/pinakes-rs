@@ -862,6 +862,15 @@ async fn page_anchors_are_filtered_when_browsing() {
 #[tokio::test]
 async fn an_unreachable_graph_store() {
     let mut w = world().await;
+    // A tenant whose graph data is in a Neo4j that can't be reached (built on SQLite here, so
+    // its record says where its data would be).
+    rusqlite::Connection::open(w.app.tenant_dir("acme").join("pinakes.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE meta SET value = 'neo4j' WHERE key = 'graph_backend'",
+            [],
+        )
+        .unwrap();
     let broken = "[graph]\nbackend = \"neo4j\"\n[neo4j]\nuri = \"bolt://127.0.0.1:1\"\npassword_env = \"PINAKES_TEST_NO_SUCH_PASSWORD\"\n";
     w.app.restart_with_config(broken);
     let started = std::time::Instant::now();

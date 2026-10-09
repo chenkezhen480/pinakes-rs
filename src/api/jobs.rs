@@ -101,7 +101,11 @@ pub async fn approve(
     if job.status == JobState::Failed {
         // Another approval got there first.
         let now = tenant.store.proposal(&id).await?;
-        if now.is_some_and(|p| p.status != ProposalStatus::Held) {
+        // Deleted meanwhile, with its user or group.
+        let Some(now) = now else {
+            return Err(ApiError::NotFound);
+        };
+        if now.status != ProposalStatus::Held {
             return Err(ApiError::Conflict(format!(
                 "proposal {id} is already approved"
             )));

@@ -44,6 +44,12 @@ pub struct NameMatcher {
     longest: usize,
 }
 
+/// A name as the matcher keys it, if it is long enough to route on.
+fn norm(name: &str, target: Target) -> Option<(String, Target)> {
+    let n = normalize(name.trim());
+    long_enough(&n).then_some((n, target))
+}
+
 /// Names too short to route on: under two Chinese characters or three other characters. A
 /// single character such as 券 would pin its page on almost any question.
 pub fn long_enough(name: &str) -> bool {
@@ -55,12 +61,16 @@ impl NameMatcher {
     /// A matcher over `(name, target)` pairs. Names are normalized; names too short to route
     /// on are left out.
     pub fn new(entries: impl IntoIterator<Item = (String, Target)>) -> Self {
-        let mut by_name: HashMap<String, Vec<Target>> = HashMap::new();
-        for (name, target) in entries {
+        Self::normalized(entries.into_iter().filter_map(|(name, target)| {
             let norm = normalize(name.trim());
-            if !long_enough(&norm) {
-                continue;
-            }
+            long_enough(&norm).then_some((norm, target))
+        }))
+    }
+
+    /// A matcher over pairs whose names are normalized and long enough already.
+    fn normalized(entries: impl IntoIterator<Item = (String, Target)>) -> Self {
+        let mut by_name: HashMap<String, Vec<Target>> = HashMap::new();
+        for (norm, target) in entries {
             let list = by_name.entry(norm).or_default();
             if !list.contains(&target) {
                 list.push(target);
@@ -78,22 +88,22 @@ impl NameMatcher {
     pub fn build(catalog: &Catalog) -> Self {
         let mut entries = Vec::new();
         for (i, page) in catalog.pages.iter().enumerate() {
-            entries.push((page.title.clone(), Target::Page(i)));
-            for alias in &page.aliases {
-                entries.push((alias.clone(), Target::Page(i)));
+            // Page names were normalized when the entry was made, once per page change.
+            for name in &page.names {
+                entries.push((name.clone(), Target::Page(i)));
             }
             for nt in &page.node_types {
                 for name in &nt.names {
-                    entries.push((name.clone(), Target::NodeType(nt.entity.clone())));
+                    entries.extend(norm(name, Target::NodeType(nt.entity.clone())));
                 }
             }
             for rt in &page.relation_types {
                 for name in &rt.names {
-                    entries.push((name.clone(), Target::RelationType(rt.entity.clone())));
+                    entries.extend(norm(name, Target::RelationType(rt.entity.clone())));
                 }
             }
         }
-        Self::new(entries)
+        Self::normalized(entries)
     }
 
     /// Every known name in a normalized text; see [`find_in`].

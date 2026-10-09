@@ -7,6 +7,7 @@
 mod sqlite;
 
 pub use sqlite::SqliteStore;
+pub(crate) use sqlite::checkpoint;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -39,6 +40,12 @@ pub trait Store: Send + Sync {
     async fn tenant_id(&self) -> anyhow::Result<Option<String>>;
 
     async fn api_key_hashes(&self) -> anyhow::Result<Vec<String>>;
+
+    /// A value the store keeps about its tenant (such as where its graph data is).
+    async fn meta(&self, key: &str) -> anyhow::Result<Option<String>>;
+
+    /// Sets such a value.
+    async fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()>;
 
     async fn audit(&self, actor: &str, action: &str, detail: &str) -> anyhow::Result<()>;
 

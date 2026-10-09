@@ -176,7 +176,19 @@ impl WikiFs {
     pub fn stamps(&self) -> Result<Vec<(PagePath, Stamp)>, WikiError> {
         let groups = self.subdirs("groups")?;
         let users = self.subdirs("users")?;
-        let mut out = self.page_files(&groups, &users)?;
+        let mut out = self.page_files(true, &groups, &users)?;
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// The page files of these group and user folders only (no tenant pages), with their
+    /// stamps, in path order: one folder is listed without walking the whole wiki.
+    pub fn folder_stamps(
+        &self,
+        group_dirs: &[String],
+        user_dirs: &[String],
+    ) -> Result<Vec<(PagePath, Stamp)>, WikiError> {
+        let mut out = self.page_files(false, group_dirs, user_dirs)?;
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
@@ -219,23 +231,25 @@ impl WikiFs {
         user_dirs: &[String],
     ) -> Result<Vec<PagePath>, WikiError> {
         Ok(self
-            .page_files(group_dirs, user_dirs)?
+            .page_files(true, group_dirs, user_dirs)?
             .into_iter()
             .map(|(path, _)| path)
             .collect())
     }
 
-    /// The pages that exist for the tenant and for the given group and user folders, with their
-    /// stamps. The one place that walks the wiki layout; it agrees with `PagePath::parse`, and
-    /// names that aren't valid page paths (such as raw ids) are left out.
+    /// The pages that exist for the tenant (with `tenant`) and for the given group and user
+    /// folders, with their stamps. The one place that walks the wiki layout; it agrees with
+    /// `PagePath::parse`, and names that aren't valid page paths (such as raw ids) are left out.
     fn page_files(
         &self,
+        tenant: bool,
         group_dirs: &[String],
         user_dirs: &[String],
     ) -> Result<Vec<(PagePath, Stamp)>, WikiError> {
-        let mut dirs: Vec<String> = ["experience", "expertise", "graph"]
-            .map(String::from)
-            .to_vec();
+        let mut dirs: Vec<String> = Vec::new();
+        if tenant {
+            dirs.extend(["experience", "expertise", "graph"].map(String::from));
+        }
         let mut rels = Vec::new();
         for group in group_dirs {
             for sub in ["experience", "expertise", "decisions"] {

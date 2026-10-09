@@ -16,7 +16,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   When curling the local server, first `unset HTTP_PROXY HTTPS_PROXY ALL_PROXY; export NO_PROXY=127.0.0.1,localhost`.
 - Graph data is kept in SQLite (`graph.sqlite` per tenant) by default; Neo4j is an optional
   backend (`[graph] backend = "neo4j"`, compose profile `neo4j`), kept working behind
-  `GraphStore` (decided 2026-10-09: lighter, and a local mobile app may come).
+  `GraphStore` (decided 2026-10-09: lighter, and a local mobile app may come). Each tenant
+  records which store holds its graph data and won't open on the other; move it with
+  `pinakes-migrate-graph --to sqlite|neo4j` (service stopped; it removes the old copy;
+  `tests/graph_switch.rs`).
 - Graph tests against Neo4j (M3 on): `NEO4J_PASSWORD=... docker compose --profile neo4j up -d neo4j`, then
   `PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset`.
   Without `PINAKES_TEST_NEO4J_URI` that test is skipped; the SQLite backend always runs.

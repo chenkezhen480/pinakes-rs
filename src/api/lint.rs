@@ -19,10 +19,12 @@ pub async fn run(
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
     let librarian = app.librarian()?;
     let tenant = scope.tenant().clone();
-    let (owner, dir_name) = (scope.user().map(|u| u.dir.clone()), tenant.dir_name.clone());
-    let info = app.jobs.submit(
+    let dir_name = tenant.dir_name.clone();
+    // One run at a time: a run queued or running already is the answer, so repeated calls
+    // don't stack model-backed runs on the write queue. Seen by every caller of the tenant:
+    // the run is the tenant's, not one caller's.
+    let info = app.jobs.submit_once(
         &dir_name,
-        owner.as_deref(),
         "lint",
         Box::pin(async move { librarian.lint(tenant).await }),
     );

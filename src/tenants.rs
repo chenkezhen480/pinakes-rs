@@ -154,6 +154,9 @@ impl Drop for Done<'_> {
     }
 }
 
+/// How long a deletion waits for searches still on the snapshot before it to finish.
+const OLD_SEARCHES_WAIT: Duration = Duration::from_secs(10);
+
 /// How long after a failed graph load requests fail at once rather than try again.
 pub const GRAPH_RETRY_AFTER: Duration = Duration::from_secs(10);
 
@@ -269,7 +272,7 @@ impl Tenant {
         let _building = self.building.lock().await;
         self.check_live()?;
         let next = match self.current_snapshot() {
-            Some(current) => match self.update_snapshot(current).await? {
+            Some(current) => match self.update_snapshot(current, false).await? {
                 Some(next) => next,
                 None => return Ok(()),
             },
@@ -356,17 +359,20 @@ impl Tenant {
         Ok(snapshot)
     }
 
-    /// The next snapshot after pages changed on disk, or `None` when nothing did.
+    /// The next snapshot after pages changed on disk, or `None` when nothing did. With `purge`
+    /// there always is one, its index segments holding no removed or replaced text (see
+    /// `SearchSnapshot::update`).
     async fn update_snapshot(
         &self,
         current: Arc<SearchSnapshot>,
+        purge: bool,
     ) -> anyhow::Result<Option<SearchSnapshot>> {
         let wiki = self.wiki();
         let base = current.clone();
         let next = tokio::task::spawn_blocking(
             move || -> anyhow::Result<Option<(SearchSnapshot, HashMap<String, String>)>> {
                 let changes = base.changes(wiki.stamps()?);
-                if changes.is_empty() {
+                if changes.is_empty() && !purge {
                     return Ok(None);
                 }
                 let listed: Vec<String> =
@@ -394,7 +400,7 @@ impl Tenant {
                     };
                     Ok(wiki.read_stamped(vec![(path.clone(), stamp)])?.pop())
                 };
-                Ok(Some((base.update(changed, removed, reread)?, texts)))
+                Ok(Some((base.update(changed, removed, reread, purge)?, texts)))
             },
         )
         .await
@@ -607,6 +613,30 @@ impl Tenant {
         *self.graph.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(graph));
     }
 
+    /// Waits until the history saves queued so far are done.
+    async fn wait_history_saves(&self) {
+        while self.history_saves.pending.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// After a deletion removed spaces or changed their members in the stores: the in-memory
+    /// graph, when loaded, is made again from its own data with the spaces as stored now
+    /// (reading a large graph from its store again would take far longer). Callers hold
+    /// `graph_writer`.
+    pub async fn graph_after_deletion(&self) -> anyhow::Result<()> {
+        let _loading = self.graph_loading.lock().await;
+        let Some(graph) = self.current_graph() else {
+            return Ok(());
+        };
+        let spaces = self.store.graph_spaces().await?;
+        let schemas = graph.schemas.values().cloned().collect();
+        let next =
+            GraphSnapshot::build_blocking(graph, move |g| g.with_meta(schemas, spaces)).await?;
+        *self.graph.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(next));
+        Ok(())
+    }
+
     /// Drops the in-memory graph after its stores changed under it (a deletion); the next
     /// request loads it again. A load already under way finishes first, so it can't put back
     /// what it read before the change. Callers hold `graph_writer`.
@@ -616,44 +646,83 @@ impl Tenant {
     }
 
     /// After the pages under `prefix` (a deleted user's or group's folder) were removed from
-    /// the wiki: takes them out of the search index on disk for good and out of every kept wiki
-    /// version, then builds the snapshot again if one was open. Callers hold `wiki_writer`.
+    /// the wiki: takes them out of the search snapshot, out of the index on disk for good and
+    /// out of every kept wiki version. An open snapshot is updated as after a write, with the
+    /// index segments that held the pages merged away, and searches go on meanwhile; the old
+    /// segments' files are removed once the searches still reading them are done. A tenant not
+    /// open has its index purged on disk. Callers hold `wiki_writer`.
     pub async fn purge_from_search(&self, prefix: &str) -> anyhow::Result<()> {
         let _building = self.building.lock().await;
         self.check_live()?;
-        // No snapshot may hold the index's old segments while they are merged away.
-        let was_open = self
-            .search
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .is_some();
+        match self.current_snapshot() {
+            Some(current) => {
+                let next = self
+                    .update_snapshot(current.clone(), true)
+                    .await?
+                    .context("a purging update always gives a snapshot")?;
+                let old = Arc::downgrade(&current);
+                drop(current);
+                let next = Arc::new(next);
+                *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(next.clone());
+                self.collect_index_garbage(&next, old).await?;
+            }
+            None => {
+                if let Some(index) = self.index_dir() {
+                    let prefix = prefix.to_owned();
+                    tokio::task::spawn_blocking(move || {
+                        crate::search::index::PageIndex::purge(&index, &prefix)
+                    })
+                    .await
+                    .context("purging the search index panicked")??;
+                }
+            }
+        }
         // Saves are only queued by snapshot builds, which wait for `building`: once these are
         // done, none runs while the history is cleaned.
-        while self.history_saves.pending.load(Ordering::SeqCst) > 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let (index, dir, saves, prefix_owned) = (
-            self.index_dir(),
+        self.wait_history_saves().await;
+        let (dir, saves, prefix) = (
             self.dir.clone(),
             self.history_saves.clone(),
             prefix.to_owned(),
         );
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            if let Some(index) = index {
-                crate::search::index::PageIndex::purge(&index, &prefix_owned)?;
-            }
             let _no_saves = saves.lock.lock().unwrap_or_else(|e| e.into_inner());
-            History::new(&dir).purge(&prefix_owned)?;
-            Ok(())
+            Ok(History::new(&dir).purge(&prefix)?)
         })
         .await
-        .context("purging the search index panicked")??;
-        if was_open {
-            let snapshot = Arc::new(self.open_snapshot().await?);
-            *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
-        }
+        .context("purging the wiki history panicked")??;
         Ok(())
+    }
+
+    /// Removes the index files that only snapshots before `next` read: waits (up to
+    /// [`OLD_SEARCHES_WAIT`]) for the searches still on the snapshot before (`old`) to finish,
+    /// then collects; files still in use are tried again three times, then it fails (the
+    /// deletion can be repeated).
+    async fn collect_index_garbage(
+        &self,
+        next: &Arc<SearchSnapshot>,
+        old: std::sync::Weak<SearchSnapshot>,
+    ) -> anyhow::Result<()> {
+        let waited = Instant::now();
+        while old.strong_count() > 0 && waited.elapsed() < OLD_SEARCHES_WAIT {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut tries = 0;
+        loop {
+            let snap = next.clone();
+            let left = tokio::task::spawn_blocking(move || snap.collect_garbage())
+                .await
+                .context("removing old index files panicked")??;
+            if left == 0 {
+                return Ok(());
+            }
+            anyhow::ensure!(
+                tries < 3,
+                "{left} index files that held deleted pages are still in use; delete again to remove them"
+            );
+            tries += 1;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     /// Stops the tenant for its deletion: marks it deleted, waits for whatever is writing to
@@ -664,21 +733,20 @@ impl Tenant {
         if self.history_saves.stopped.load(Ordering::SeqCst) {
             return Ok(()); // An earlier attempt got this far.
         }
-        self.deleted.store(true, Ordering::SeqCst);
+        // The writers finish first; whoever takes a lock after this sees the tenant deleted.
         let locks = (
             self.graph_writer.lock().await,
             self.wiki_writer.lock().await,
             self.building.lock().await,
             self.graph_loading.lock().await,
         );
+        self.deleted.store(true, Ordering::SeqCst);
         if let Err(e) = self.graph_store.delete_all().await {
             self.deleted.store(false, Ordering::SeqCst);
             return Err(e.context("removing the tenant's graph data"));
         }
         self.key_hashes.write().await.clear();
-        while self.history_saves.pending.load(Ordering::SeqCst) > 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        self.wait_history_saves().await;
         {
             let _no_saves = self
                 .history_saves
@@ -786,9 +854,7 @@ impl Tenants {
     pub async fn history_saved(&self) {
         let open: Vec<Arc<Tenant>> = self.open.read().await.values().cloned().collect();
         for tenant in open {
-            while tenant.history_saves.pending.load(Ordering::SeqCst) > 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            tenant.wait_history_saves().await;
         }
     }
 
@@ -1001,6 +1067,8 @@ impl Tenants {
             tenant_dir_name(&id) == dir_name,
             "tenant folder {dir_name} records id that maps elsewhere"
         );
+        // Never an empty graph from the wrong store: the tenant's data must be where config says.
+        crate::graph::migrate::check(&store, &dir, &self.graph_backend, self.writable).await?;
         let key_hashes = store.api_key_hashes().await?.into_iter().collect();
         let (backend, tenant_id, tenant_dir) =
             (self.graph_backend.clone(), id.clone(), dir.clone());

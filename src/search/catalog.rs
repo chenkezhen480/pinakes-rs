@@ -131,6 +131,9 @@ pub struct PageEntry {
     pub stamp: Option<Stamp>,
     /// The terms it gives the tenant's tokenizer (see [`page_terms`]).
     pub terms: Vec<String>,
+    /// Its title and aliases as the name matcher keys them (normalized, too short ones left
+    /// out), made once with the entry rather than at every build of the matcher.
+    pub names: Vec<String>,
 }
 
 /// All pages of one tenant, in path order.
@@ -300,6 +303,12 @@ fn entry_for(
     };
     let sections = sections(&page.body, analyzer);
     let links = links(&page.body);
+    let mut names: Vec<String> = std::iter::once(&title)
+        .chain(&f.aliases)
+        .map(|n| normalize(n.trim()))
+        .filter(|n| super::names::long_enough(n))
+        .collect();
+    names.dedup();
 
     let mut head_parts: Vec<&str> = vec![&title, &summary];
     head_parts.extend(f.aliases.iter().map(String::as_str));
@@ -330,6 +339,7 @@ fn entry_for(
         key,
         stamp,
         terms,
+        names,
     }
 }
 

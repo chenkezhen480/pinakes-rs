@@ -199,6 +199,8 @@ impl GraphStore for SqliteGraphStore {
             tx.execute("DELETE FROM edges WHERE tenant = ?1", params![tenant])?;
             tx.execute("DELETE FROM nodes WHERE tenant = ?1", params![tenant])?;
             tx.commit()?;
+            // Old copies of the rows also leave the write-ahead log.
+            crate::store::checkpoint(c)?;
             Ok(())
         })
         .await
@@ -217,7 +219,7 @@ impl GraphStore for SqliteGraphStore {
             }
             tx.commit()?;
             // Old copies of the rows also leave the write-ahead log.
-            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            crate::store::checkpoint(c)?;
             Ok(())
         })
         .await

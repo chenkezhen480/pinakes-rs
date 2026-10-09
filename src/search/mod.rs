@@ -141,6 +141,11 @@ impl SearchSnapshot {
         })
     }
 
+    /// Removes the index files only older snapshots read; see `PageIndex::collect_garbage`.
+    pub fn collect_garbage(&self) -> anyhow::Result<usize> {
+        self.index.collect_garbage()
+    }
+
     /// Which pages of a fresh listing differ from what this snapshot holds: files with another
     /// stamp, new files, and pages whose files are gone.
     pub fn changes(&self, listing: Vec<(PagePath, Stamp)>) -> Changes {
@@ -172,11 +177,14 @@ impl SearchSnapshot {
     /// index. When the change alters the tenant's term list, the pages whose text holds an
     /// added or dropped term are tokenized again too, read afresh with `read` (`None` when the
     /// page is gone). Vectors are left out; the caller adds them.
+    /// With `purge`, the index segments holding removed or replaced text are merged away (see
+    /// `PageIndex::update`).
     pub fn update(
         &self,
         changed: Vec<(Page, Option<Stamp>)>,
         mut removed: Vec<String>,
         read: impl Fn(&PagePath) -> anyhow::Result<Option<(Page, Stamp)>>,
+        purge: bool,
     ) -> anyhow::Result<Self> {
         let mut touched: HashSet<String> = removed.iter().cloned().collect();
         touched.extend(changed.iter().map(|(p, _)| p.path.to_string()));
@@ -189,11 +197,12 @@ impl SearchSnapshot {
             .flat_map(|e| e.terms.iter().cloned())
             .collect();
         terms.extend(changed.iter().flat_map(|(p, _)| catalog::page_terms(p)));
-        let next = Analyzer::new(terms);
+        let next = Analyzer::term_list(terms);
         let mut todo = changed;
-        let analyzer = if next.terms() == self.analyzer.terms() {
+        let analyzer = if next == self.analyzer.terms() {
             self.analyzer.clone()
         } else {
+            let next = Analyzer::from_list(next);
             // Tokens depend on the term list: pages holding a term that came or went are split
             // differently now. Schema pages are always made again (their type names are terms
             // in fields outside the head and body text).
@@ -233,7 +242,7 @@ impl SearchSnapshot {
         entries.extend(fresh.iter().map(|(e, _)| e.clone()));
         let catalog = Catalog::from_entries(entries);
         let names = NameMatcher::build(&catalog);
-        let index = self.index.update(&removed, &fresh, &analyzer)?;
+        let index = self.index.update(&removed, &fresh, &analyzer, purge)?;
         Ok(Self {
             version: catalog.version(),
             catalog,
@@ -2051,6 +2060,7 @@ mod tests {
                 vec![(terms, Some(stamp)), (new, Some(stamp))],
                 vec!["expertise/gone".into()],
                 read,
+                false,
             )
             .unwrap();
         let full = SearchSnapshot::build(disk.clone()).unwrap();
@@ -2083,6 +2093,7 @@ mod tests {
                 )],
                 Vec::new(),
                 |_: &PagePath| panic!("no page needs reading again"),
+                false,
             )
             .unwrap();
         let (_, before) = updated.catalog.get("expertise/tracking").unwrap();

@@ -203,6 +203,11 @@ impl Librarian {
         keep_records.extend(held.iter().filter_map(|p| p.source.clone()));
         let record_audiences: HashMap<String, String> =
             store.records().await?.into_iter().collect();
+        let deleted: HashMap<String, String> = store
+            .meta(crate::deletion::DELETED_OWNERS)
+            .await?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
 
         // Code checks and traces, off the async threads.
         let (catalog_snap, graph2, dir) = (snap.clone(), graph.clone(), tenant.dir.clone());
@@ -220,6 +225,7 @@ impl Librarian {
                 &dir.join("logs"),
                 &catalog_snap.catalog,
                 &graph2,
+                &deleted,
             ));
             out
         })
@@ -536,11 +542,15 @@ fn ids(pages: &[Page]) -> String {
 /// Who sees what a page's audience sees, without knowing a user's groups: the tenant alone, the
 /// tenant and the group, or the user by their folder.
 fn reader_of(tenant: &Arc<Tenant>, audience: &PageAudience) -> Scope {
-    match audience {
-        PageAudience::Tenant => Scope::offline(tenant.clone(), None, Vec::new()),
-        PageAudience::Group(g) => Scope::offline(tenant.clone(), None, vec![g.clone()]),
-        PageAudience::User(u) => Scope::offline(tenant.clone(), Some(u.clone()), Vec::new()),
-    }
+    let user = match audience {
+        PageAudience::User(u) => Some(u.clone()),
+        _ => None,
+    };
+    super::reader_scope(
+        tenant,
+        audience,
+        &Scope::offline(tenant.clone(), user, Vec::new()),
+    )
 }
 
 /// The reply: findings for the tasks given.
@@ -777,6 +787,8 @@ fn build_tasks(
             _ => {}
         }
     }
+    // A page that can't be read (changed on disk since the snapshot) leaves nothing to ask.
+    tasks.retain(|t| !t.pages.is_empty());
     Ok(tasks)
 }
 
@@ -1082,7 +1094,13 @@ fn anchor_problem(
 /// From the last days' search traces: keywords searches keep coming back weak for, unless a
 /// page has since taken one as its title, an alias or a keyword; and keywords that named graph
 /// nodes only by part of their names (only nodes in shared spaces: the report is the tenant's).
-fn trace_findings(logs: &Path, catalog: &Catalog, graph: &GraphSnapshot) -> Vec<Stored> {
+fn trace_findings(
+    logs: &Path,
+    catalog: &Catalog,
+    graph: &GraphSnapshot,
+    deleted: &HashMap<String, String>,
+) -> Vec<Stored> {
+    use std::io::BufRead;
     let today = crate::trace::today();
     // Counted per searcher (a user folder, or `tenant` for searches without a user), so one
     // user's search terms are never shown to another and leave with the user.
@@ -1098,17 +1116,39 @@ fn trace_findings(logs: &Path, catalog: &Catalog, graph: &GraphSnapshot) -> Vec<
         if today - day >= TRACE_DAYS {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(file.path()) else {
+        let Ok(f) = std::fs::File::open(file.path()) else {
             continue;
         };
-        for line in text.lines() {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
+        // Line by line: a week of a busy tenant's traces needn't be in memory at once.
+        for line in std::io::BufReader::new(f).lines() {
+            let Ok(line) = line else {
+                break;
             };
-            if v["endpoint"] != "search" {
+            if !line.contains("\"endpoint\":\"search\"") {
                 continue;
             }
-            let who = v["user"].as_str().unwrap_or("tenant").to_owned();
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            // Whose the search was: its user; else its one group; with several groups and no
+            // user it can't be told, so it isn't counted; with neither, the tenant's.
+            let groups: Vec<&str> = v["groups"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|g| g.as_str())
+                .collect();
+            let who = match (v["user"].as_str(), groups.as_slice()) {
+                (Some(u), _) => u.to_owned(),
+                (None, []) => "tenant".to_owned(),
+                (None, [g]) => (*g).to_owned(),
+                (None, _) => continue,
+            };
+            // A deleted owner's searches from before the deletion stay out.
+            let at = v["at"].as_str().unwrap_or("");
+            if deleted.get(&who).is_some_and(|when| at <= when.as_str()) {
+                continue;
+            }
             let r = &v["result"];
             let is_weak =
                 r["memories"]["coverage"] == "weak" && r["knowledge"]["coverage"] == "weak";

@@ -10,8 +10,8 @@
 //! list, so an index written with another one is rebuilt whole. Snapshots of a past wiki
 //! (replays) get an index in memory.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,6 +19,7 @@ use anyhow::Context;
 use tantivy::collector::TopDocs;
 use tantivy::columnar::{Column, StrColumn};
 use tantivy::directory::MmapDirectory;
+use tantivy::indexer::NoMergePolicy;
 use tantivy::query::{
     BooleanQuery, BoostQuery, ConstScoreQuery, Occur, PhraseQuery, Query, TermQuery, TermSetQuery,
 };
@@ -151,7 +152,7 @@ impl PageIndex {
         let shared = Arc::new(Shared::new(Index::create_in_ram(schema), fields)?);
         let pages: Vec<(&PageEntry, Option<&str>)> =
             catalog.pages.iter().map(|p| (&**p, None)).collect();
-        shared.write(&[], &pages, analyzer)?;
+        shared.write(&[], &pages, analyzer, false)?;
         shared.view()
     }
 
@@ -255,7 +256,7 @@ impl PageIndex {
                 indexed = add.len(),
                 "index brought up to date"
             );
-            shared.write(&remove, &add, analyzer)?;
+            shared.write(&remove, &add, analyzer, false)?;
         }
         shared.view()
     }
@@ -287,6 +288,8 @@ impl PageIndex {
         let Shared { index, reader, .. } = shared;
         drop(reader);
         let mut writer: IndexWriter = index.writer_with_num_threads(1, THREAD_BUDGET)?;
+        // Merged here, not by the policy, which could take segments meanwhile.
+        writer.set_merge_policy(Box::new(NoMergePolicy));
         for path in &gone {
             writer.delete_term(Term::from_field_text(fields.path, path));
         }
@@ -316,16 +319,48 @@ impl PageIndex {
 
     /// The index after a write: `remove` paths deleted, `add` pages (with their text as
     /// written) indexed, a page already there replaced. This snapshot's view stays as it was.
+    /// With `purge`, every segment holding a deleted document is merged too, so no removed or
+    /// replaced text stays in the segments the new view reads; the old segments' files go with
+    /// [`PageIndex::collect_garbage`] once no view reads them.
     pub fn update(
         &self,
         remove: &[String],
         add: &[(Arc<PageEntry>, String)],
         analyzer: &Analyzer,
+        purge: bool,
     ) -> anyhow::Result<Self> {
         let add: Vec<(&PageEntry, Option<&str>)> =
             add.iter().map(|(p, t)| (&**p, Some(t.as_str()))).collect();
-        self.shared.write(remove, &add, analyzer)?;
+        self.shared.write(remove, &add, analyzer, purge)?;
         self.shared.clone().view()
+    }
+
+    /// Removes the files of segments no committed segment list or living view needs any more,
+    /// and says how many such files are still there (a view still read by a search keeps its
+    /// segments' files; on Windows a file still mapped can't be deleted).
+    pub fn collect_garbage(&self) -> anyhow::Result<usize> {
+        let index = &self.shared.index;
+        let writer: IndexWriter = index.writer_with_num_threads(1, THREAD_BUDGET)?;
+        writer.garbage_collect_files().wait()?;
+        writer.wait_merging_threads()?;
+        let live: HashSet<String> = index
+            .searchable_segment_ids()?
+            .iter()
+            .map(|id| id.uuid_string())
+            .collect();
+        Ok(index
+            .directory()
+            .list_managed_files()
+            .iter()
+            .filter_map(|f| {
+                f.file_name()?
+                    .to_str()?
+                    .split('.')
+                    .next()
+                    .map(str::to_owned)
+            })
+            .filter(|stem| stem.len() == 32 && !live.contains(stem))
+            .count())
     }
 
     fn text_fields(&self) -> [TextField; 4] {
@@ -507,6 +542,7 @@ impl Shared {
         remove: &[String],
         add: &[(&PageEntry, Option<&str>)],
         analyzer: &Analyzer,
+        purge: bool,
     ) -> anyhow::Result<()> {
         let threads = if add.len() > BATCH {
             crate::par::threads().min(4)
@@ -516,6 +552,10 @@ impl Shared {
         let mut writer: IndexWriter = self
             .index
             .writer_with_num_threads(threads, threads * THREAD_BUDGET)?;
+        if purge {
+            // Merged below, not by the policy, which could take segments meanwhile.
+            writer.set_merge_policy(Box::new(NoMergePolicy));
+        }
         let f = self.fields;
         for path in remove
             .iter()
@@ -535,6 +575,18 @@ impl Shared {
         let payload = serde_json::to_string(&Payload::of(analyzer))?;
         commit.set_payload(&payload);
         commit.commit()?;
+        if purge {
+            let with_deletes: Vec<_> = self
+                .index
+                .searchable_segment_metas()?
+                .iter()
+                .filter(|m| m.has_deletes())
+                .map(|m| m.id())
+                .collect();
+            if !with_deletes.is_empty() {
+                writer.merge(&with_deletes).wait()?;
+            }
+        }
         // Let merges finish, so the segments a write leaves behind don't pile up.
         writer.wait_merging_threads()?;
         Ok(())

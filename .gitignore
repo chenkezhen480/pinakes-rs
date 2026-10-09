@@ -4,3 +4,4 @@
 *.sqlite-wal
 *.sqlite-shm
 /model.conf
+/config.local.toml

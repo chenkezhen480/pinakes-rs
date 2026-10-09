@@ -46,12 +46,24 @@ impl Analyzer {
     /// `terms` are normalized strings; only all-Chinese terms of two or more characters are
     /// used, since the rest are handled by word runs anyway.
     pub fn new(terms: impl IntoIterator<Item = String>) -> Self {
+        Self::from_list(Self::term_list(terms))
+    }
+
+    /// The terms an analyzer made from `terms` keeps whole, sorted, as [`Analyzer::terms`]
+    /// gives them: comparing lists is cheap, building the automaton isn't (half a second for
+    /// the terms of 100,000 pages).
+    pub fn term_list(terms: impl IntoIterator<Item = String>) -> Vec<String> {
         let set: HashSet<String> = terms
             .into_iter()
             .filter(|t| all_cjk(t) && t.chars().count() >= 2)
             .collect();
         let mut list: Vec<String> = set.into_iter().collect();
         list.sort();
+        list
+    }
+
+    /// An analyzer keeping a list from [`Analyzer::term_list`] whole.
+    pub fn from_list(list: Vec<String>) -> Self {
         let terms = (!list.is_empty()).then(|| {
             AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)

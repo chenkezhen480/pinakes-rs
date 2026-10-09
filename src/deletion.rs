@@ -14,6 +14,10 @@ use serde::Serialize;
 use crate::graph::Visibility;
 use crate::tenants::{Tenant, group_dir_name, user_dir_name};
 
+/// Where the store keeps when each deleted user or group folder was deleted (JSON: folder →
+/// time), so lint skips their searches made before then.
+pub const DELETED_OWNERS: &str = "deleted_owners";
+
 /// Whose data is deleted, by their id as the host names them.
 #[derive(Debug, Clone)]
 pub enum Owner {
@@ -59,33 +63,42 @@ pub async fn delete(tenant: &Arc<Tenant>, owner: &Owner, actor: &str) -> anyhow:
     let mut out = Deleted::default();
     let (dir, prefix) = (owner.dir(), owner.prefix());
 
-    let graph_writer = tenant.lock_graph().await?;
-    let mut changed_graph = false;
-    let spaces = graph_changes(tenant, owner, &mut out, &mut changed_graph).await;
-    // Also when a later space failed: the ones done already must leave memory.
-    if changed_graph {
-        tenant.forget_graph().await;
+    {
+        let _graph_writer = tenant.lock_graph().await?;
+        let mut changed_graph = false;
+        let spaces = graph_changes(tenant, owner, &mut out, &mut changed_graph).await;
+        // The in-memory graph follows the stores. After a failure part way it is dropped (the
+        // spaces done already must leave memory) and loaded again by the next request.
+        if changed_graph && (spaces.is_err() || tenant.graph_after_deletion().await.is_err()) {
+            tenant.forget_graph().await;
+        }
+        spaces?;
     }
-    spaces?;
 
     let _wiki_writer = tenant.lock_wiki().await?;
     // The raw records filed for the folder, and any its pages cite that weren't noted (records
     // kept before they were): a record is filed for one audience, so only its pages cite it.
     let wiki = tenant.wiki();
     let pages: Vec<_> = {
-        let (wiki, prefix) = (wiki.clone(), prefix.clone());
+        let (wiki, folder) = (wiki.clone(), vec![dir.clone()]);
+        let (groups, users) = match owner {
+            Owner::User(_) => (Vec::new(), folder),
+            Owner::Group(_) => (folder, Vec::new()),
+        };
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let listed = wiki
-                .stamps()?
-                .into_iter()
-                .filter(|(p, _)| p.as_str().starts_with(&prefix))
-                .collect();
+            let listed = wiki.folder_stamps(&groups, &users)?;
             Ok(wiki.read_stamped(listed)?)
         })
         .await
         .context("listing the pages to delete panicked")??
     };
     let mut records: BTreeSet<String> = tenant.store.records_of(&dir).await?.into_iter().collect();
+    // Every version of the folder's documents, also those no page cites any more.
+    for (source, doc) in tenant.store.documents_by_source().await? {
+        if doc.audience == dir {
+            records.insert(source);
+        }
+    }
     for (page, _) in &pages {
         for cited in &page.front.sources {
             let name = cited.split_once('#').map_or(cited.as_str(), |(n, _)| n);
@@ -115,11 +128,23 @@ pub async fn delete(tenant: &Arc<Tenant>, owner: &Owner, actor: &str) -> anyhow:
     .context("removing the folder panicked")??;
 
     tenant.store.delete_audience(&dir).await?;
+    // Lint must not bring the owner's search terms back from the traces kept until they
+    // expire: it skips the owner's searches made before now.
+    let mut deleted: std::collections::BTreeMap<String, String> = tenant
+        .store
+        .meta(DELETED_OWNERS)
+        .await?
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    deleted.insert(dir.clone(), crate::trace::now_rfc3339());
+    tenant
+        .store
+        .set_meta(DELETED_OWNERS, &serde_json::to_string(&deleted)?)
+        .await?;
     tenant.purge_from_search(&prefix).await?;
     if let Owner::User(_) = owner {
         tenant.reads.forget_user(&dir);
     }
-    drop(graph_writer);
 
     let what = match owner {
         Owner::User(_) => "user.delete",

@@ -120,13 +120,19 @@ impl Jobs {
     /// Queues work on a tenant's queue and returns the job as queued. Must be called inside a
     /// tokio runtime (the queue's task starts on first use).
     pub fn submit(&self, tenant: &str, owner: Option<&str>, kind: &str, work: Work) -> JobInfo {
-        self.enqueue(tenant, owner, kind, work, None)
+        self.enqueue(tenant, owner, kind, work, None, false)
+    }
+
+    /// Like `submit`, unless a job of this kind for this tenant is queued or running: then
+    /// that job is the answer and `work` is dropped.
+    pub fn submit_once(&self, tenant: &str, kind: &str, work: Work) -> JobInfo {
+        self.enqueue(tenant, None, kind, work, None, true)
     }
 
     /// Queues work and waits until it has run, for callers that answer with the result.
     pub async fn run(&self, tenant: &str, owner: Option<&str>, kind: &str, work: Work) -> JobInfo {
         let (tx, rx) = oneshot::channel();
-        let queued = self.enqueue(tenant, owner, kind, work, Some(tx));
+        let queued = self.enqueue(tenant, owner, kind, work, Some(tx), false);
         rx.await.unwrap_or(JobInfo {
             status: JobState::Failed,
             error: Some("the job was dropped".into()),
@@ -141,7 +147,19 @@ impl Jobs {
         kind: &str,
         work: Work,
         done: Option<oneshot::Sender<JobInfo>>,
+        once: bool,
     ) -> JobInfo {
+        let mut inner = self.lock();
+        self.prune(&mut inner);
+        if once
+            && let Some(e) = inner.jobs.values().find(|e| {
+                e.tenant == tenant
+                    && e.info.kind == kind
+                    && matches!(e.info.status, JobState::Queued | JobState::Running)
+            })
+        {
+            return e.info.clone();
+        }
         let id = format!("j_{}", hex::encode(rand::random::<[u8; 8]>()));
         let info = JobInfo {
             job: id.clone(),
@@ -153,8 +171,6 @@ impl Jobs {
             error: None,
             document: None,
         };
-        let mut inner = self.lock();
-        self.prune(&mut inner);
         inner.jobs.insert(
             id.clone(),
             Entry {

@@ -8,6 +8,7 @@
 
 pub mod def;
 pub mod describe;
+pub mod migrate;
 pub mod neo4j;
 pub mod sqlite;
 pub mod store;
@@ -47,6 +48,14 @@ impl GraphBackend {
             crate::config::GraphBackendKind::Neo4j => {
                 GraphBackend::Neo4j(Arc::new(neo4j::Neo4jClient::new(cfg.neo4j.clone())))
             }
+        }
+    }
+
+    /// The backend's name, as config and the tenant's record of it say it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            GraphBackend::Sqlite => "sqlite",
+            GraphBackend::Neo4j(_) => "neo4j",
         }
     }
 
@@ -411,9 +420,15 @@ impl GraphSnapshot {
             .map_err(|e| anyhow::anyhow!("building the graph snapshot panicked: {e}"))
     }
 
-    /// The same data with other schemas and spaces, after one of them changed.
+    /// The same data with other schemas and spaces, after one of them changed; the nodes and
+    /// edges of a space no longer listed (deleted with its owner) are left out.
     pub fn with_meta(&self, schemas: Vec<SchemaDef>, spaces: Vec<SpaceDef>) -> Self {
-        Self::build(schemas, spaces, self.data())
+        let mut data = self.data();
+        let kept: std::collections::HashSet<&str> =
+            spaces.iter().map(|s| s.space.as_str()).collect();
+        data.nodes.retain(|n| kept.contains(n.space.as_str()));
+        data.edges.retain(|e| kept.contains(e.space.as_str()));
+        Self::build(schemas, spaces, data)
     }
 
     /// The same schemas and spaces with nodes and edges added; a node with the type and key of

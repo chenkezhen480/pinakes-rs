@@ -401,6 +401,12 @@ async fn insert(
             Some((original, u.bytes.clone()))
         }
     };
+    // Noted by audience first, so deleting a user or group finds its records: a note without
+    // its file is harmless, a file without its note would be left behind.
+    tenant
+        .store
+        .add_record(&source, target.audience.key())
+        .await?;
     let (dir, name, rec) = (tenant.dir.clone(), source.clone(), record.clone());
     tokio::task::spawn_blocking(move || {
         if let Some((original, bytes)) = original {
@@ -411,11 +417,6 @@ async fn insert(
     .await
     .map_err(anyhow::Error::from)?
     .map_err(anyhow::Error::from)?;
-    // Noted by audience, so deleting a user or group finds its records.
-    tenant
-        .store
-        .add_record(&source, target.audience.key())
-        .await?;
 
     let job = Ingest {
         target,
