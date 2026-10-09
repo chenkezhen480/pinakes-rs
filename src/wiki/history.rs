@@ -81,6 +81,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
+/// Removes a file; one already gone is fine.
+fn remove_if_there(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 impl History {
     /// The history of the tenant whose folder is `tenant_dir`.
     pub fn new(tenant_dir: &Path) -> Self {
@@ -241,6 +249,60 @@ impl History {
             pages.push(Page::parse(PagePath::parse(&path)?, &text)?);
         }
         Ok(Some(pages))
+    }
+
+    /// Takes the pages under `prefix` (a deleted user's or group's folder) out of every stored
+    /// version, then removes every object no version refers to any more, so their text is gone
+    /// from the history. A version keeps its name and when it was last used. Callers make sure
+    /// no save runs meanwhile.
+    pub fn purge(&self, prefix: &str) -> io::Result<()> {
+        let versions = match std::fs::read_dir(self.root.join("versions")) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let mut referenced: HashSet<String> = HashSet::new();
+        for entry in versions.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let json = match std::fs::read(&path) {
+                Ok(j) => j,
+                // Removed meanwhile by the trace retention's cleanup.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            let Ok(mut m) = serde_json::from_slice::<Manifest>(&json) else {
+                // A malformed manifest can't be cleaned, nor replayed: it goes.
+                remove_if_there(&path)?;
+                continue;
+            };
+            let before = (m.pages.len(), m.removed.len());
+            m.pages.retain(|p, _| !p.starts_with(prefix));
+            m.removed.retain(|p| !p.starts_with(prefix));
+            if (m.pages.len(), m.removed.len()) != before {
+                let used = match std::fs::metadata(&path) {
+                    Ok(meta) => meta.modified()?,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                write_atomic(&path, &serde_json::to_vec(&m).map_err(io::Error::other)?)?;
+                File::options()
+                    .write(true)
+                    .open(&path)?
+                    .set_modified(used)?;
+            }
+            referenced.extend(m.pages.into_values());
+        }
+        if let Ok(objects) = std::fs::read_dir(self.root.join("objects")) {
+            for entry in objects.flatten() {
+                if !referenced.contains(entry.file_name().to_str().unwrap_or("")) {
+                    remove_if_there(&entry.path())?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Removes versions that are not in `keep` and weren't used since `cutoff`, unless a kept

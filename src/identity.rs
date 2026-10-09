@@ -78,6 +78,13 @@ impl Scope {
         }
     }
 
+    /// Who did it, for the audit log: the user folder, never the raw id.
+    pub fn actor(&self) -> String {
+        self.user
+            .as_ref()
+            .map_or_else(|| "api_key".to_owned(), |u| u.dir.clone())
+    }
+
     /// A trace record for this caller: tenant, user and group folders, never raw ids.
     pub fn trace_record(&self, endpoint: crate::trace::Endpoint) -> crate::trace::TraceRecord {
         let mut r = crate::trace::TraceRecord::new(endpoint, &self.tenant.dir_name);
@@ -104,6 +111,18 @@ impl Scope {
         out.extend(self.groups.iter().map(|g| g.dir.clone()));
         out.extend(self.user.iter().map(|u| u.dir.clone()));
         out
+    }
+
+    /// Whether this caller may see what is for an audience, named as the index names it
+    /// (`tenant`, a group folder or a user folder).
+    pub fn sees_audience(&self, key: &str) -> bool {
+        if key.starts_with("g_") {
+            self.groups.iter().any(|x| x.dir == key)
+        } else if key.starts_with("u_") {
+            self.user.as_ref().is_some_and(|x| x.dir == key)
+        } else {
+            true
+        }
     }
 
     /// Whether this caller may see a page: tenant-level pages always, group pages when the caller

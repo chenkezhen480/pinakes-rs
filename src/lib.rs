@@ -4,6 +4,7 @@
 pub mod api;
 pub mod config;
 pub mod convert;
+pub mod deletion;
 pub mod dev;
 pub mod embed;
 pub mod error;
@@ -247,6 +248,7 @@ impl AppState {
             client.connect().await?;
             tracing::info!(uri = %self.config.neo4j.uri, "Neo4j reachable");
         }
+        self.tenants.remove_leftovers().await;
         let id = &self.config.identity;
         if id.deployment != config::Deployment::Personal {
             return Ok(None);

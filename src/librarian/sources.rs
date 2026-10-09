@@ -43,7 +43,8 @@ fn write_new(tenant_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
         ));
     }
     let dir = tenant_dir.join("sources");
-    std::fs::create_dir_all(&dir)?;
+    // Not `create_dir_all`: a tenant deleted meanwhile must not get its folder back.
+    crate::trace::create_dir(&dir)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -80,6 +81,27 @@ pub fn read(tenant_dir: &Path, name: &str) -> io::Result<Option<String>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Deletes a record and the uploaded file kept next to it (`file.original`), for user and group
+/// deletion; answers how many files went.
+pub fn remove(tenant_dir: &Path, name: &str) -> io::Result<usize> {
+    let original = read(tenant_dir, name)?
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|r| r["file"]["original"].as_str().map(str::to_owned))
+        .filter(|o| safe_name(o));
+    let mut removed = 0;
+    for file in std::iter::once(name).chain(original.as_deref()) {
+        if !safe_name(file) {
+            continue;
+        }
+        match std::fs::remove_file(tenant_dir.join("sources").join(file)) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

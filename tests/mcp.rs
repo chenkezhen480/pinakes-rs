@@ -165,6 +165,7 @@ fn librarian() -> Arc<FakeLlm> {
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => common::llm::OK.into(),
         Step::Match => common::llm::NOT_THE_SAME.into(),
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => common::llm::skip_to_end(msg),
     })
 }

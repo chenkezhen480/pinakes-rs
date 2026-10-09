@@ -107,6 +107,18 @@ impl SpaceEntry {
         }
     }
 
+    /// Whether the user with this folder may see the space as its owner or a listed user
+    /// (shared spaces always; a group's membership isn't known from a folder alone).
+    pub fn visible_to_user(&self, user_dir: &str) -> bool {
+        let named = self.owner_dir.as_deref() == Some(user_dir)
+            || self.user_dirs.iter().any(|d| d == user_dir);
+        match self.def.visibility {
+            Visibility::Shared => true,
+            Visibility::Private => self.owner_dir.as_deref() == Some(user_dir),
+            Visibility::Restricted => named,
+        }
+    }
+
     /// Whether a caller may see this space: everyone for a shared space; its owner for a
     /// private one; its owner (the user who created it) and the listed users and groups for a
     /// restricted one.

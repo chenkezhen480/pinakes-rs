@@ -96,6 +96,13 @@ impl ReadTracker {
         inner
     }
 
+    /// Drops every session of a user (the user is being deleted).
+    pub fn forget_user(&self, user: &str) {
+        self.lock()
+            .sessions
+            .retain(|k, _| k.user.as_deref() != Some(user));
+    }
+
     /// What a session has read so far; empty for an unknown or expired session.
     pub fn state(&self, user: Option<&str>, session: &str) -> ReadState {
         let mut inner = self.lock();

@@ -364,15 +364,10 @@ async fn insert(
     let mut given = None;
     if let Some((_, _, Some(id))) = &parsed.document {
         let doc = tenant.store.document(id).await?.ok_or(ApiError::NotFound)?;
-        let audience = PageAudience::from_key(&doc.audience);
-        let visible = match &audience {
-            PageAudience::Tenant => true,
-            PageAudience::Group(g) => scope.groups().iter().any(|x| &x.dir == g),
-            PageAudience::User(u) => scope.user().is_some_and(|x| &x.dir == u),
-        };
-        if !visible {
+        if !scope.sees_audience(&doc.audience) {
             return Err(ApiError::NotFound);
         }
+        let audience = PageAudience::from_key(&doc.audience);
         if asked.is_some() && target.audience != audience {
             return Err(ApiError::BadRequest(format!(
                 "document {id} was filed for another audience; leave out {}",
@@ -416,6 +411,11 @@ async fn insert(
     .await
     .map_err(anyhow::Error::from)?
     .map_err(anyhow::Error::from)?;
+    // Noted by audience, so deleting a user or group finds its records.
+    tenant
+        .store
+        .add_record(&source, target.audience.key())
+        .await?;
 
     let job = Ingest {
         target,

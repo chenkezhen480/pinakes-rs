@@ -21,6 +21,8 @@ pub enum Step {
     Match,
     /// Reading a document from the cursor to the end of one concept.
     Read,
+    /// Linting the wiki.
+    Lint,
 }
 
 type Reply = dyn Fn(Step, &str, usize) -> String + Send + Sync;
@@ -73,6 +75,7 @@ impl LlmClient for FakeLlm {
             s if s == prompts::VERIFY_DESCRIBE => Step::VerifyDescribe,
             s if s == prompts::MATCH => Step::Match,
             s if s == prompts::READ => Step::Read,
+            s if s == prompts::LINT => Step::Lint,
             _ => anyhow::bail!("unknown prompt"),
         };
         let n = {
@@ -363,6 +366,7 @@ pub fn describer() -> Arc<FakeLlm> {
         Step::Describe => describe_from_definition(msg),
         Step::VerifyDescribe => OK.into(),
         Step::Match => NOT_THE_SAME.into(),
+        Step::Lint => NO_FINDINGS.into(),
         Step::Read => skip_to_end(msg),
     })
 }
@@ -510,6 +514,9 @@ pub fn focus_title(msg: &str) -> Option<String> {
 }
 
 /// A match answer: none of the candidates.
+/// A lint reply that finds nothing.
+pub const NO_FINDINGS: &str = r#"{"findings": []}"#;
+
 pub const NOT_THE_SAME: &str = r#"{"document": null, "reason": "a different document"}"#;
 
 /// A match answer naming one candidate.

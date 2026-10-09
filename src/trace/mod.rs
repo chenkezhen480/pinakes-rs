@@ -224,7 +224,8 @@ fn append(root: &Path, record: &TraceRecord, date: &str) -> std::io::Result<()> 
         return Ok(());
     }
     let file = trace_file(root, &record.tenant, date);
-    std::fs::create_dir_all(file.parent().expect("has a parent"))?;
+    // Not `create_dir_all`: a tenant deleted meanwhile must not get its folder back.
+    create_dir(file.parent().expect("has a parent"))?;
     let mut line = serde_json::to_vec(record).map_err(std::io::Error::other)?;
     line.push(b'\n');
     OpenOptions::new()
@@ -232,6 +233,14 @@ fn append(root: &Path, record: &TraceRecord, date: &str) -> std::io::Result<()> 
         .append(true)
         .open(file)?
         .write_all(&line)
+}
+
+/// Creates a folder whose parent exists; one that is there already is fine.
+pub(crate) fn create_dir(dir: &Path) -> std::io::Result<()> {
+    match std::fs::create_dir(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Removes trace and version-list files dated more than `days` days before `today`
@@ -313,7 +322,7 @@ pub fn now_rfc3339() -> String {
 }
 
 /// Days since 1970-01-01 of a `YYYY-MM-DD` date.
-fn parse_date(s: &str) -> Option<i64> {
+pub(crate) fn parse_date(s: &str) -> Option<i64> {
     let mut it = s.splitn(3, '-');
     let y: i64 = it.next()?.parse().ok()?;
     let m: u32 = it.next()?.parse().ok()?;

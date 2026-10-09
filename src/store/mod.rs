@@ -96,6 +96,51 @@ pub trait Store: Send + Sync {
         content_hash: &str,
     ) -> anyhow::Result<Option<ReadingState>>;
 
+    /// Notes who a raw record in `sources/` is for (`tenant`, or a group or user folder).
+    async fn add_record(&self, name: &str, audience: &str) -> anyhow::Result<()>;
+
+    /// Every raw record noted, with its audience.
+    async fn records(&self) -> anyhow::Result<Vec<(String, String)>>;
+
+    /// The raw records noted for an audience.
+    async fn records_of(&self, audience: &str) -> anyhow::Result<Vec<String>>;
+
+    /// Removes everything stored for a group or user folder, in one transaction: its held and
+    /// approved proposals, its records' entries, its documents with their versions and
+    /// readings, its pages' vectors and its lint findings and review notes. Deleted rows are overwritten, also in the WAL.
+    async fn delete_audience(&self, audience: &str) -> anyhow::Result<()>;
+
+    /// Replaces a registered space's definition (its owner and members).
+    async fn put_graph_space(&self, def: &SpaceDef) -> anyhow::Result<()>;
+
+    /// Removes a space from the registry.
+    async fn remove_graph_space(&self, name: &str) -> anyhow::Result<()>;
+
+    /// The last lint run and its findings, if lint has run.
+    async fn lint_run(
+        &self,
+    ) -> anyhow::Result<
+        Option<(
+            crate::librarian::lint::LintRun,
+            Vec<crate::librarian::lint::Stored>,
+        )>,
+    >;
+
+    /// Each page as the last lint review of it saw it: page, hash.
+    async fn lint_reviewed(&self) -> anyhow::Result<Vec<(String, String)>>;
+
+    /// Stores a lint run in one transaction: its findings replace the last run's, and the
+    /// pages it reviewed are noted with their hashes.
+    async fn put_lint_run(
+        &self,
+        run: &crate::librarian::lint::LintRun,
+        findings: &[crate::librarian::lint::Stored],
+        reviewed: &[(String, String)],
+    ) -> anyhow::Result<()>;
+
+    /// Closes the store for good (the tenant is being deleted); every later call fails.
+    fn close(&self);
+
     /// Every stored vector of one embedding model.
     async fn embeddings(&self, model: &str) -> anyhow::Result<Vec<StoredVector>>;
 

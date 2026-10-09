@@ -79,7 +79,7 @@ pub async fn schema(
             DescribeError::Rejected(_) => ApiError::Unprocessable(e.to_string()),
         })?;
 
-    let _writer = tenant.graph_writer.lock().await;
+    let _writer = tenant.lock_graph().await?;
     let graph = tenant.graph().await?;
     if graph.schemas.get(&def.schema) != before_described.as_ref() {
         return Err(ApiError::Conflict(format!(
@@ -91,7 +91,7 @@ pub async fn schema(
 
     // The page and the definition are stored together: if the definition can't be stored,
     // the page goes back to what it was.
-    let _wiki_writer = tenant.wiki_writer.lock().await;
+    let _wiki_writer = tenant.lock_wiki().await?;
     let before = {
         let (wiki, path, page) = (wiki.clone(), path.clone(), page.clone());
         tokio::task::spawn_blocking(move || -> Result<Option<String>, WikiError> {
@@ -112,7 +112,7 @@ pub async fn schema(
     tenant
         .store
         .audit(
-            &actor(&scope),
+            &scope.actor(),
             if created {
                 "graph.schema.create"
             } else {
@@ -181,7 +181,7 @@ pub async fn space(
     let owner = scope.user().map(|u| u.id.as_str());
     let def = req.into_def(owner).map_err(ApiError::BadRequest)?;
     let tenant = scope.tenant();
-    let _writer = tenant.graph_writer.lock().await;
+    let _writer = tenant.lock_graph().await?;
     let graph = tenant.graph().await?;
     if !graph.schemas.contains_key(&def.schema) {
         return Err(ApiError::BadRequest(format!(
@@ -211,7 +211,7 @@ pub async fn space(
     tenant.set_graph(next);
     tenant
         .store
-        .audit(&actor(&scope), "graph.space.create", &def.space)
+        .audit(&scope.actor(), "graph.space.create", &def.space)
         .await?;
     tracing::info!(space = %def.space, schema = %def.schema, "graph space created");
     Ok((
@@ -250,7 +250,7 @@ pub async fn data(
         )));
     }
     let tenant = scope.tenant();
-    let _writer = tenant.graph_writer.lock().await;
+    let _writer = tenant.lock_graph().await?;
     let graph = tenant.graph().await?;
     let Some(space) = graph.space(&req.space).filter(|s| s.visible_to(&scope)) else {
         return Err(ApiError::NotFound);
@@ -295,11 +295,4 @@ pub async fn data(
         nodes_written: n_nodes,
         edges_written: n_edges,
     }))
-}
-
-/// Who did it, for the audit log: the user folder, never the raw id.
-fn actor(scope: &Scope) -> String {
-    scope
-        .user()
-        .map_or_else(|| "api_key".to_owned(), |u| u.dir.clone())
 }

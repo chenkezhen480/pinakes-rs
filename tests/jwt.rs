@@ -179,3 +179,23 @@ async fn ed25519_keys_work_and_wrong_keys_are_config_errors() {
     }
     assert!(pinakes::config::Config::from_toml_str("[identity]\nmode = \"jwt\"\n").is_err());
 }
+
+/// A token deletes its own user's data only; another user's is not found, and stays.
+#[tokio::test]
+async fn a_token_deletes_only_its_own_user() {
+    let (app, _) = shopline("").await;
+    let wang = format!("users/{}/preferences", user_dir_name("wang"));
+    let as_wang = token("shopline", Some("wang"), &[]);
+
+    let lily = token("shopline", Some("lily"), &[]);
+    let (status, _) = app.delete(Caller::new(&lily), "/users/wang").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, body) = read(&app, &as_wang, &wang).await;
+    assert!(body["pages"][0]["text"].is_string(), "{body}");
+
+    let (status, body) = app.delete(Caller::new(&as_wang), "/users/wang").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["pages_deleted"].as_u64().unwrap() >= 1, "{body}");
+    let (_, body) = read(&app, &as_wang, &wang).await;
+    assert_eq!(body["pages"][0]["error"], "not_found", "{body}");
+}

@@ -10,7 +10,7 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::identity::{Admin, Scope};
 use crate::jobs::{JobInfo, JobState};
-use crate::librarian::{self, PageAudience, Proposal, ProposalStatus};
+use crate::librarian::{self, Proposal, ProposalStatus};
 
 #[tracing::instrument(name = "get_job", skip_all)]
 pub async fn get(
@@ -51,13 +51,12 @@ pub struct ProposalList {
 #[tracing::instrument(name = "list_proposals", skip_all)]
 pub async fn list(scope: Scope) -> Result<Json<ProposalList>, ApiError> {
     let held = scope.tenant().store.held_proposals().await?;
-    let visible = |p: &Proposal| match PageAudience::from_key(&p.audience) {
-        PageAudience::Tenant => true,
-        PageAudience::Group(g) => scope.groups().iter().any(|x| x.dir == g),
-        PageAudience::User(u) => scope.user().is_some_and(|x| x.dir == u),
-    };
     Ok(Json(ProposalList {
-        proposals: held.iter().filter(|p| visible(p)).map(view).collect(),
+        proposals: held
+            .iter()
+            .filter(|p| scope.sees_audience(&p.audience))
+            .map(view)
+            .collect(),
     }))
 }
 

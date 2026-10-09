@@ -53,6 +53,7 @@ fn page_of(title: &str) -> &'static str {
 /// candidate a match is.
 fn librarian(answer: impl Fn(&str) -> String + Send + Sync + 'static) -> Arc<FakeLlm> {
     FakeLlm::new(move |step, msg, _| match step {
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => {
             let (lines, _) = shown(msg);
             if !lines.iter().any(|(_, l)| l.starts_with("## ")) && cursor_of(msg) == 1 {
@@ -412,6 +413,7 @@ async fn documents_are_read_one_concept_at_a_time() {
     let llm = FakeLlm::new(|step, msg, n| match step {
         // The very first answer ends outside the text shown.
         Step::Read if n == 0 => read_reply("skip", 9_999, None, None, None),
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => reader(
             msg,
             |l| l.starts_with('【'),
@@ -506,6 +508,7 @@ async fn a_stopped_reading_resumes_where_it_stopped() {
     let down = Arc::new(AtomicBool::new(true));
     let flag = down.clone();
     let llm = FakeLlm::new(move |step, msg, _| match step {
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
         Step::Plan => rule_plan(msg, |titles| {
             titles.iter().any(|t| t == "丙") && flag.swap(false, Ordering::SeqCst)
@@ -567,6 +570,7 @@ async fn a_stopped_reading_resumes_where_it_stopped() {
 #[tokio::test]
 async fn edits_linking_to_a_held_page_are_held_with_it() {
     let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
         Step::Plan => {
             let b = create(
@@ -632,6 +636,7 @@ async fn edits_linking_to_a_held_page_are_held_with_it() {
 #[tokio::test]
 async fn items_are_retried_on_their_own() {
     let llm = FakeLlm::new(|step, msg, n| match step {
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, Some("规定两条。")),
         Step::Plan => rule_plan(msg, |_| false),
         Step::Verify => {
@@ -678,6 +683,7 @@ async fn items_are_retried_on_their_own() {
 #[tokio::test]
 async fn a_concept_goes_to_the_page_its_read_named() {
     let llm = FakeLlm::new(|step, msg, n| match step {
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
         Step::Plan if n == 0 => {
             let edit = create(

@@ -6,12 +6,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::embed::Embedder;
 use crate::graph::{GraphBackend, GraphSnapshot, GraphStore};
@@ -122,19 +122,27 @@ pub struct Tenant {
     /// When loading the graph last failed, if it did since the last success.
     graph_failed_at: std::sync::Mutex<Option<Instant>>,
     /// Held by every graph write (schemas, spaces, data), so they apply one at a time.
-    pub graph_writer: Mutex<()>,
+    graph_writer: Mutex<()>,
     /// Held while wiki pages are written and the tenant re-indexed (librarian jobs, schema
     /// descriptions), so writes never interleave. LLM calls happen outside it.
-    pub wiki_writer: Mutex<()>,
+    wiki_writer: Mutex<()>,
     /// When a request last used the search snapshot or the graph.
     last_used: std::sync::Mutex<Instant>,
+    /// Set when the tenant is deleted: whoever takes a writer lock afterwards is refused, so
+    /// nothing writes into its folder (or brings it back) once its deletion has begun.
+    deleted: AtomicBool,
 }
+
+/// What a write into a deleted tenant fails with.
+pub const TENANT_DELETED: &str = "the tenant has been deleted";
 
 /// The history saves of one tenant: one at a time, and how many are queued or running.
 #[derive(Default)]
 struct HistorySaves {
     lock: std::sync::Mutex<()>,
     pending: AtomicUsize,
+    /// Set under `lock` when the tenant is deleted: saves still queued do nothing.
+    stopped: AtomicBool,
 }
 
 /// Counts a save as finished when dropped, also when the save panics.
@@ -159,6 +167,30 @@ impl std::fmt::Debug for Tenant {
 }
 
 impl Tenant {
+    /// Whether the tenant has been deleted (its folder may already be gone).
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::SeqCst)
+    }
+
+    fn check_live(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.is_deleted(), TENANT_DELETED);
+        Ok(())
+    }
+
+    /// The wiki writer lock (see `wiki_writer`); refused once the tenant is deleted.
+    pub async fn lock_wiki(&self) -> anyhow::Result<MutexGuard<'_, ()>> {
+        let guard = self.wiki_writer.lock().await;
+        self.check_live()?;
+        Ok(guard)
+    }
+
+    /// The graph writer lock (see `graph_writer`); refused once the tenant is deleted.
+    pub async fn lock_graph(&self) -> anyhow::Result<MutexGuard<'_, ()>> {
+        let guard = self.graph_writer.lock().await;
+        self.check_live()?;
+        Ok(guard)
+    }
+
     pub fn wiki(&self) -> WikiFs {
         WikiFs::new(self.dir.join("wiki"))
     }
@@ -223,6 +255,7 @@ impl Tenant {
         if let Some(s) = self.current_snapshot() {
             return Ok(s);
         }
+        self.check_live()?;
         let snapshot = Arc::new(self.open_snapshot().await?);
         *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
         Ok(snapshot)
@@ -234,6 +267,7 @@ impl Tenant {
     #[tracing::instrument(name = "reindex", skip_all, fields(tenant = %self.dir_name))]
     pub async fn reindex(&self) -> anyhow::Result<()> {
         let _building = self.building.lock().await;
+        self.check_live()?;
         let next = match self.current_snapshot() {
             Some(current) => match self.update_snapshot(current).await? {
                 Some(next) => next,
@@ -249,6 +283,7 @@ impl Tenant {
     /// its pages get their vectors. A tenant not open gets them when it opens.
     pub async fn add_missing_vectors(&self) -> anyhow::Result<()> {
         let _building = self.building.lock().await;
+        self.check_live()?;
         let lacking = self.current_snapshot().is_some_and(|s| s.vectors.is_none());
         if lacking {
             let next = self.open_snapshot().await?;
@@ -484,6 +519,9 @@ impl Tenant {
         std::thread::spawn(move || {
             let _one_at_a_time = saves.lock.lock().unwrap_or_else(|e| e.into_inner());
             let _done = Done(&saves.pending);
+            if saves.stopped.load(Ordering::SeqCst) {
+                return;
+            }
             let text = |path: &str| {
                 if let Some(t) = texts.get(path) {
                     return Some(t.clone());
@@ -567,6 +605,97 @@ impl Tenant {
     /// Swaps in a new graph after a write. Callers hold `graph_writer`.
     pub fn set_graph(&self, graph: GraphSnapshot) {
         *self.graph.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(graph));
+    }
+
+    /// Drops the in-memory graph after its stores changed under it (a deletion); the next
+    /// request loads it again. A load already under way finishes first, so it can't put back
+    /// what it read before the change. Callers hold `graph_writer`.
+    pub async fn forget_graph(&self) {
+        let _loading = self.graph_loading.lock().await;
+        *self.graph.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// After the pages under `prefix` (a deleted user's or group's folder) were removed from
+    /// the wiki: takes them out of the search index on disk for good and out of every kept wiki
+    /// version, then builds the snapshot again if one was open. Callers hold `wiki_writer`.
+    pub async fn purge_from_search(&self, prefix: &str) -> anyhow::Result<()> {
+        let _building = self.building.lock().await;
+        self.check_live()?;
+        // No snapshot may hold the index's old segments while they are merged away.
+        let was_open = self
+            .search
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .is_some();
+        // Saves are only queued by snapshot builds, which wait for `building`: once these are
+        // done, none runs while the history is cleaned.
+        while self.history_saves.pending.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (index, dir, saves, prefix_owned) = (
+            self.index_dir(),
+            self.dir.clone(),
+            self.history_saves.clone(),
+            prefix.to_owned(),
+        );
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            if let Some(index) = index {
+                crate::search::index::PageIndex::purge(&index, &prefix_owned)?;
+            }
+            let _no_saves = saves.lock.lock().unwrap_or_else(|e| e.into_inner());
+            History::new(&dir).purge(&prefix_owned)?;
+            Ok(())
+        })
+        .await
+        .context("purging the search index panicked")??;
+        if was_open {
+            let snapshot = Arc::new(self.open_snapshot().await?);
+            *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
+        }
+        Ok(())
+    }
+
+    /// Stops the tenant for its deletion: marks it deleted, waits for whatever is writing to
+    /// finish, refuses its keys, removes its graph data from the graph store, and lets go of
+    /// every file it holds open. If the graph data can't be removed, the tenant carries on as
+    /// it was and the error is returned.
+    async fn shut_down(&self) -> anyhow::Result<()> {
+        if self.history_saves.stopped.load(Ordering::SeqCst) {
+            return Ok(()); // An earlier attempt got this far.
+        }
+        self.deleted.store(true, Ordering::SeqCst);
+        let locks = (
+            self.graph_writer.lock().await,
+            self.wiki_writer.lock().await,
+            self.building.lock().await,
+            self.graph_loading.lock().await,
+        );
+        if let Err(e) = self.graph_store.delete_all().await {
+            self.deleted.store(false, Ordering::SeqCst);
+            return Err(e.context("removing the tenant's graph data"));
+        }
+        self.key_hashes.write().await.clear();
+        while self.history_saves.pending.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        {
+            let _no_saves = self
+                .history_saves
+                .lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.history_saves.stopped.store(true, Ordering::SeqCst);
+        }
+        self.search
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        self.graph.write().unwrap_or_else(|e| e.into_inner()).take();
+        self.store.close();
+        self.graph_store.close();
+        drop(locks);
+        Ok(())
     }
 
     async fn has_key_hash(&self, hash: &str) -> bool {
@@ -739,6 +868,63 @@ impl Tenants {
         Ok(CreatedTenant { tenant, api_key })
     }
 
+    /// Deletes a tenant and all its data: its graph data in the graph store, then its folder
+    /// (wiki, sources, SQLite, index, history, traces). Answers whether there was such a tenant.
+    /// The folder is renamed away first, so nothing can open the tenant again meanwhile; if it
+    /// can't be renamed (a file still open), the tenant stays shut and the call can be repeated.
+    #[tracing::instrument(skip_all)]
+    pub async fn delete(&self, tenant_id: &str) -> anyhow::Result<bool> {
+        if validate_id("tenant", tenant_id).is_err() {
+            return Ok(false);
+        }
+        let dir_name = tenant_dir_name(tenant_id);
+        let _creating = self.creating.lock().await;
+        // A tenant already shut by an earlier attempt is still in the map; don't load another.
+        let open = self.open.read().await.get(&dir_name).cloned();
+        let tenant = match open {
+            Some(t) => t,
+            None => match self.open_by_dir(&dir_name).await? {
+                Some(t) => t,
+                None => return Ok(false),
+            },
+        };
+        if tenant.id != tenant_id {
+            return Ok(false);
+        }
+        tenant.shut_down().await?;
+        let gone = self.root.join(format!(
+            ".deleted-{dir_name}-{}",
+            hex::encode(rand::random::<[u8; 4]>())
+        ));
+        tokio::fs::rename(&tenant.dir, &gone)
+            .await
+            .with_context(|| format!("moving {} away to delete it", tenant.dir.display()))?;
+        self.open.write().await.remove(&dir_name);
+        if let Err(e) = remove_leftover(gone.clone()).await {
+            // Gone from the service already; the next start removes what is left.
+            tracing::warn!(error = %format!("{e:#}"), folder = %gone.display(), "a deleted tenant's folder is not fully removed yet");
+        }
+        tracing::info!(tenant = %dir_name, "tenant deleted");
+        Ok(true)
+    }
+
+    /// Removes what deletions and failed creations left behind (`.deleted-…` and `.tmp-…`
+    /// folders), at startup.
+    pub async fn remove_leftovers(&self) {
+        let Ok(mut entries) = tokio::fs::read_dir(&self.root).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if (name.starts_with(".deleted-") || name.starts_with(".tmp-"))
+                && let Err(e) = remove_leftover(entry.path()).await
+            {
+                tracing::warn!(error = %format!("{e:#}"), folder = %name, "could not remove a leftover folder");
+            }
+        }
+    }
+
     /// Looks up the tenant an API key belongs to. Unknown folders, malformed keys and wrong
     /// secrets all give `None`, so a caller can't tell them apart.
     #[tracing::instrument(skip_all)]
@@ -784,7 +970,8 @@ impl Tenants {
     /// Returns an open tenant, loading it from disk on first use.
     async fn open_by_dir(&self, dir_name: &str) -> anyhow::Result<Option<Arc<Tenant>>> {
         if let Some(t) = self.open.read().await.get(dir_name) {
-            return Ok(Some(t.clone()));
+            // One being deleted is no longer there for callers.
+            return Ok((!t.is_deleted()).then(|| t.clone()));
         }
         let file = self.root.join(dir_name).join(&self.store_file);
         let exists = tokio::fs::metadata(&file).await.is_ok_and(|m| m.is_file());
@@ -841,7 +1028,27 @@ impl Tenants {
             graph_writer: Mutex::new(()),
             wiki_writer: Mutex::new(()),
             last_used: std::sync::Mutex::new(Instant::now()),
+            deleted: AtomicBool::new(false),
         })
+    }
+}
+
+/// Removes a folder, trying again up to three times (a file a reader still had open may keep
+/// it for a moment on Windows).
+async fn remove_leftover(dir: PathBuf) -> anyhow::Result<()> {
+    let mut tries = 0;
+    loop {
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if tries == 3 => {
+                return Err(anyhow::Error::from(e).context(format!("removing {}", dir.display())));
+            }
+            Err(_) => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
     }
 }
 
@@ -1150,7 +1357,7 @@ mod tests {
             "used just now"
         );
         {
-            let _writing = tenant.wiki_writer.lock().await;
+            let _writing = tenant.lock_wiki().await.unwrap();
             assert!(!tenant.release_if_idle(Duration::ZERO));
         }
         tenants.release_idle(Duration::ZERO).await;

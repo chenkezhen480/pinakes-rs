@@ -207,6 +207,27 @@ impl TestApp {
             .await
     }
 
+    /// A DELETE as `caller`.
+    pub async fn delete(&self, caller: Caller<'_>, uri: &str) -> (StatusCode, Value) {
+        let mut req =
+            Request::delete(uri).header("Authorization", format!("Bearer {}", caller.key));
+        req = with_caller(req, caller);
+        self.send(req.body(Body::empty()).unwrap()).await
+    }
+
+    /// A DELETE with the admin key.
+    pub async fn delete_admin(&self, uri: &str) -> (StatusCode, Value) {
+        self.delete(Caller::new(ADMIN), uri).await
+    }
+
+    /// The tenant's folder.
+    pub fn tenant_dir(&self, tenant_id: &str) -> PathBuf {
+        self.data
+            .path()
+            .join("tenants")
+            .join(tenant_dir_name(tenant_id))
+    }
+
     /// Waits until a job has finished and returns it.
     /// Long enough for jobs that call a real model.
     pub async fn wait_job(&self, caller: Caller<'_>, job: &str) -> Value {

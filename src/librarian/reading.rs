@@ -428,7 +428,7 @@ impl Librarian {
             if e.changes.is_empty() {
                 // The same text again: nothing to read, no model call; it is kept as a version.
                 let reading = e.reading.clone();
-                let _writer = tenant.wiki_writer.lock().await;
+                let _writer = tenant.lock_wiki().await?;
                 record_log(
                     tenant,
                     &format!(

@@ -1,16 +1,18 @@
 //! HTTP handlers. Every tenant route takes a `Scope`; admin routes take `Admin`.
 
 mod admin;
+mod delete;
 pub(crate) mod graph;
 mod ingest;
 pub(crate) mod insert;
 mod jobs;
+mod lint;
 mod pages;
 pub(crate) mod read;
 pub(crate) mod search;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
 use crate::AppState;
 
@@ -41,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get))
         .route("/proposals", get(jobs::list))
         .route("/proposals/{id}/approve", post(jobs::approve))
+        .route("/lint", get(lint::report).post(lint::run))
         .route("/ingest/graph/schema", post(ingest::schema))
         .route("/ingest/graph/space", post(ingest::space))
         // A full batch (`graph::def::MAX_BATCH` nodes and edges) is well over axum's 2 MB default.
@@ -48,7 +51,13 @@ pub fn router(state: AppState) -> Router {
             "/ingest/graph/data",
             post(ingest::data).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
+        .route("/users/{user_id}", delete(delete::user))
         .route("/admin/tenants", post(admin::create_tenant))
+        .route("/admin/tenants/{id}", delete(delete::tenant))
+        .route(
+            "/admin/tenants/{id}/groups/{group_id}",
+            delete(delete::group),
+        )
         .with_state(state.clone())
         .merge(mcp);
     // The test chat, only when asked for (`PINAKES_DEV=1`).

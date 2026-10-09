@@ -12,6 +12,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use super::{AuditEntry, Store, StoredVector};
 use crate::graph::{SchemaDef, SpaceDef};
 use crate::librarian::documents::{Reading, ReadingState};
+use crate::librarian::lint::{LintRun, Stored};
 use crate::librarian::{Document, Proposal};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
@@ -99,10 +100,32 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (page, heading, model)
     );
 "#,
+    r#"
+    -- Who each raw record in sources/ is for, so deleting a user or group finds its records.
+    CREATE TABLE records (
+        name     TEXT PRIMARY KEY,   -- the record's file name in sources/
+        audience TEXT NOT NULL       -- tenant, or the group or user folder
+    );
+    CREATE INDEX records_audience ON records (audience);
+"#,
+    r#"
+    -- The last lint run's findings (JSON of lint::Stored), replaced by each run.
+    CREATE TABLE lint_findings (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        audience TEXT NOT NULL,   -- tenant, or the group or user folder that may see it
+        finding  TEXT NOT NULL
+    );
+    -- Each page as the last lint review of it saw it, so a run reviews only what changed.
+    CREATE TABLE lint_reviewed (
+        page TEXT PRIMARY KEY,
+        hash TEXT NOT NULL
+    );
+"#,
 ];
 
 pub struct SqliteStore {
-    conn: Arc<Mutex<Connection>>,
+    /// `None` once closed (the tenant is being deleted): every call then fails.
+    conn: Arc<Mutex<Option<Connection>>>,
 }
 
 impl SqliteStore {
@@ -123,10 +146,11 @@ impl SqliteStore {
         key_label: &str,
     ) -> anyhow::Result<()> {
         let store = Self::create(path)?;
-        let mut conn = store
+        let mut guard = store
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("sqlite mutex poisoned"))?;
+        let conn = guard.as_mut().context("the store is closed")?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('tenant_id', ?1)",
@@ -158,9 +182,11 @@ impl SqliteStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Deleted rows are overwritten, not left in free pages (user and group deletion).
+        conn.pragma_update(None, "secure_delete", "ON")?;
         migrate(&mut conn)?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Arc::new(Mutex::new(Some(conn))),
         })
     }
 
@@ -170,12 +196,22 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
     {
+        self.with_conn_mut(move |c| f(c).map_err(anyhow::Error::from))
+            .await
+    }
+
+    /// Like `with_conn`, for work that needs a transaction.
+    async fn with_conn_mut<T, F>(&self, f: F) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
+    {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = conn
+            let mut guard = conn
                 .lock()
                 .map_err(|_| anyhow::anyhow!("sqlite mutex poisoned"))?;
-            f(&guard).map_err(anyhow::Error::from)
+            f(guard.as_mut().context("the store is closed")?)
         })
         .await
         .context("sqlite task panicked")?
@@ -414,11 +450,7 @@ impl Store for SqliteStore {
     ) -> anyhow::Result<u32> {
         let (doc, source) = (doc.clone(), source.to_owned());
         let reading = reading.map(serde_json::to_string).transpose()?;
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<u32> {
-            let mut c = conn
-                .lock()
-                .map_err(|_| anyhow::anyhow!("sqlite mutex poisoned"))?;
+        self.with_conn_mut(move |c| {
             let tx = c.transaction()?;
             tx.execute(
                 "INSERT INTO documents (id, audience, title) VALUES (?1, ?2, ?3)
@@ -446,7 +478,6 @@ impl Store for SqliteStore {
             Ok(version)
         })
         .await
-        .context("sqlite task panicked")?
     }
 
     async fn version_reading(&self, source: &str) -> anyhow::Result<Option<Reading>> {
@@ -508,6 +539,188 @@ impl Store for SqliteStore {
             .transpose()
     }
 
+    async fn add_record(&self, name: &str, audience: &str) -> anyhow::Result<()> {
+        let (name, audience) = (name.to_owned(), audience.to_owned());
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO records (name, audience) VALUES (?1, ?2)",
+                params![name, audience],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    async fn records(&self) -> anyhow::Result<Vec<(String, String)>> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare("SELECT name, audience FROM records")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .await
+    }
+
+    async fn records_of(&self, audience: &str) -> anyhow::Result<Vec<String>> {
+        let audience = audience.to_owned();
+        self.with_conn(move |c| {
+            let mut stmt =
+                c.prepare("SELECT name FROM records WHERE audience = ?1 ORDER BY name")?;
+            stmt.query_map(params![audience], |r| r.get(0))?.collect()
+        })
+        .await
+    }
+
+    async fn delete_audience(&self, audience: &str) -> anyhow::Result<()> {
+        let audience = audience.to_owned();
+        self.with_conn_mut(move |c| {
+            let prefix = match audience.as_bytes().first() {
+                Some(b'u') => format!("users/{audience}/"),
+                Some(b'g') => format!("groups/{audience}/"),
+                _ => anyhow::bail!("only a user's or a group's data can be deleted"),
+            };
+            let tx = c.transaction()?;
+            tx.execute(
+                "DELETE FROM proposals WHERE audience = ?1",
+                params![audience],
+            )?;
+            tx.execute("DELETE FROM records WHERE audience = ?1", params![audience])?;
+            tx.execute(
+                "DELETE FROM readings WHERE audience = ?1",
+                params![audience],
+            )?;
+            tx.execute(
+                "DELETE FROM document_versions WHERE document IN
+                 (SELECT id FROM documents WHERE audience = ?1)",
+                params![audience],
+            )?;
+            tx.execute(
+                "DELETE FROM documents WHERE audience = ?1",
+                params![audience],
+            )?;
+            for table in ["embeddings", "lint_reviewed"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE substr(page, 1, ?2) = ?1"),
+                    params![prefix, i64::try_from(prefix.len())?],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM lint_findings WHERE audience = ?1",
+                params![audience],
+            )?;
+            tx.commit()?;
+            // Old copies of the rows also leave the write-ahead log.
+            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn put_graph_space(&self, def: &SpaceDef) -> anyhow::Result<()> {
+        let (name, json) = (def.space.clone(), serde_json::to_string(def)?);
+        self.with_conn(move |c| {
+            c.execute(
+                "UPDATE graph_spaces SET definition = ?2 WHERE name = ?1",
+                params![name, json],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    async fn remove_graph_space(&self, name: &str) -> anyhow::Result<()> {
+        let name = name.to_owned();
+        self.with_conn(move |c| {
+            c.execute("DELETE FROM graph_spaces WHERE name = ?1", params![name])
+                .map(|_| ())
+        })
+        .await
+    }
+
+    async fn lint_run(&self) -> anyhow::Result<Option<(LintRun, Vec<Stored>)>> {
+        let (run, rows): (Option<String>, Vec<String>) = self
+            .with_conn(|c| {
+                let run = c
+                    .query_row("SELECT value FROM meta WHERE key = 'lint_run'", [], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                let mut stmt = c.prepare("SELECT finding FROM lint_findings ORDER BY id")?;
+                let rows = stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                Ok((run, rows))
+            })
+            .await?;
+        let Some(run) = run else {
+            return Ok(None);
+        };
+        let findings = rows
+            .iter()
+            .map(|r| serde_json::from_str(r).context("a stored lint finding"))
+            .collect::<anyhow::Result<_>>()?;
+        Ok(Some((
+            serde_json::from_str(&run).context("the stored lint run")?,
+            findings,
+        )))
+    }
+
+    async fn lint_reviewed(&self) -> anyhow::Result<Vec<(String, String)>> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare("SELECT page, hash FROM lint_reviewed")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .await
+    }
+
+    async fn put_lint_run(
+        &self,
+        run: &LintRun,
+        findings: &[Stored],
+        reviewed: &[(String, String)],
+    ) -> anyhow::Result<()> {
+        let run = serde_json::to_string(run)?;
+        let findings: Vec<(String, String)> = findings
+            .iter()
+            .map(|f| Ok((f.audience.clone(), serde_json::to_string(f)?)))
+            .collect::<anyhow::Result<_>>()?;
+        let reviewed = reviewed.to_vec();
+        self.with_conn_mut(move |c| {
+            let tx = c.transaction()?;
+            tx.execute("DELETE FROM lint_findings", [])?;
+            for (audience, f) in &findings {
+                tx.execute(
+                    "INSERT INTO lint_findings (audience, finding) VALUES (?1, ?2)",
+                    params![audience, f],
+                )?;
+            }
+            for (page, hash) in &reviewed {
+                tx.execute(
+                    "INSERT INTO lint_reviewed (page, hash) VALUES (?1, ?2)
+                     ON CONFLICT (page) DO UPDATE SET hash = excluded.hash",
+                    params![page, hash],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES ('lint_run', ?1)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![run],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    fn close(&self) {
+        let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = guard.take()
+            && let Err((_, e)) = conn.close()
+        {
+            tracing::warn!(error = %e, "closing the store failed");
+        }
+    }
+
     async fn embeddings(&self, model: &str) -> anyhow::Result<Vec<StoredVector>> {
         let model = model.to_owned();
         self.with_conn(move |c| {
@@ -539,11 +752,7 @@ impl Store for SqliteStore {
         drop: Vec<(String, String)>,
     ) -> anyhow::Result<()> {
         let model = model.to_owned();
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let mut conn = conn
-                .lock()
-                .map_err(|_| anyhow::anyhow!("sqlite mutex poisoned"))?;
+        self.with_conn_mut(move |conn| {
             let tx = conn.transaction()?;
             tx.execute("DELETE FROM embeddings WHERE model != ?1", params![model])?;
             for (page, heading) in &drop {
@@ -566,7 +775,6 @@ impl Store for SqliteStore {
             Ok(())
         })
         .await
-        .context("sqlite task panicked")?
     }
 }
 

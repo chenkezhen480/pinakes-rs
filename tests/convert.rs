@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 /// A model that reads the whole text as one concept and files it as one page.
 fn librarian() -> Arc<FakeLlm> {
     FakeLlm::new(|step, msg, _| match step {
+        Step::Lint => common::llm::NO_FINDINGS.into(),
         Step::Read => {
             let (lines, at_end) = shown(msg);
             if !at_end {

@@ -17,6 +17,7 @@
 mod batch;
 pub mod documents;
 pub mod edit;
+pub mod lint;
 pub mod prompts;
 mod reading;
 pub mod sources;
@@ -944,7 +945,7 @@ impl Librarian {
                 &checked,
             )
             .await?;
-        let _writer = tenant.wiki_writer.lock().await;
+        let _writer = tenant.lock_wiki().await?;
         match verdicts.get(&0) {
             Some(Err(reason)) => {
                 result.proposal = Some(
@@ -1018,7 +1019,7 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         source: proposal.source.as_ref().map(|s| format!("sources/{s}")),
         ..JobResult::default()
     };
-    let _writer = tenant.wiki_writer.lock().await;
+    let _writer = tenant.lock_wiki().await?;
     // Approvals of one proposal can race; the status is checked again under the writer lock.
     let stored = tenant.store.proposal(&proposal.id).await?;
     anyhow::ensure!(
@@ -1623,7 +1624,7 @@ async fn apply_and_record(
         write_index(tenant).await?;
     }
     record_log(tenant, &line).await?;
-    tenant.store.audit(&actor(writer), what, &line).await?;
+    tenant.store.audit(&writer.actor(), what, &line).await?;
     Ok(changed)
 }
 
@@ -1745,13 +1746,6 @@ fn log_page(target: &Target, page: &str) -> String {
         PageAudience::Group(_) => "a group page".into(),
         PageAudience::User(_) => "a user page".into(),
     }
-}
-
-/// Who did it, for the audit log: the user folder, never the raw id.
-fn actor(scope: &Scope) -> String {
-    scope
-        .user()
-        .map_or_else(|| "api_key".to_owned(), |u| u.dir.clone())
 }
 
 #[cfg(test)]

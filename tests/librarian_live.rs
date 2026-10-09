@@ -446,3 +446,94 @@ async fn a_real_model_anchors_the_knowledge_its_task_read() {
         );
     }
 }
+
+/// Lint with a real model, on the `shopline` scenario with a contradiction, a stale claim and an
+/// unanchored playbook planted: the contradiction and the stale claim are reported with their
+/// claims quoted, and the playbook gets anchors proposed.
+#[tokio::test]
+async fn a_real_model_lints_the_wiki() {
+    use pinakes::wiki::{Page, PagePath, WikiFs};
+    let Some(llm) = live_llm() else {
+        eprintln!("PINAKES_TEST_LLM is not set; skipping the live lint test");
+        return;
+    };
+    let mut app = TestApp::with_llm(llm);
+    let key = app.create_tenant("shopline").await;
+    testset::install_wiki("shopline", &app.wiki_dir("shopline"));
+    let page = |path: &str, title: &str, about: &[&str], body: &str| {
+        let mut p = Page::new(PagePath::parse(path).unwrap());
+        p.front.kind = p.path.kind();
+        p.front.title = Some(title.into());
+        p.front.summary = Some(body.lines().next().unwrap().into());
+        p.front.about = about.iter().map(|a| (*a).into()).collect();
+        p.body = format!("# {title}\n\n{body}\n");
+        p
+    };
+    let wiki = WikiFs::new(app.wiki_dir("shopline"));
+    for p in [
+        page(
+            "expertise/return-window-cn",
+            "国内订单退货期限",
+            &[],
+            "国内订单签收后 7 天内可无理由退货。\n\n超过 7 天只能走售后维修。",
+        ),
+        page(
+            "expertise/domestic-returns",
+            "国内退货规则",
+            &[],
+            "国内订单签收后 15 天内可无理由退货，运费由买家承担。",
+        ),
+        page(
+            "expertise/spring-sale",
+            "春季大促规则",
+            &[],
+            "春季大促满 300 减 50，活动有效期至 2026-04-30。\n\n大促期间订单发货时间延长到 72 小时。",
+        ),
+        page(
+            "experience/order-address-change",
+            "订单改地址",
+            &[],
+            "## 可行步骤\n\n1. 未发货的订单可以直接在后台改收货地址。\n2. 已发货的订单要先联系快递拦截。",
+        ),
+    ] {
+        wiki.write(&p).unwrap();
+    }
+    app.restart();
+    let t = testset::tenants()
+        .into_iter()
+        .find(|t| t.id == "shopline")
+        .unwrap();
+    for call in testset::graph_calls(&t) {
+        let caller = Caller::new(&key)
+            .user(call.user.as_deref())
+            .groups(&call.groups);
+        let (status, body) = app.post(caller, call.uri, call.body).await;
+        assert!(status.is_success(), "{}: {status} {body}", call.uri);
+    }
+    let host = Caller::new(&key);
+    let (status, queued) = app.post(host, "/lint", json!({})).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let job = app.wait_job(host, queued["job"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "done", "{job}");
+    let (_, report) = app.get(host, "/lint").await;
+    eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
+    let findings = report["findings"].as_array().unwrap();
+    let about = |kind: &str, page: &str| {
+        findings
+            .iter()
+            .find(|f| f["kind"] == kind && f["pages"].as_array().unwrap().iter().any(|p| p == page))
+    };
+    let contradiction = about("contradiction", "expertise/domestic-returns")
+        .expect("the two return windows contradict each other");
+    assert!(
+        !contradiction["claims"].as_array().unwrap().is_empty(),
+        "{contradiction}"
+    );
+    let stale = about("stale", "expertise/spring-sale").expect("the sale ended on 2026-04-30");
+    assert!(!stale["claims"].as_array().unwrap().is_empty(), "{stale}");
+    let unanchored = about("unanchored", "experience/order-address-change").unwrap();
+    assert!(
+        unanchored["proposal"].is_string(),
+        "anchors proposed: {unanchored}"
+    );
+}

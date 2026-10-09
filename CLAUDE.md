@@ -89,6 +89,13 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - A page another user or group owns, or another tenant's anything, is reported as not found
   (404), never as forbidden, so callers can't probe for existence.
 
+- Lint never writes wiki pages (only its line in `log.md`): it reports findings and holds fixes
+  as proposals (`librarian::lint`). A finding and its fix stay within the audience of the page
+  (or the searches) it comes from.
+  Deletion is hard (`deletion`, `Tenants::delete`): a deleted owner's text must be gone from
+  every file of the tenant except the search traces (`tests/deletion.rs` checks byte by byte);
+  writers take `Tenant::lock_wiki`/`lock_graph`, which refuse once the tenant is deleted.
+
 - The whole stack: `NEO4J_PASSWORD=... docker compose up -d --build` (needs `model.conf`;
   the image's config is `docker/config.toml`, kept in step with `config.toml`). The test chat
   (`/dev`) exists only with `PINAKES_DEV=1`.

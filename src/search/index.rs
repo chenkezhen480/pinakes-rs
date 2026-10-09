@@ -260,6 +260,60 @@ impl PageIndex {
         shared.view()
     }
 
+    /// Removes the pages under `prefix` (a user's or group's folder) from the index in `dir`
+    /// for good: their documents are deleted, then every segment holding a deleted document is
+    /// merged, so neither these pages' text nor older copies of any page stay in the files,
+    /// and the old segment files are removed. An index of another format is removed whole
+    /// (it is made again when the tenant opens). Callers make sure no snapshot holds the index.
+    pub fn purge(dir: &Path, prefix: &str) -> anyhow::Result<()> {
+        let (schema, fields) = schema();
+        let index = match Index::open_in_dir(dir) {
+            Ok(index) if index.schema() == schema && stored_format(&index) == Some(FORMAT) => index,
+            _ => {
+                return match std::fs::remove_dir_all(dir) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                    _ => Ok(()),
+                };
+            }
+        };
+        let payload = index.load_metas()?.payload;
+        let shared = Shared::new(index, fields)?;
+        let gone: Vec<String> = shared
+            .stored_pages()?
+            .into_keys()
+            .filter(|p| p.starts_with(prefix))
+            .collect();
+        // The reader keeps the old segments open, which would keep their files.
+        let Shared { index, reader, .. } = shared;
+        drop(reader);
+        let mut writer: IndexWriter = index.writer_with_num_threads(1, THREAD_BUDGET)?;
+        for path in &gone {
+            writer.delete_term(Term::from_field_text(fields.path, path));
+        }
+        let mut commit = writer.prepare_commit()?;
+        if let Some(p) = &payload {
+            commit.set_payload(p);
+        }
+        commit.commit()?;
+        let with_deletes: Vec<_> = index
+            .searchable_segment_metas()?
+            .iter()
+            .filter(|m| m.has_deletes())
+            .map(|m| m.id())
+            .collect();
+        if !with_deletes.is_empty() {
+            writer.merge(&with_deletes).wait()?;
+        }
+        writer.garbage_collect_files().wait()?;
+        writer.wait_merging_threads()?;
+        tracing::info!(
+            pages = gone.len(),
+            segments = with_deletes.len(),
+            "pages purged from the index"
+        );
+        Ok(())
+    }
+
     /// The index after a write: `remove` paths deleted, `add` pages (with their text as
     /// written) indexed, a page already there replaced. This snapshot's view stays as it was.
     pub fn update(

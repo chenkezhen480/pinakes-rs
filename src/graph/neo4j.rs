@@ -241,4 +241,16 @@ impl GraphStore for Neo4jGraphStore {
             .await?;
         Ok(())
     }
+
+    async fn delete_space(&self, space: &str) -> anyhow::Result<()> {
+        let (graph, tenant) = self.open().await?;
+        graph
+            .run(
+                query("MATCH (n:PinakesNode {tenant: $tenant, space: $space}) DETACH DELETE n")
+                    .param("tenant", tenant)
+                    .param("space", space),
+            )
+            .await?;
+        Ok(())
+    }
 }

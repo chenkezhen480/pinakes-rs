@@ -24,4 +24,10 @@ pub trait GraphStore: Send + Sync {
 
     /// Removes every node and edge of the tenant.
     async fn delete_all(&self) -> anyhow::Result<()>;
+
+    /// Removes every node and edge of one space.
+    async fn delete_space(&self, space: &str) -> anyhow::Result<()>;
+
+    /// Lets go of any file the store holds open (the tenant is being deleted); later calls fail.
+    fn close(&self) {}
 }

@@ -351,7 +351,7 @@ impl Librarian {
             let to_write: Vec<usize> = (0..edits.len())
                 .filter(|&k| pass.contains(&owner[k]) && !refused.contains(&k))
                 .collect();
-            let _writer = tenant.wiki_writer.lock().await;
+            let _writer = tenant.lock_wiki().await?;
             if !to_write.is_empty() {
                 let mut written = JobResult::default();
                 let round_edits: Vec<Edit> = to_write.iter().map(|&k| edits[k].clone()).collect();

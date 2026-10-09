@@ -40,6 +40,8 @@ pub struct SqliteGraphStore {
     /// Opened on first use, so a tenant that never stores graph data (or a request that only
     /// checks an API key) never creates the file.
     conn: Arc<Mutex<Option<Connection>>>,
+    /// Set by `close`: nothing is opened again.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SqliteGraphStore {
@@ -49,6 +51,7 @@ impl SqliteGraphStore {
             tenant: tenant.to_owned(),
             path: path.to_owned(),
             conn: Arc::new(Mutex::new(None)),
+            closed: Arc::default(),
         })
     }
 
@@ -57,6 +60,7 @@ impl SqliteGraphStore {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "secure_delete", "ON")?;
         conn.execute_batch(SCHEMA)?;
         Ok(conn)
     }
@@ -71,10 +75,15 @@ impl SqliteGraphStore {
         let conn = self.conn.clone();
         let tenant = self.tenant.clone();
         let path = self.path.clone();
+        let closed = self.closed.clone();
         tokio::task::spawn_blocking(move || {
             let mut guard = conn
                 .lock()
                 .map_err(|_| anyhow::anyhow!("sqlite mutex poisoned"))?;
+            anyhow::ensure!(
+                !closed.load(std::sync::atomic::Ordering::SeqCst),
+                "the graph store is closed"
+            );
             if guard.is_none() {
                 if !create && !path.exists() {
                     return Ok(None);
@@ -194,6 +203,35 @@ impl GraphStore for SqliteGraphStore {
         })
         .await
         .map(|_| ())
+    }
+
+    async fn delete_space(&self, space: &str) -> anyhow::Result<()> {
+        let space = space.to_owned();
+        self.with_conn(false, move |c, tenant| {
+            let tx = c.transaction()?;
+            for table in ["edges", "nodes"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE tenant = ?1 AND space = ?2"),
+                    params![tenant, space],
+                )?;
+            }
+            tx.commit()?;
+            // Old copies of the rows also leave the write-ahead log.
+            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            Ok(())
+        })
+        .await
+        .map(|_| ())
+    }
+
+    fn close(&self) {
+        let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(conn) = guard.take()
+            && let Err((_, e)) = conn.close()
+        {
+            tracing::warn!(error = %e, "closing the graph store failed");
+        }
     }
 }
 

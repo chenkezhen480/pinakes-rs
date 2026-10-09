@@ -37,6 +37,9 @@ pub struct JobResult {
     /// The document's version this upload became, from 1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
+    /// For a lint run: what it found and proposed (the findings are at `GET /lint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lint: Option<crate::librarian::lint::LintRun>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
