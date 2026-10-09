@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Without the variable it runs 1,000 pages. `PINAKES_BENCH_THREADS=<n>` sets the service's
-//! compute threads (`[server] threads`; half the logical CPUs by default). `PINAKES_BENCH_SETTLE=<seconds>` waits after the
+//! compute threads (`[server] threads`; 4 by default). `PINAKES_BENCH_SETTLE=<seconds>` waits after the
 //! tenant opens, so the history save it starts in the background is done before anything else
 //! is timed.
 

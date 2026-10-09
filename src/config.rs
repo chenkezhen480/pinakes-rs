@@ -397,8 +397,8 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
-    /// How many threads the service computes on (see `par`); 0, the default, is half the
-    /// machine's logical CPUs.
+    /// How many threads the service computes on (see `par`); 0, the default, is 4 (fewer on a
+    /// machine with fewer logical CPUs).
     #[serde(default)]
     pub threads: usize,
 }

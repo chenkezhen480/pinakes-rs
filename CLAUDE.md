@@ -96,8 +96,8 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   every file of the tenant except the search traces (`tests/deletion.rs` checks byte by byte);
   writers take `Tenant::lock_wiki`/`lock_graph`, which refuse once the tenant is deleted.
 
-- Parallel computing goes through `par` (one shared pool sized by `[server] threads`, half the
-  logical CPUs by default); never spawn compute threads or size work by
+- Parallel computing goes through `par` (one shared pool sized by `[server] threads`, 4 by
+  default, fewer on a smaller machine); never spawn compute threads or size work by
   `available_parallelism` elsewhere. The embedding model and the async runtime use the same number.
 
 - The whole stack: `NEO4J_PASSWORD=... docker compose up -d --build` (needs `model.conf`;

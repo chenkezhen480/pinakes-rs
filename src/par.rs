@@ -14,8 +14,9 @@ const MIN_PARALLEL: usize = 256;
 static THREADS: OnceLock<usize> = OnceLock::new();
 static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
-/// Sets the budget, once, before anything uses it (at startup); 0 means the default, half the
-/// machine's logical CPUs. Says whether it took effect (a later call changes nothing).
+/// Sets the budget, once, before anything uses it (at startup); 0 means the default, 4 threads
+/// (fewer on a machine with fewer logical CPUs). Says whether it took effect (a later call
+/// changes nothing).
 pub fn set_threads(n: usize) -> bool {
     let n = if n == 0 { default_threads() } else { n };
     THREADS.set(n).is_ok()
@@ -26,10 +27,15 @@ pub fn threads() -> usize {
     *THREADS.get_or_init(default_threads)
 }
 
-/// Half the logical CPUs, at least one.
+/// 4 threads, or the logical CPUs when there are fewer: measured, 4 threads come within 10% of
+/// a 12-thread laptop's speed on the largest tenants and embed a query fastest (design, "A
+/// compute budget").
 fn default_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(DEFAULT_THREADS))
 }
+
+/// Threads the service computes on unless configured.
+const DEFAULT_THREADS: usize = 4;
 
 fn pool() -> &'static rayon::ThreadPool {
     POOL.get_or_init(|| {

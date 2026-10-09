@@ -6,7 +6,7 @@
 [server]
 host = "0.0.0.0"               # inside the container; compose decides what the host exposes
 port = 8080
-threads = 0                     # threads the service computes on; 0 = half the logical CPUs
+threads = 0                     # threads the service computes on; 0 = 4 (or fewer CPUs)
 
 [data]
 dir = "/data"                  # the pinakes-data volume
