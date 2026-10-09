@@ -1,6 +1,6 @@
 # The configuration the Docker image runs with (`docker compose up`); config.toml in the
 # repository root is for running the service on the host. Secrets stay in the environment
-# (PINAKES_ADMIN_KEY, NEO4J_PASSWORD); the librarian's model and key are in model.conf, which
+# (PINAKES_ADMIN_KEY; NEO4J_PASSWORD with the Neo4j backend); the librarian's model and key are in model.conf, which
 # docker-compose.yml mounts next to this file.
 
 [server]
@@ -60,11 +60,11 @@ retention_days = 30            # 0 keeps them forever
 model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: no vectors, semantic modes answer 503
 
 [graph]
-backend = "neo4j"              # or "sqlite": graph.sqlite in each tenant folder, no Neo4j needed
+backend = "sqlite"             # graph.sqlite in each tenant folder; or "neo4j" (see [neo4j])
 max_depth = 3                  # deepest /graph walk a caller may ask for
 max_nodes = 100                # most nodes a /graph walk returns
 
-[neo4j]
+[neo4j]                        # only with backend = "neo4j" and the compose profile `neo4j`
 uri = "bolt://neo4j:7687"
 user = "neo4j"
 password_env = "NEO4J_PASSWORD"   # the variable holding the password

@@ -276,10 +276,10 @@ impl Default for GraphConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphBackendKind {
-    /// `graph.sqlite` in each tenant's folder: for tests and trying the service out.
+    /// `graph.sqlite` in each tenant's folder, the default: nothing to run beside the service.
     #[default]
     Sqlite,
-    /// One Neo4j database shared by every tenant, filtered on the tenant id.
+    /// One Neo4j database shared by every tenant, filtered on the tenant id (optional).
     Neo4j,
 }
 
@@ -850,6 +850,9 @@ slots = { memories = 40, knowledge = 2, relations = 6 }
         .unwrap();
         assert_eq!(docker.data.dir, PathBuf::from("/data"));
         assert_eq!(docker.neo4j.uri, "bolt://neo4j:7687");
+        // Graph data in SQLite unless a deployment chooses Neo4j.
+        assert_eq!(cfg.graph.backend, GraphBackendKind::Sqlite);
+        assert_eq!(docker.graph.backend, GraphBackendKind::Sqlite);
         assert_eq!(docker.search.default_mode, cfg.search.default_mode);
         // The example is what a deployment copies to model.conf.
         cfg.librarian.model_file = PathBuf::from("model.conf.example");

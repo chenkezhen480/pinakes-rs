@@ -170,6 +170,8 @@ updated: 2026-09-29
 
 **Why a graph still fits A-RAG.** A-RAG's critique of graph-based RAG, such as GraphRAG and HippoRAG2, is that those systems "rely on predefined retrieval algorithms rather than model-driven decisions." Here the graph is reached through the same agent-driven search, and the agent decides whether to follow a graph route.
 
+**Graph data in SQLite by default** (decided with the user 2026-10-09). Searches and walks never query the graph store: the graph is read into memory when a tenant opens, and the store is only written and read back whole. Neo4j's strength, querying the graph in place, is never used, while it costs a JVM process (a gigabyte or more of memory), a container, a password and a start-up dependency. So the shipped configuration and the compose stack keep graph data in `graph.sqlite` in each tenant's folder (like the rest of the tenant's data: isolated by file, and gone with the folder when the tenant is deleted), and Neo4j becomes optional: `[graph] backend = "neo4j"` with the compose profile `neo4j`, still behind `GraphStore` and still tested (`PINAKES_TEST_NEO4J_URI`). The user also has in mind a fully local mobile app later, where nothing beside the process can run. Where this text says Neo4j for the graph store, read the configured store.
+
 ## Tenants, users and identity
 
 The service never creates or authenticates end users, and never manages groups. The host system passes tenant, user and group ids in, and the service enforces isolation around them. Group membership changes take effect on the next request: when the host stops sending a group, that caller loses access to its pages and spaces at once.

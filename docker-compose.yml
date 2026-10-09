@@ -1,10 +1,14 @@
-# The whole service: `NEO4J_PASSWORD=... docker compose up -d --build` starts Pinakes, Neo4j and
-# the document converter. Before the first start, copy model.conf.example to model.conf (the
+# The whole service: `docker compose up -d --build` starts Pinakes and the document converter;
+# graph data is kept in SQLite in each tenant's folder. Neo4j is optional: set
+# `backend = "neo4j"` in docker/config.toml and start with
+# `NEO4J_PASSWORD=... docker compose --profile neo4j up -d --build`.
+# Before the first start, copy model.conf.example to model.conf (the
 # librarian's model and key; mounted, never built into the image). The admin key comes from
 # PINAKES_ADMIN_KEY. All of Pinakes' own data sits in the pinakes-data volume.
 #
 # For development on the host (`cargo run`, `cargo test`), start only what the service needs:
-# `docker compose up -d neo4j` and `docker compose --profile dev up -d --build converter-dev`.
+# `docker compose --profile dev up -d --build converter-dev` (and, for the Neo4j backend's tests,
+# `NEO4J_PASSWORD=... docker compose --profile neo4j up -d neo4j`).
 # Published ports are bound to 127.0.0.1 only; set PINAKES_PORT (such as 8080) to expose the
 # service on every interface. Search traces name the code that answered: build with
 # `PINAKES_GIT_COMMIT=$(git rev-parse --short=12 HEAD)`, or they say `unknown`.
@@ -25,24 +29,24 @@ services:
         bind:
           create_host_path: false
     environment:
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
       PINAKES_ADMIN_KEY: ${PINAKES_ADMIN_KEY:-}
       # A Hugging Face mirror for the embedding model's first download, if needed.
       HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
-      neo4j:
-        condition: service_healthy
       converter:
         condition: service_started
     networks: [default, internal]
     restart: unless-stopped
 
   neo4j:
+    # Optional: only with `backend = "neo4j"` (start Pinakes after it is healthy).
+    profiles: [neo4j]
     # Pinned: the version the neo4rs driver (0.9.0-rc.10) is tested against here.
     image: neo4j:5.26.28
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-}   # set NEO4J_PASSWORD; Neo4j refuses an empty one
     ports:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"

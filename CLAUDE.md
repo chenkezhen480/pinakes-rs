@@ -14,7 +14,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   with `export PATH="$HOME/.cargo/bin:$PATH";` if `cargo` is not found.
 - The shell has `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` pointing at a local proxy (127.0.0.1:7897).
   When curling the local server, first `unset HTTP_PROXY HTTPS_PROXY ALL_PROXY; export NO_PROXY=127.0.0.1,localhost`.
-- Graph tests against Neo4j (M3 on): `NEO4J_PASSWORD=... docker compose up -d neo4j`, then
+- Graph data is kept in SQLite (`graph.sqlite` per tenant) by default; Neo4j is an optional
+  backend (`[graph] backend = "neo4j"`, compose profile `neo4j`), kept working behind
+  `GraphStore` (decided 2026-10-09: lighter, and a local mobile app may come).
+- Graph tests against Neo4j (M3 on): `NEO4J_PASSWORD=... docker compose --profile neo4j up -d neo4j`, then
   `PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset`.
   Without `PINAKES_TEST_NEO4J_URI` that test is skipped; the SQLite backend always runs.
 - The speed benchmark (M6): `PINAKES_BENCH_PAGES=1000,10000,100000 PINAKES_BENCH_SETTLE=240 cargo
@@ -43,7 +46,7 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
 - Uploaded files go through the converter container (`converter/`, MarkItDown); the service
   never parses Word, PDF or HTML itself. In the compose stack it sits on an internal network with
-  no egress; for the host, start `NEO4J_PASSWORD=... docker compose --profile dev up -d --build
+  no egress; for the host, start `docker compose --profile dev up -d --build
   converter-dev` (127.0.0.1:8090); `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test
   convert` runs a real Word file through it (skipped without the variable).
 - Expertise documents get ids from the service (`d_…`), never from the host. A new version
@@ -100,7 +103,7 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   default, fewer on a smaller machine); never spawn compute threads or size work by
   `available_parallelism` elsewhere. The embedding model and the async runtime use the same number.
 
-- The whole stack: `NEO4J_PASSWORD=... docker compose up -d --build` (needs `model.conf`;
+- The whole stack: `docker compose up -d --build` (needs `model.conf`;
   the image's config is `docker/config.toml`, kept in step with `config.toml`). The test chat
   (`/dev`) exists only with `PINAKES_DEV=1`.
 

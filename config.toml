@@ -1,5 +1,5 @@
 # Service configuration. Secrets stay in environment variables, never in this file:
-# PINAKES_ADMIN_KEY (admin routes) and NEO4J_PASSWORD. The librarian's model and key are in
+# PINAKES_ADMIN_KEY (admin routes), and NEO4J_PASSWORD with the Neo4j backend. The librarian's model and key are in
 # model.conf (see model.conf.example), which is not in git.
 # Sections marked (Mx) are read from that milestone on; until then they are ignored.
 
@@ -63,11 +63,11 @@ retention_days = 30            # 0 keeps them forever
 model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: no vectors, semantic modes answer 503
 
 [graph]                        # (M3)
-backend = "neo4j"              # or "sqlite": graph.sqlite in each tenant folder, no Neo4j needed
+backend = "sqlite"             # graph.sqlite in each tenant folder; or "neo4j" (see [neo4j])
 max_depth = 3                  # deepest /graph walk a caller may ask for
 max_nodes = 100                # most nodes a /graph walk returns
 
-[neo4j]                        # (M3) `NEO4J_PASSWORD=... docker compose up -d neo4j`
+[neo4j]                        # only with backend = "neo4j": `NEO4J_PASSWORD=... docker compose --profile neo4j up -d neo4j`
 uri = "bolt://localhost:7687"
 user = "neo4j"
 password_env = "NEO4J_PASSWORD"   # the variable holding the password
