@@ -509,7 +509,7 @@ impl Shared {
         analyzer: &Analyzer,
     ) -> anyhow::Result<()> {
         let threads = if add.len() > BATCH {
-            std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
+            crate::par::threads().min(4)
         } else {
             1
         };

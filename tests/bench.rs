@@ -13,7 +13,8 @@
 //! PINAKES_BENCH_PAGES=1000,10000,100000 cargo test --release --test bench -- --ignored --nocapture
 //! ```
 //!
-//! Without the variable it runs 1,000 pages. `PINAKES_BENCH_SETTLE=<seconds>` waits after the
+//! Without the variable it runs 1,000 pages. `PINAKES_BENCH_THREADS=<n>` sets the service's
+//! compute threads (`[server] threads`; half the logical CPUs by default). `PINAKES_BENCH_SETTLE=<seconds>` waits after the
 //! tenant opens, so the history save it starts in the background is done before anything else
 //! is timed.
 
@@ -427,6 +428,13 @@ async fn bench() {
         .with_env_filter("pinakes=info")
         .with_test_writer()
         .try_init();
+    // `PINAKES_BENCH_THREADS` sets the service's compute budget (`[server] threads`).
+    let threads: usize = std::env::var("PINAKES_BENCH_THREADS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    pinakes::par::set_threads(threads);
+    println!("compute threads: {}", pinakes::par::threads());
     let sizes: Vec<usize> = std::env::var("PINAKES_BENCH_PAGES")
         .unwrap_or_else(|_| "1000".into())
         .split(',')

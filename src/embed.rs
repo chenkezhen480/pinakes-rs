@@ -141,7 +141,10 @@ impl FastEmbedder {
             .with_pooling(fastembed::Pooling::Mean);
         let model = fastembed::TextEmbedding::try_new_from_user_defined(
             model,
-            fastembed::InitOptionsUserDefined::new().with_max_length(MAX_TOKENS),
+            fastembed::InitOptionsUserDefined::new()
+                .with_max_length(MAX_TOKENS)
+                // Within the service's compute budget (`par`), not every core.
+                .with_intra_threads(crate::par::threads()),
         )
         .with_context(|| format!("loading embedding model {MODEL}"))?;
         Ok(Self {

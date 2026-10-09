@@ -8,8 +8,7 @@ use pinakes::config::Config;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // Span close events carry `time.busy`/`time.idle`, which is the per-step timing.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -31,6 +30,18 @@ async fn main() -> anyhow::Result<()> {
         config
     };
 
+    // The service computes within `[server] threads`; the async runtime too.
+    pinakes::par::set_threads(config.server.threads);
+    tracing::info!(threads = pinakes::par::threads(), "compute threads");
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(pinakes::par::threads())
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(serve(config))
+}
+
+async fn serve(config: Config) -> anyhow::Result<()> {
     std::fs::create_dir_all(config.tenants_dir())
         .with_context(|| format!("creating {}", config.tenants_dir().display()))?;
 

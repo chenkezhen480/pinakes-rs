@@ -6,6 +6,7 @@
 [server]
 host = "127.0.0.1"             # Docker (M7) sets 0.0.0.0
 port = 8080
+threads = 0                     # threads the service computes on; 0 = half the logical CPUs
 
 [data]
 dir = "./data"                 # the Docker image will point this at its /data volume (M7)

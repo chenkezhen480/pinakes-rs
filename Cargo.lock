@@ -2482,6 +2482,7 @@ dependencies = [
  "neo4rs",
  "petgraph",
  "rand 0.10.3",
+ "rayon",
  "reqwest 0.13.5",
  "rmcp",
  "rpassword",

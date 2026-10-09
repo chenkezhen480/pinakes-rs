@@ -51,16 +51,19 @@ pub async fn search(
             scope.clone(),
             req.clone(),
         );
+        // On the compute pool, so searches at once share the service's threads.
         tokio::task::spawn_blocking(move || {
-            crate::search::search(
-                &snapshot,
-                &graph,
-                &scope,
-                &req,
-                &app.config.search,
-                &reads,
-                app.embedder.as_deref(),
-            )
+            crate::par::run(|| {
+                crate::search::search(
+                    &snapshot,
+                    &graph,
+                    &scope,
+                    &req,
+                    &app.config.search,
+                    &reads,
+                    app.embedder.as_deref(),
+                )
+            })
         })
         .await
         .map_err(anyhow::Error::from)??

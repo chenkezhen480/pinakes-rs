@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         }
         None => Config::default(),
     };
+    pinakes::par::set_threads(config.server.threads);
     if paths.is_empty() {
         paths.push(config.tenants_dir());
     }

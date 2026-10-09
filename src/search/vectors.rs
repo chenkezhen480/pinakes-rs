@@ -200,7 +200,7 @@ pub struct Vectors {
     rows: usize,
 }
 
-/// From this many rows on, a search compares the query with them on all cores.
+/// From this many rows on, a search compares the query with them on the compute pool.
 const PARALLEL_ROWS: usize = 50_000;
 
 impl Vectors {
@@ -214,8 +214,8 @@ impl Vectors {
     }
 
     /// Each page `keep` accepts with its best similarity to the query, best first (ties by
-    /// page order). One pass over the vectors; a large set is split over the cores, since
-    /// streaming it through one core is what costs (300 MB for 100,000 pages).
+    /// page order). One pass over the vectors; a large set is split over the compute pool
+    /// (`par`), since streaming it through one core is what costs (300 MB for 100,000 pages).
     pub fn best(&self, query: &[f32], keep: impl Fn(usize) -> bool + Sync) -> Vec<(usize, f32)> {
         if self.dim == 0 || query.len() != self.dim {
             return Vec::new();
@@ -241,24 +241,17 @@ impl Vectors {
             }
             out
         };
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let threads = crate::par::threads();
         let mut out = if self.rows < PARALLEL_ROWS || threads < 2 {
             scan(0, &self.pages)
         } else {
+            use rayon::prelude::*;
             let per = self.pages.len().div_ceil(threads);
-            std::thread::scope(|s| {
-                let parts: Vec<_> = self
-                    .pages
-                    .chunks(per)
+            crate::par::run(|| {
+                self.pages
+                    .par_chunks(per)
                     .enumerate()
-                    .map(|(i, chunk)| {
-                        let scan = &scan;
-                        s.spawn(move || scan(i * per, chunk))
-                    })
-                    .collect();
-                parts
-                    .into_iter()
-                    .flat_map(|p| p.join().expect("a vector scan panicked"))
+                    .flat_map_iter(|(i, chunk)| scan(i * per, chunk))
                     .collect()
             })
         };
