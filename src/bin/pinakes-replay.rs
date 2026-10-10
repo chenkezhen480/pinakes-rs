@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .graph_backend(pinakes::graph::GraphBackend::from_config(&config))
     .embedder(embedder.clone())
+    .vector_graph_rows(config.search.vector_graph_rows)
     // The service may be running on the same folder: a replay never writes its stores.
     .read_only();
     let report = replay(

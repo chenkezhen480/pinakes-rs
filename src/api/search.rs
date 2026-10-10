@@ -75,11 +75,10 @@ pub async fn search(
     record.search_config = app.search_fingerprint.clone();
     record.request = serde_json::to_value(&req).unwrap_or_default();
     record.result = response.trace_summary();
-    record.timings_us = response
-        .timings_us
-        .iter()
-        .map(|(k, v)| ((*k).to_owned(), *v))
-        .collect();
+    // A step that ran once per slot (a graph walk) counts with both.
+    for (k, v) in &response.timings_us {
+        *record.timings_us.entry((*k).to_owned()).or_default() += *v;
+    }
     record.timings_us.insert(
         "total".into(),
         u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),

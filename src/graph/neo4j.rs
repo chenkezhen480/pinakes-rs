@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use neo4rs::{BoltType, Graph, query};
 use tokio::sync::OnceCell;
 
-use super::def::{EdgeRecord, GraphData, NodeRecord, validate_name};
+use super::def::{EdgeRecord, GraphData, NodeKey, NodeRecord, validate_name};
 use super::store::GraphStore;
 use crate::config::Neo4jConfig;
 
@@ -115,6 +115,12 @@ fn node_row(n: &NodeRecord) -> HashMap<String, BoltType> {
         ("key".to_owned(), n.key.as_str().into()),
         ("name".to_owned(), n.name.as_str().into()),
         ("aliases".to_owned(), n.aliases.clone().into()),
+        (
+            "properties".to_owned(),
+            serde_json::to_string(&n.properties)
+                .unwrap_or_else(|_| "{}".into())
+                .into(),
+        ),
     ])
 }
 
@@ -138,19 +144,67 @@ impl GraphStore for Neo4jGraphStore {
     }
 
     async fn write(&self, nodes: &[NodeRecord], edges: &[EdgeRecord]) -> anyhow::Result<()> {
+        self.apply(&[], &[], nodes, edges).await
+    }
+
+    async fn apply(
+        &self,
+        remove_nodes: &[NodeKey],
+        remove_edges: &[EdgeRecord],
+        nodes: &[NodeRecord],
+        edges: &[EdgeRecord],
+    ) -> anyhow::Result<()> {
         let (graph, tenant) = self.open().await?;
+        let mut txn = graph.start_txn().await?;
+        for chunk in remove_edges.chunks(CHUNK) {
+            let rows: Vec<HashMap<String, BoltType>> = chunk.iter().map(edge_row).collect();
+            txn.run(
+                query(
+                    "UNWIND $rows AS row \
+                     MATCH (a:PinakesNode {tenant: $tenant, space: row.space, type: row.from_type, key: row.from_key}) \
+                           -[r:PINAKES_REL {tenant: $tenant, space: row.space, type: row.type}]-> \
+                           (b:PinakesNode {tenant: $tenant, space: row.space, type: row.to_type, key: row.to_key}) \
+                     DELETE r",
+                )
+                .param("tenant", tenant)
+                .param("rows", rows),
+            )
+            .await?;
+        }
+        for chunk in remove_nodes.chunks(CHUNK) {
+            let rows: Vec<HashMap<String, BoltType>> = chunk
+                .iter()
+                .map(|n| {
+                    HashMap::from([
+                        ("space".to_owned(), n.space.as_str().into()),
+                        ("type".to_owned(), n.ty.as_str().into()),
+                        ("key".to_owned(), n.key.as_str().into()),
+                    ])
+                })
+                .collect();
+            txn.run(
+                query(
+                    "UNWIND $rows AS row \
+                     MATCH (n:PinakesNode {tenant: $tenant, space: row.space, type: row.type, key: row.key}) \
+                     DETACH DELETE n",
+                )
+                .param("tenant", tenant)
+                .param("rows", rows),
+            )
+            .await?;
+        }
         let mut by_type: BTreeMap<&str, Vec<&NodeRecord>> = BTreeMap::new();
         for n in nodes {
             by_type.entry(n.ty.as_str()).or_default().push(n);
         }
-        let mut txn = graph.start_txn().await?;
         for (ty, list) in by_type {
             // A label can't be a parameter; type names are validated identifiers.
             validate_name("node type", ty).map_err(anyhow::Error::msg)?;
             let cypher = format!(
                 "UNWIND $rows AS row \
                  MERGE (n:PinakesNode {{tenant: $tenant, space: row.space, type: $type, key: row.key}}) \
-                 SET n.name = row.name, n.aliases = row.aliases, n:`{ty}`"
+                 SET n.name = row.name, n.aliases = row.aliases, \
+                     n.properties = row.properties, n:`{ty}`"
             );
             for chunk in list.chunks(CHUNK) {
                 let rows: Vec<HashMap<String, BoltType>> =
@@ -190,7 +244,7 @@ impl GraphStore for Neo4jGraphStore {
                 query(
                     "MATCH (n:PinakesNode {tenant: $tenant}) \
                      RETURN n.space AS space, n.type AS type, n.key AS key, n.name AS name, \
-                            n.aliases AS aliases \
+                            n.aliases AS aliases, n.properties AS properties \
                      ORDER BY space, type, key",
                 )
                 .param("tenant", tenant),
@@ -205,6 +259,10 @@ impl GraphStore for Neo4jGraphStore {
                 aliases: row
                     .get::<Option<Vec<String>>>("aliases")?
                     .unwrap_or_default(),
+                properties: match row.get::<Option<String>>("properties")? {
+                    Some(json) => serde_json::from_str(&json)?,
+                    None => Default::default(),
+                },
             });
         }
         let mut rows = graph

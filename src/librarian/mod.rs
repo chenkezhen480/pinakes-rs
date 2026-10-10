@@ -14,6 +14,7 @@
 //! The librarian never writes graph data. Schema descriptions go through [`Librarian::describe`];
 //! structural fields come from the stored definition, never from the LLM.
 
+pub mod acquire;
 mod batch;
 pub mod documents;
 pub mod edit;
@@ -91,6 +92,7 @@ pub struct Description {
 pub enum ProposalStatus {
     Held,
     Approved,
+    Rejected,
 }
 
 impl ProposalStatus {
@@ -98,6 +100,7 @@ impl ProposalStatus {
         match self {
             ProposalStatus::Held => "held",
             ProposalStatus::Approved => "approved",
+            ProposalStatus::Rejected => "rejected",
         }
     }
 }
@@ -130,6 +133,16 @@ pub struct Proposal {
     pub user: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
+    /// A page found outside, proposed as a source to file (`crate::acquisition`); its record
+    /// is `source`, and it has no edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<Box<crate::acquisition::Candidate>>,
+    /// Why a person rejected it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// An agent's draft of changes to a graph space (`graph::draft`); it has no edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<Box<crate::graph::draft::GraphDraft>>,
 }
 
 /// A new proposal id: `p_`, the tenant folder's hash (so the admin route finds the tenant, as
@@ -1544,6 +1557,9 @@ async fn hold(
         edits,
         user: writer.user().map(|u| u.dir.clone()),
         groups: writer.groups().iter().map(|g| g.dir.clone()).collect(),
+        candidate: None,
+        reason: None,
+        graph: None,
     };
     tenant.store.put_proposal(&p).await?;
     tracing::info!(

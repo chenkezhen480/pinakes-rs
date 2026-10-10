@@ -127,6 +127,13 @@ pub async fn delete(tenant: &Arc<Tenant>, owner: &Owner, actor: &str) -> anyhow:
     .await
     .context("removing the folder panicked")??;
 
+    // What acquisition kept of the owner's gaps (their search terms) goes too; before the
+    // store's own deletion, whose checkpoint then overwrites the old rows in the file as well.
+    crate::acquisition::forget_owner(tenant, &dir).await?;
+    // Graph drafts a deleted user wrote into hold their reasons and names: they go whole.
+    if let Owner::User(_) = owner {
+        crate::api::draft::forget_author(tenant, &dir).await?;
+    }
     tenant.store.delete_audience(&dir).await?;
     // Lint must not bring the owner's search terms back from the traces kept until they
     // expire: it skips the owner's searches made before now.

@@ -9,7 +9,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
 
-use super::def::{EdgeRecord, GraphData, NodeRecord};
+use super::def::{EdgeRecord, GraphData, NodeKey, NodeRecord};
 use super::store::GraphStore;
 
 const SCHEMA: &str = r#"
@@ -20,6 +20,7 @@ const SCHEMA: &str = r#"
         key     TEXT NOT NULL,
         name    TEXT NOT NULL,
         aliases TEXT NOT NULL,   -- JSON array
+        properties TEXT NOT NULL DEFAULT '{}',   -- JSON object
         PRIMARY KEY (tenant, space, type, key)
     );
     CREATE TABLE IF NOT EXISTS edges (
@@ -62,6 +63,15 @@ impl SqliteGraphStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "secure_delete", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        // A file made before node properties gets their column.
+        let has_properties = conn
+            .prepare("SELECT 1 FROM pragma_table_info('nodes') WHERE name = 'properties'")?
+            .exists([])?;
+        if !has_properties {
+            conn.execute_batch(
+                "ALTER TABLE nodes ADD COLUMN properties TEXT NOT NULL DEFAULT '{}'",
+            )?;
+        }
         Ok(conn)
     }
 
@@ -106,19 +116,60 @@ impl GraphStore for SqliteGraphStore {
     }
 
     async fn write(&self, nodes: &[NodeRecord], edges: &[EdgeRecord]) -> anyhow::Result<()> {
+        self.apply(&[], &[], nodes, edges).await
+    }
+
+    async fn apply(
+        &self,
+        remove_nodes: &[NodeKey],
+        remove_edges: &[EdgeRecord],
+        nodes: &[NodeRecord],
+        edges: &[EdgeRecord],
+    ) -> anyhow::Result<()> {
+        let (gone_nodes, gone_edges) = (remove_nodes.to_vec(), remove_edges.to_vec());
         let (nodes, edges) = (nodes.to_vec(), edges.to_vec());
         self.with_conn(true, move |c, tenant| {
             let tx = c.transaction()?;
             {
+                let mut unlink = tx.prepare(
+                    "DELETE FROM edges WHERE tenant = ?1 AND space = ?2 AND type = ?3
+                     AND from_type = ?4 AND from_key = ?5 AND to_type = ?6 AND to_key = ?7",
+                )?;
+                for e in &gone_edges {
+                    unlink.execute(params![
+                        tenant,
+                        e.space,
+                        e.ty,
+                        e.from_type,
+                        e.from_key,
+                        e.to_type,
+                        e.to_key
+                    ])?;
+                }
+                let mut drop_edges = tx.prepare(
+                    "DELETE FROM edges WHERE tenant = ?1 AND space = ?2
+                     AND ((from_type = ?3 AND from_key = ?4) OR (to_type = ?3 AND to_key = ?4))",
+                )?;
+                let mut drop_node = tx.prepare(
+                    "DELETE FROM nodes WHERE tenant = ?1 AND space = ?2 AND type = ?3 AND key = ?4",
+                )?;
+                for n in &gone_nodes {
+                    drop_edges.execute(params![tenant, n.space, n.ty, n.key])?;
+                    drop_node.execute(params![tenant, n.space, n.ty, n.key])?;
+                }
                 let mut put = tx.prepare(
-                    "INSERT INTO nodes (tenant, space, type, key, name, aliases)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "INSERT INTO nodes (tenant, space, type, key, name, aliases, properties)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT (tenant, space, type, key)
-                     DO UPDATE SET name = excluded.name, aliases = excluded.aliases",
+                     DO UPDATE SET name = excluded.name, aliases = excluded.aliases,
+                     properties = excluded.properties",
                 )?;
                 for n in &nodes {
                     let aliases = serde_json::to_string(&n.aliases)?;
-                    put.execute(params![tenant, n.space, n.ty, n.key, n.name, aliases])?;
+                    let properties = serde_json::to_string(&n.properties)?;
+                    put.execute(params![
+                        tenant, n.space, n.ty, n.key, n.name, aliases, properties
+                    ])?;
                 }
                 let mut link = tx.prepare(
                     "INSERT OR IGNORE INTO edges
@@ -147,8 +198,8 @@ impl GraphStore for SqliteGraphStore {
     async fn load(&self) -> anyhow::Result<GraphData> {
         self.with_conn(false, |c, tenant| {
             let mut stmt = c.prepare(
-                "SELECT space, type, key, name, aliases FROM nodes WHERE tenant = ?1
-                 ORDER BY space, type, key",
+                "SELECT space, type, key, name, aliases, properties FROM nodes
+                 WHERE tenant = ?1 ORDER BY space, type, key",
             )?;
             let nodes = stmt
                 .query_map(params![tenant], |r| {
@@ -158,16 +209,18 @@ impl GraphStore for SqliteGraphStore {
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
                         r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
                     ))
                 })?
                 .map(|row| {
-                    let (space, ty, key, name, aliases) = row?;
+                    let (space, ty, key, name, aliases, properties) = row?;
                     Ok(NodeRecord {
                         space,
                         ty,
                         key,
                         name,
                         aliases: serde_json::from_str(&aliases)?,
+                        properties: serde_json::from_str(&properties)?,
                     })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
@@ -248,6 +301,7 @@ mod tests {
             key: key.into(),
             name: name.into(),
             aliases: vec![format!("{name} alias")],
+            properties: Default::default(),
         };
         (
             vec![
@@ -289,5 +343,33 @@ mod tests {
         assert_eq!(b.load().await.unwrap(), GraphData::default());
         a.delete_all().await.unwrap();
         assert_eq!(a.load().await.unwrap(), GraphData::default());
+    }
+
+    /// A file made before node properties gets their column, and keeps its nodes.
+    #[tokio::test]
+    async fn an_older_file_gets_the_properties_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.sqlite");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE nodes (tenant TEXT NOT NULL, space TEXT NOT NULL, type TEXT NOT NULL,
+                 key TEXT NOT NULL, name TEXT NOT NULL, aliases TEXT NOT NULL,
+                 PRIMARY KEY (tenant, space, type, key));
+                 INSERT INTO nodes VALUES ('a', 'mainland', 'order', '1', 'Order 1', '[]');",
+            )
+            .unwrap();
+        }
+        let store = SqliteGraphStore::open(&path, "a").unwrap();
+        let loaded = store.load().await.unwrap();
+        assert_eq!(loaded.nodes.len(), 1);
+        assert!(loaded.nodes[0].properties.is_empty());
+        let mut n = loaded.nodes[0].clone();
+        n.properties.insert("total".into(), serde_json::json!(99.5));
+        store.write(&[n], &[]).await.unwrap();
+        assert_eq!(
+            store.load().await.unwrap().nodes[0].properties["total"],
+            99.5
+        );
     }
 }

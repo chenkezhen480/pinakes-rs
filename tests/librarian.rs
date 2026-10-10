@@ -45,6 +45,7 @@ async fn shopline(llm: &Arc<FakeLlm>) -> (TestApp, String) {
 /// verify, with `plan` deciding the edits.
 fn model(plan: impl Fn(&str, usize) -> Value + Send + Sync + 'static) -> Arc<FakeLlm> {
     FakeLlm::new(move |step, msg, n| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Plan => plan(msg, n).to_string(),
         Step::Verify => all_ok(msg),
         Step::Describe => describe_from_definition(msg),
@@ -286,6 +287,7 @@ async fn every_memory_is_anchored() {
 #[tokio::test]
 async fn unsupported_edits_are_held_for_review() {
     let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Plan => json!({ "edits": [create(
             &format!("{}/free-shipping-threshold", folder(msg)),
             "Free shipping threshold",
@@ -557,6 +559,7 @@ async fn no_librarian_means_503() {
 #[tokio::test]
 async fn schema_descriptions_come_from_the_librarian() {
     let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Describe if msg.contains("\"schema\": \"down\"") => UNREACHABLE.into(),
         Step::Describe if msg.contains("\"coupon\"") => UNREACHABLE.into(),
         Step::Describe => {
@@ -691,6 +694,7 @@ async fn schema_descriptions_come_from_the_librarian() {
 #[tokio::test]
 async fn hand_edits_are_verified() {
     let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Verify if msg.contains("99 yuan") => all_rejected(msg, "no page says 99 yuan"),
         Step::Verify => all_ok(msg),
         Step::Plan => NO_EDITS.into(),

@@ -23,6 +23,10 @@ pub enum Step {
     Read,
     /// Linting the wiki.
     Lint,
+    /// Acquisition: choosing among the trusted sites' pages that match a gap.
+    Rank,
+    /// Acquisition: screening a fetched page.
+    Screen,
 }
 
 type Reply = dyn Fn(Step, &str, usize) -> String + Send + Sync;
@@ -76,6 +80,8 @@ impl LlmClient for FakeLlm {
             s if s == prompts::MATCH => Step::Match,
             s if s == prompts::READ => Step::Read,
             s if s == prompts::LINT => Step::Lint,
+            s if s == prompts::ACQUIRE_RANK => Step::Rank,
+            s if s == prompts::ACQUIRE_SCREEN => Step::Screen,
             _ => anyhow::bail!("unknown prompt"),
         };
         let n = {
@@ -361,6 +367,7 @@ pub fn describe_from_definition(msg: &str) -> String {
 /// that don't look at the librarian run with.
 pub fn describer() -> Arc<FakeLlm> {
     FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Plan => NO_EDITS.into(),
         Step::Verify => all_ok(msg),
         Step::Describe => describe_from_definition(msg),

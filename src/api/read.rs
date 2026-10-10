@@ -60,6 +60,9 @@ pub struct ReadItem {
     /// Already read in this session: the text is left out.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub already_read: bool,
+    /// A page written from a page found outside, or such a source itself: lower trust.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
     pub links: Vec<LinkSummary>,
     /// `not_found`, `unreadable` (the page's file can't be parsed) or `heading_not_found`;
     /// the other single-value fields are then absent and `links` is empty (lists are always
@@ -78,6 +81,7 @@ impl ReadItem {
             heading: None,
             text: None,
             already_read: false,
+            external: false,
             links: Vec::new(),
             error: Some(error),
         }
@@ -191,10 +195,23 @@ pub async fn read(
                 .iter()
                 .find(|(c, _)| c == cited)
                 .and_then(|(_, t)| t.clone());
+            // A page fetched from outside whose license didn't let its text be kept: its
+            // address is what is left to read.
+            let dropped = text
+                .as_deref()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+                .filter(|r| r["external"]["kept"] == false)
+                .map(|r| {
+                    format!(
+                        "The text of this source was not kept (its license doesn't say copies may be kept); read it at {}",
+                        r["external"]["url"].as_str().unwrap_or("its address")
+                    )
+                });
             // Lines are of the document's text, numbered as the librarian read it.
-            let text = match lines {
-                None => text,
-                Some((from, to)) => text
+            let text = match (lines, dropped) {
+                (_, Some(note)) => Some(note),
+                (None, None) => text,
+                (Some((from, to)), None) => text
                     .as_deref()
                     .and_then(documents::content_of)
                     .and_then(|c| documents::lines_of(&c, from, to)),
@@ -207,6 +224,7 @@ pub async fn read(
                 .session
                 .as_deref()
                 .is_some_and(|s| tenant.reads.record(user_dir, s, &id, None));
+            let external = crate::librarian::sources::is_external(cited);
             out.push(ReadItem {
                 id,
                 kind: None,
@@ -215,6 +233,7 @@ pub async fn read(
                 heading: None,
                 text: (!already_read).then_some(text),
                 already_read,
+                external,
                 links: Vec::new(),
                 error: None,
             });
@@ -258,6 +277,11 @@ pub async fn read(
             heading,
             text: (!already_read).then_some(text),
             already_read,
+            external: page
+                .front
+                .sources
+                .iter()
+                .any(|s| crate::librarian::sources::is_external(s)),
             links,
             error: None,
         });

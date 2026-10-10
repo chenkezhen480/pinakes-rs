@@ -29,6 +29,40 @@ pub struct Prompt {
 pub trait LlmClient: Send + Sync {
     /// The model's reply to one prompt: a JSON object of the prompt's schema, as text.
     async fn complete(&self, prompt: &Prompt) -> anyhow::Result<String>;
+
+    /// The reply, and how many tokens the call used (input and output): as the API reports
+    /// them, or estimated from the text when it doesn't.
+    async fn complete_counted(&self, prompt: &Prompt) -> anyhow::Result<(String, u64)> {
+        let reply = self.complete(prompt).await?;
+        let used = estimate_tokens(&prompt.system)
+            + estimate_tokens(&prompt.user)
+            + estimate_tokens(&reply);
+        Ok((reply, used))
+    }
+}
+
+/// About how many tokens a text costs: a CJK character about one, other text about a quarter
+/// of a token per character.
+pub fn estimate_tokens(text: &str) -> u64 {
+    let tenths: u64 = text
+        .chars()
+        .map(|c| if c as u32 >= 0x2E80 { 10 } else { 3 })
+        .sum();
+    tenths / 10 + 1
+}
+
+/// The tokens a reply's `usage` reports, if it does: input (cached or not) and output.
+pub(crate) fn reported_usage(reply: &serde_json::Value) -> Option<u64> {
+    let u = reply.get("usage")?;
+    let n = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    if let Some(total) = u.get("total_tokens").and_then(serde_json::Value::as_u64) {
+        return Some(total);
+    }
+    let sum = n("input_tokens")
+        + n("output_tokens")
+        + n("cache_read_input_tokens")
+        + n("cache_creation_input_tokens");
+    (sum > 0).then_some(sum)
 }
 
 /// The librarian's model: one model for every step.

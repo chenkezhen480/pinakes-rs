@@ -87,6 +87,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   matcher from the graph data.
 - Entity references: `schema:type` for a node type, `space:type/key` for a node. Space names are
   unique in a tenant and never equal a schema name.
+- Agents change graph data only by proposing (`POST /graph/draft`, MCP `propose_graph_change`):
+  one pending draft per space, every change checked against the graph as the draft would leave
+  it, applied whole only when the admin approves (`graph::draft`, `GraphStore::apply`). Graph
+  data never touches the wiki.
 - Graph spaces are shared (default), private (owner only) or restricted (member users and groups).
   Compute the caller's visible spaces once per request and drop everything from other spaces
   before responding; edges never cross spaces; hidden nodes are 404.
@@ -105,6 +109,24 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Parallel computing goes through `par` (one shared pool sized by `[server] threads`, 4 by
   default, fewer on a smaller machine); never spawn compute threads or size work by
   `available_parallelism` elsewhere. The embedding model and the async runtime use the same number.
+
+- Acquisition (M9, `src/acquisition/`, the librarian's part in `librarian::acquire`) follows a
+  lint run only when the deployment (`[acquisition]`) and the tenant (`PUT
+  /admin/tenants/{id}/acquisition`) both turn it on. Only the tenant's allowlisted sites are
+  ever read (a crawl into a local index: robots.txt, sitemaps, same-site links; no text kept);
+  no search engine or other third party is asked anything, and gaps are matched on the
+  service. Nothing it finds enters the wiki without an admin's approval: a candidate is a held
+  proposal of a source, filed through the normal expertise ingest when approved (an upload with
+  one review step more). Fetched text is shown to the model only between markers as data, and
+  screened before anyone is asked; fetches reach only allowlisted, public hosts (redirects
+  included). Tests use a local stand-in for the trusted site (`tests/acquisition.rs`); the real
+  model's screening: `PINAKES_TEST_LLM=1 cargo test --test acquisition_live -- --nocapture`;
+  reading a real site: `PINAKES_TEST_CRAWL=<domain> PINAKES_TEST_CONVERTER=http://127.0.0.1:8090
+  cargo test --test crawl_live -- --nocapture`.
+- Large tenants' page vectors get a graph index per search slot (`search::hnsw`, our own HNSW
+  over the snapshot's int8 rows; `index/vectors-<slot>.hnsw` holds only lists and 64-bit keys),
+  from `[search] vector_graph_rows` rows on; it follows every snapshot update, deletions
+  included. `PINAKES_TEST_GRAPH_ROWS=1` forces it in `meaning_testset`.
 
 - The whole stack: `docker compose up -d --build` (needs `model.conf`;
   the image's config is `docker/config.toml`, kept in step with `config.toml`). The test chat

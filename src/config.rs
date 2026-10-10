@@ -36,6 +36,65 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub acquisition: AcquisitionConfig,
+}
+
+/// Filling gaps from outside (design, "Filling gaps from outside, with approval"). Off unless
+/// turned on here and, for each tenant, by the admin (`PUT /admin/tenants/{id}/acquisition`).
+/// Only the tenant's trusted sites are read; nothing else is asked.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcquisitionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Tokens acquisition's own model calls may use per tenant and day (UTC).
+    #[serde(default = "default_daily_token_budget")]
+    pub daily_token_budget: u64,
+    /// Most pages read per trusted site.
+    #[serde(default = "default_crawl_pages")]
+    pub crawl_pages_per_site: usize,
+    /// Days before a tenant's sites are read again (at once when its allowlist changes).
+    #[serde(default = "default_crawl_days")]
+    pub crawl_every_days: u32,
+    /// The pause between two requests to the sites, so none is pressed.
+    #[serde(default = "default_crawl_delay")]
+    pub crawl_delay_ms: u64,
+    /// Lets pages be fetched from this machine or private networks. Only for tests: a tenant's
+    /// allowlist must never reach the service's own network.
+    #[serde(default)]
+    pub allow_private_hosts: bool,
+    /// Read and ignored: the search providers of the configs shipped before M9 (`providers =
+    /// []`), so they still start; no search engine is used.
+    #[serde(default)]
+    pub providers: Option<serde::de::IgnoredAny>,
+}
+
+impl Default for AcquisitionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            daily_token_budget: default_daily_token_budget(),
+            crawl_pages_per_site: default_crawl_pages(),
+            crawl_every_days: default_crawl_days(),
+            crawl_delay_ms: default_crawl_delay(),
+            allow_private_hosts: false,
+            providers: None,
+        }
+    }
+}
+
+fn default_crawl_pages() -> usize {
+    500
+}
+fn default_crawl_days() -> u32 {
+    7
+}
+fn default_crawl_delay() -> u64 {
+    1000
+}
+fn default_daily_token_budget() -> u64 {
+    200_000
 }
 
 /// Open tenants in memory (design, "How it stays fast").
@@ -346,6 +405,10 @@ pub struct SearchConfig {
     /// Switches for experiments; leave unset in normal use.
     #[serde(default)]
     pub ablation: crate::search::Ablation,
+    /// From this many page vectors (rows) on, a tenant keeps a graph index over them and
+    /// meaning searches walk it instead of comparing every row (0: never).
+    #[serde(default = "default_vector_graph_rows")]
+    pub vector_graph_rows: usize,
 }
 
 /// The memory-to-knowledge hop (design, "How one search runs", step 4).
@@ -374,6 +437,7 @@ impl SearchConfig {
             "default_mode": self.default_mode,
             "hop": self.hop,
             "embedding": embedding_model,
+            "vector_graph_rows": self.vector_graph_rows,
         });
         hex::encode(&Sha256::digest(shaping.to_string().as_bytes())[..8])
     }
@@ -387,6 +451,7 @@ impl Default for SearchConfig {
             default_mode: crate::search::Mode::default(),
             hop: HopConfig::default(),
             ablation: crate::search::Ablation::default(),
+            vector_graph_rows: default_vector_graph_rows(),
         }
     }
 }
@@ -591,6 +656,11 @@ fn default_groups_claim() -> String {
 fn default_session_idle_minutes() -> u64 {
     30
 }
+/// About 25,000 pages, where comparing every row starts to cost more than walking the graph
+/// (design, "As built in M9").
+fn default_vector_graph_rows() -> usize {
+    100_000
+}
 fn default_store_file() -> String {
     "pinakes.sqlite".into()
 }
@@ -792,6 +862,29 @@ slots = { memories = 40, knowledge = 2, relations = 6 }
         let cfg = Config::from_toml_str("[server]\nport = 9000\n[acquisition]\nenabled = false\n")
             .unwrap();
         assert_eq!(cfg.server.port, 9000);
+    }
+
+    /// A config of before M9, with the search providers it named, still loads.
+    #[test]
+    fn an_older_acquisition_section_still_loads() {
+        let cfg = Config::from_toml_str(
+            "[acquisition]
+enabled = false
+providers = []
+daily_token_budget = 200000
+",
+        )
+        .unwrap();
+        assert!(cfg.acquisition.providers.is_some());
+        assert_eq!(cfg.acquisition.crawl_pages_per_site, 500);
+        assert!(
+            Config::from_toml_str(
+                "[acquisition]
+search_url = \"x\"
+"
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -56,6 +56,9 @@ pub struct NodeOut {
     pub key: String,
     pub name: String,
     pub aliases: Vec<String>,
+    /// Values of the properties its type declares.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub properties: std::collections::BTreeMap<String, serde_json::Value>,
     /// Edges from the node the walk started at.
     pub depth: usize,
 }
@@ -92,6 +95,7 @@ fn node_out(g: &GraphSnapshot, n: NodeIndex, depth: usize) -> NodeOut {
         key: d.key.clone(),
         name: d.name.clone(),
         aliases: d.aliases.clone(),
+        properties: d.properties.clone(),
         depth,
     }
 }

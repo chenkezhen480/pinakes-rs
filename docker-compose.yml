@@ -12,8 +12,14 @@
 # Published ports are bound to 127.0.0.1 only; set PINAKES_PORT (such as 8080) to expose the
 # service on every interface. Search traces name the code that answered: build with
 # `PINAKES_GIT_COMMIT=$(git rev-parse --short=12 HEAD)`, or they say `unknown`.
+# Everything is named `pinakes`, whatever the folder is called: the project (so volumes are
+# `pinakes_pinakes-data` and `pinakes_neo4j-data`), the containers and the images.
+name: pinakes
+
 services:
   pinakes:
+    container_name: pinakes
+    image: pinakes:latest
     build:
       context: .
       args:
@@ -35,14 +41,17 @@ services:
       HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
+      # Started once the converter answers (its image's healthcheck): an upload right after
+      # `up` would otherwise find it still loading.
       converter:
-        condition: service_started
+        condition: service_healthy
     networks: [default, internal]
     restart: unless-stopped
 
   neo4j:
     # Optional: only with `backend = "neo4j"` (start Pinakes after it is healthy).
     profiles: [neo4j]
+    container_name: pinakes-neo4j
     # Pinned: the version the neo4rs driver (0.9.0-rc.10) is tested against here.
     image: neo4j:5.26.28
     environment:
@@ -63,6 +72,8 @@ services:
   converter:
     # Uploads are untrusted: no root, nothing writable but a small /tmp, no capabilities,
     # bounded memory and processes, and no way out: the internal network reaches only Pinakes.
+    container_name: pinakes-converter
+    image: pinakes-converter:latest
     build: ./converter
     networks: [internal]
     read_only: true
@@ -77,6 +88,8 @@ services:
   # `PINAKES_TEST_CONVERTER` (a published port needs a network with a way out).
   converter-dev:
     profiles: [dev]
+    container_name: pinakes-converter-dev
+    image: pinakes-converter:latest
     build: ./converter
     ports:
       - "127.0.0.1:8090:8090"

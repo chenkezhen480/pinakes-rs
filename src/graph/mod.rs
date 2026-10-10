@@ -8,6 +8,7 @@
 
 pub mod def;
 pub mod describe;
+pub mod draft;
 pub mod migrate;
 pub mod neo4j;
 pub mod sqlite;
@@ -96,7 +97,8 @@ impl GraphBackend {
 #[derive(Debug, Clone)]
 pub struct SpaceEntry {
     pub def: SpaceDef,
-    owner_dir: Option<String>,
+    /// Its owner's user folder, when it has one.
+    pub owner_dir: Option<String>,
     user_dirs: Vec<String>,
     group_dirs: Vec<String>,
 }
@@ -157,6 +159,8 @@ pub struct NodeData {
     pub key: String,
     pub name: String,
     pub aliases: Vec<String>,
+    /// Values of the properties its type declares.
+    pub properties: std::collections::BTreeMap<String, serde_json::Value>,
     /// `space:type/key`.
     pub id: String,
 }
@@ -250,10 +254,12 @@ impl Parts {
                         key: d.key.clone(),
                         name: d.name.clone(),
                         aliases: d.aliases.clone(),
+                        properties: d.properties.clone(),
                     });
                     self.data_sum = self.data_sum.wrapping_sub(old).wrapping_add(hash);
                     d.name = n.name;
                     d.aliases = n.aliases;
+                    d.properties = n.properties;
                 }
                 None => {
                     let ix = self.graph.add_node(NodeData {
@@ -262,6 +268,7 @@ impl Parts {
                         key: n.key,
                         name: n.name,
                         aliases: n.aliases,
+                        properties: n.properties,
                         id: id.clone(),
                     });
                     self.by_id.insert(id, ix);
@@ -431,9 +438,37 @@ impl GraphSnapshot {
         Self::build(schemas, spaces, data)
     }
 
+    /// The same schemas and spaces without some nodes (and every edge of theirs) and edges:
+    /// built again from the records left, which is fine for an approved change, not for every
+    /// write.
+    pub fn without(&self, nodes: &[def::NodeKey], edges: &[EdgeRecord]) -> Self {
+        let gone_nodes: std::collections::HashSet<(&str, &str, &str)> = nodes
+            .iter()
+            .map(|n| (n.space.as_str(), n.ty.as_str(), n.key.as_str()))
+            .collect();
+        let gone_edges: std::collections::HashSet<&EdgeRecord> = edges.iter().collect();
+        let mut data = self.data();
+        data.nodes
+            .retain(|n| !gone_nodes.contains(&(n.space.as_str(), n.ty.as_str(), n.key.as_str())));
+        data.edges.retain(|e| {
+            !gone_edges.contains(e)
+                && !gone_nodes.contains(&(
+                    e.space.as_str(),
+                    e.from_type.as_str(),
+                    e.from_key.as_str(),
+                ))
+                && !gone_nodes.contains(&(e.space.as_str(), e.to_type.as_str(), e.to_key.as_str()))
+        });
+        Self::build(
+            self.schemas.values().cloned().collect(),
+            self.spaces.iter().map(|s| s.def.clone()).collect(),
+            data,
+        )
+    }
+
     /// The same schemas and spaces with nodes and edges added; a node with the type and key of
-    /// a stored one in the same space replaces its name and aliases. The graph is copied and
-    /// changed, not built again from its records.
+    /// a stored one in the same space replaces its name, aliases and properties. The graph is
+    /// copied and changed, not built again from its records.
     pub fn with_data(&self, nodes: Vec<NodeRecord>, edges: Vec<EdgeRecord>) -> Self {
         let mut parts = Parts {
             graph: self.graph.clone(),
@@ -460,6 +495,7 @@ impl GraphSnapshot {
                 key: n.key.clone(),
                 name: n.name.clone(),
                 aliases: n.aliases.clone(),
+                properties: n.properties.clone(),
             })
             .collect();
         let edges = self
@@ -497,6 +533,19 @@ impl GraphSnapshot {
     /// A node by its reference, `space:type/key`.
     pub fn node(&self, id: &str) -> Option<NodeIndex> {
         self.by_id.get(id).copied()
+    }
+
+    /// Whether an edge is stored.
+    pub fn has_edge(&self, e: &EdgeRecord) -> bool {
+        let (Some(a), Some(b)) = (
+            self.node(&def::node_ref(&e.space, &e.from_type, &e.from_key)),
+            self.node(&def::node_ref(&e.space, &e.to_type, &e.to_key)),
+        ) else {
+            return false;
+        };
+        self.graph
+            .edges_connecting(a, b)
+            .any(|x| x.weight().ty == e.ty)
     }
 
     /// The schema of a node's space.
@@ -689,6 +738,7 @@ mod tests {
             key: key.into(),
             name: name.into(),
             aliases: vec![],
+            properties: Default::default(),
         };
         let edge = |space: &str, o: &str, c: &str| EdgeRecord {
             space: space.into(),
@@ -752,6 +802,7 @@ mod tests {
                 key: "c_5521".into(),
                 name: "Lin Xiao".into(),
                 aliases: vec![],
+                properties: Default::default(),
             }],
             vec![],
         );

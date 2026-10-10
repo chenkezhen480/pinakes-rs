@@ -23,10 +23,16 @@ pub async fn run(
     // One run at a time: a run queued or running already is the answer, so repeated calls
     // don't stack model-backed runs on the write queue. Seen by every caller of the tenant:
     // the run is the tenant's, not one caller's.
+    // Acquisition follows each lint run, when it is on (`crate::acquisition`).
+    let app2 = app.clone();
     let info = app.jobs.submit_once(
         &dir_name,
         "lint",
-        Box::pin(async move { librarian.lint(tenant).await }),
+        Box::pin(async move {
+            let result = librarian.lint(tenant.clone()).await?;
+            crate::acquisition::after_lint(&app2, &tenant).await;
+            Ok(result)
+        }),
     );
     Ok((StatusCode::ACCEPTED, Json(info)))
 }

@@ -27,7 +27,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::AppState;
-use crate::api::{graph, insert, read, search};
+use crate::api::{draft, graph, insert, read, search};
 use crate::error::ApiError;
 use crate::identity::Scope;
 
@@ -37,7 +37,7 @@ pub(crate) const INSTRUCTIONS: &str = include_str!("../prompts/tools/instruction
 const SESSION_HEADER: &str = "mcp-session-id";
 
 /// The tools, in the order clients list them: the entry, the follow-ups, then the records.
-pub(crate) const TOOLS: [(&str, &str); 7] = [
+pub(crate) const TOOLS: [(&str, &str); 8] = [
     ("search", include_str!("../prompts/tools/search.md")),
     ("read", include_str!("../prompts/tools/read.md")),
     ("graph", include_str!("../prompts/tools/graph.md")),
@@ -53,6 +53,10 @@ pub(crate) const TOOLS: [(&str, &str); 7] = [
     (
         "record_preference",
         include_str!("../prompts/tools/record_preference.md"),
+    ),
+    (
+        "propose_graph_change",
+        include_str!("../prompts/tools/propose_graph_change.md"),
     ),
 ];
 
@@ -137,9 +141,45 @@ pub(crate) fn schema(tool: &str) -> Value {
             }),
             vec!["statement"],
         ),
+        "propose_graph_change" => (
+            json!({
+                "space": text("The graph space, as a node id names it (the part before the colon)."),
+                "changes": {
+                    "type": "array",
+                    "maxItems": crate::graph::draft::MAX_CHANGES,
+                    "description": "Changes to add to the space's pending draft, in order; leave \
+                        out to only see the draft.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": { "type": "string",
+                                    "enum": ["put_node", "remove_node", "add_edge", "remove_edge"] },
+                            "type": text("The node type (put_node, remove_node) or relation \
+                                type (add_edge, remove_edge), from the space's schema."),
+                            "key": text("The node's key (put_node, remove_node)."),
+                            "name": text("The node's name (put_node); left out, it stays (a new \
+                                node's is its key)."),
+                            "aliases": list("Other names of the node (put_node), the whole list; \
+                                left out, they stay."),
+                            "properties": {
+                                "type": "object",
+                                "description": "Values of properties the node's type declares \
+                                    in the schema (put_node), merged in by name; null takes one out.",
+                            },
+                            "from": text("The edge's start as type/key (add_edge, remove_edge)."),
+                            "to": text("The edge's end as type/key (add_edge, remove_edge)."),
+                        },
+                        "required": ["op", "type"],
+                        "additionalProperties": false,
+                    },
+                },
+                "reason": text("Why, for the person who reviews it (required with changes)."),
+            }),
+            vec!["space"],
+        ),
         _ => unreachable!("every tool has a schema"),
     };
-    if tool != "record_preference" {
+    if !matches!(tool, "record_preference" | "propose_graph_change") {
         properties["session"] = text("The session from this task's first search result.");
     }
     json!({
@@ -154,7 +194,7 @@ fn tool(name: &'static str, description: &'static str) -> Tool {
     let Value::Object(schema) = schema(name) else {
         unreachable!("a schema is an object")
     };
-    let read_only = !name.starts_with("record_");
+    let read_only = !name.starts_with("record_") && name != "propose_graph_change";
     Tool::new(name, description, schema).annotate(
         ToolAnnotations::new()
             .read_only(read_only)
@@ -290,7 +330,9 @@ pub(crate) async fn run(
             Ok(out)
         }
         _ => {
-            if let Some(s) = session.filter(|_| name != "record_preference") {
+            if let Some(s) =
+                session.filter(|_| !matches!(name, "record_preference" | "propose_graph_change"))
+            {
                 args.insert("session".into(), json!(s));
             }
             match name {
@@ -306,6 +348,11 @@ pub(crate) async fn run(
                 ),
                 "path" => to_value(
                     graph::path(State(app), scope, Ok(Json(request(args)?)))
+                        .await?
+                        .0,
+                ),
+                "propose_graph_change" => to_value(
+                    draft::propose(State(app), scope, Ok(Json(request(args)?)))
                         .await?
                         .0,
                 ),

@@ -35,6 +35,7 @@ const SOUGHT: &str = "OKAPI3366";
 /// A librarian that files each record as one page holding its text.
 fn filer() -> Arc<FakeLlm> {
     FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Plan => {
             let dir = folder(msg);
             let edits: Vec<Value> = items(msg)

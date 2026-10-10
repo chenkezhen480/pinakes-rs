@@ -9,6 +9,7 @@
 
 use serde::Serialize;
 use serde_norway::{Mapping, Value};
+use std::collections::BTreeMap;
 
 use super::def::SchemaDef;
 use crate::kinds::Kind;
@@ -28,6 +29,8 @@ struct NodeFront<'a> {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     aliases: &'a [String],
     key: &'a str,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    properties: &'a BTreeMap<String, crate::graph::def::PropertyDef>,
 }
 
 #[derive(Serialize)]
@@ -115,6 +118,7 @@ pub fn describe(def: &SchemaDef, current: Option<&Page>, today: &str) -> Result<
                 .or_else(|| existing_str(current, "nodes", name, "zh")),
             aliases: &aliases,
             key: &n.key,
+            properties: &n.properties,
         };
         nodes.insert(Value::from(name.as_str()), to_value(&front));
     }

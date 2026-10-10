@@ -54,6 +54,7 @@ session_idle_minutes = 30      # read-tracker sessions expire after this idle ti
 languages = ["en", "zh"]
 default_mode = "keyword"       # (M5) keyword, semantic, both or auto, when a search doesn't say
 hop = { top_memories = 3 }     # (M5) the top memories whose knowledge anchors join the knowledge slot
+vector_graph_rows = 100000     # (M9) from this many page vectors on, meaning search walks a graph index; 0 never
 
 [trace]                        # search traces: <tenant>/logs/search-<date>.jsonl
 enabled = true
@@ -72,10 +73,14 @@ uri = "bolt://localhost:7687"
 user = "neo4j"
 password_env = "NEO4J_PASSWORD"   # the variable holding the password
 
-[acquisition]                  # (M9) off by default, opt-in per tenant
+[acquisition]                  # (M9) off by default; the admin turns it on per tenant, with the
+                               # sites it trusts: PUT /admin/tenants/{id}/acquisition. Only those
+                               # sites are read; no search engine is asked anything.
 enabled = false
-providers = []
-daily_token_budget = 200000
+daily_token_budget = 200000    # per tenant and day, acquisition's own model calls
+crawl_pages_per_site = 500     # most pages read per trusted site
+crawl_every_days = 7           # read the sites again after this many days (at once when the list changes)
+crawl_delay_ms = 1000          # pause between two requests to the sites
 
 [cache]                        # (M6) tenants in memory
 idle_minutes = 30              # a tenant unused this long frees its search snapshot and graph; 0 never

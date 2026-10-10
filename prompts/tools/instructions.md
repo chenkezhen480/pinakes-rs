@@ -19,6 +19,9 @@ How to use it:
    or that needed a new approach), `record_decision` when the user makes a decision,
    `record_preference` when the user states a preference. Recording is filed in the background; it
    is not searchable at once.
+6. When the graph is missing something or holds something wrong (a new character, a relation
+   that ended), `propose_graph_change`: it goes to a person for review, and nothing changes until
+   it is approved. See the space's pending draft first and build on it.
 
 You choose the order of calls and when you have enough. Nothing here calls an LLM on the read
 path: searches take milliseconds, so searching again is cheap.

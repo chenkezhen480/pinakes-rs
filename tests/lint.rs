@@ -52,6 +52,7 @@ fn update(page: &str) -> Value {
 /// Finds what is planted and fixes what it is asked to.
 fn linter() -> Arc<FakeLlm> {
     FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Lint => {
             let mut findings = Vec::new();
             for (id, kind, pages, keyword) in tasks(msg) {

@@ -121,6 +121,15 @@ const MIGRATIONS: &[&str] = &[
         hash TEXT NOT NULL
     );
 "#,
+    r#"
+    -- The trusted sites' pages acquisition's crawl indexed: no text, only what matching needs
+    -- (JSON of acquisition::crawl::CrawledPage).
+    CREATE TABLE crawled_pages (
+        url  TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        page TEXT NOT NULL
+    );
+"#,
 ];
 
 pub struct SqliteStore {
@@ -434,6 +443,76 @@ impl Store for SqliteStore {
         rows.iter()
             .map(|r| serde_json::from_str(r).context("a stored proposal"))
             .collect()
+    }
+
+    async fn proposals(&self) -> anyhow::Result<Vec<Proposal>> {
+        let rows: Vec<String> = self
+            .with_conn(|c| {
+                let mut stmt =
+                    c.prepare("SELECT proposal FROM proposals ORDER BY created_at, id")?;
+                stmt.query_map([], |r| r.get(0))?.collect()
+            })
+            .await?;
+        rows.iter()
+            .map(|r| serde_json::from_str(r).context("a stored proposal"))
+            .collect()
+    }
+
+    async fn delete_proposal(&self, id: &str) -> anyhow::Result<()> {
+        let id = id.to_owned();
+        self.with_conn(move |c| c.execute("DELETE FROM proposals WHERE id = ?1", params![id]))
+            .await?;
+        Ok(())
+    }
+
+    async fn crawled_pages(&self) -> anyhow::Result<Vec<crate::acquisition::crawl::CrawledPage>> {
+        let rows: Vec<String> = self
+            .with_conn(|c| {
+                let mut stmt = c.prepare("SELECT page FROM crawled_pages ORDER BY url")?;
+                stmt.query_map([], |r| r.get(0))?.collect()
+            })
+            .await?;
+        rows.iter()
+            .map(|r| serde_json::from_str(r).context("a stored crawled page"))
+            .collect()
+    }
+
+    async fn put_crawled_pages(
+        &self,
+        pages: &[crate::acquisition::crawl::CrawledPage],
+    ) -> anyhow::Result<()> {
+        let rows: Vec<(String, String, String)> = pages
+            .iter()
+            .map(|p| Ok((p.url.clone(), p.site.clone(), serde_json::to_string(p)?)))
+            .collect::<anyhow::Result<_>>()?;
+        self.with_conn_mut(move |c| {
+            let tx = c.transaction()?;
+            for (url, site, page) in &rows {
+                tx.execute(
+                    "INSERT INTO crawled_pages (url, site, page) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(url) DO UPDATE SET site = excluded.site, page = excluded.page",
+                    params![url, site, page],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_crawled_pages(&self, urls: &[String]) -> anyhow::Result<()> {
+        let urls = urls.to_vec();
+        self.with_conn_mut(move |c| {
+            let tx = c.transaction()?;
+            for url in &urls {
+                tx.execute("DELETE FROM crawled_pages WHERE url = ?1", params![url])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
+        Ok(())
     }
 
     async fn document(&self, id: &str) -> anyhow::Result<Option<Document>> {

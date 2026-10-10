@@ -34,6 +34,10 @@ impl OpenAiCompatible {
 #[async_trait]
 impl LlmClient for OpenAiCompatible {
     async fn complete(&self, prompt: &Prompt) -> anyhow::Result<String> {
+        Ok(self.complete_counted(prompt).await?.0)
+    }
+
+    async fn complete_counted(&self, prompt: &Prompt) -> anyhow::Result<(String, u64)> {
         let body = json!({
             "model": self.model,
             "max_tokens": prompt.max_tokens,
@@ -57,7 +61,13 @@ impl LlmClient for OpenAiCompatible {
             "openai_compatible",
         )
         .await?;
-        text_of(&reply)
+        let text = text_of(&reply)?;
+        let used = super::reported_usage(&reply).unwrap_or_else(|| {
+            super::estimate_tokens(&prompt.system)
+                + super::estimate_tokens(&prompt.user)
+                + super::estimate_tokens(&text)
+        });
+        Ok((text, used))
     }
 }
 

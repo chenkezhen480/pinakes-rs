@@ -286,7 +286,17 @@ async fn first_search(app: &TestApp, key: &str) -> Duration {
 
 async fn run(pages: usize) {
     println!("\n==== {pages} pages ====");
-    let mut app = TestApp::with_embedder("", Arc::new(Stand));
+    // `PINAKES_BENCH_GRAPH_ROWS` sets `[search] vector_graph_rows` (0: never a graph index).
+    let extra = match std::env::var("PINAKES_BENCH_GRAPH_ROWS") {
+        Ok(n) => format!(
+            "[search]
+vector_graph_rows = {}
+",
+            n.trim()
+        ),
+        Err(_) => String::new(),
+    };
+    let mut app = TestApp::with_embedder(&extra, Arc::new(Stand));
     let key = app.create_tenant(TENANT).await;
     let wiki_dir = app.wiki_dir(TENANT);
     testset::install_wiki(TENANT, &wiki_dir);
@@ -417,6 +427,59 @@ async fn run(pages: usize) {
         }
         let (p50, p95) = stats(&mut wall);
         println!("  {:<18} {p50:>6.2} ms {p95:>6.2} ms", "request");
+    }
+
+    // The graph index against the exact scan, on the same snapshot: every question's top ten
+    // pages per slot as the tenant sees them.
+    let snap = tenant.snapshot().await.unwrap();
+    let vectors = snap.vectors.as_ref().unwrap();
+    println!(
+        "vectors: {} rows, graph index: {}",
+        vectors.len(),
+        vectors.has_graph()
+    );
+    if vectors.has_graph() {
+        let (mut hits, mut wanted) = (0, 0);
+        let (mut graph_us, mut exact_us) = (Vec::new(), Vec::new());
+        for (_, body) in &queries {
+            let q = Stand
+                .embed(&[body["query"].as_str().unwrap().to_owned()])
+                .unwrap()
+                .remove(0);
+            for slot in [
+                pinakes::search::catalog::Slot::Memories,
+                pinakes::search::catalog::Slot::Knowledge,
+            ] {
+                let keep = |ord: usize| {
+                    let p = &snap.catalog.pages[ord];
+                    p.audience == "tenant" && p.slot == slot
+                };
+                let started = Instant::now();
+                let (graph, method) = vectors.nearest(&q, slot, keep, 50);
+                graph_us.push(started.elapsed().as_micros() as u64);
+                assert_eq!(method, pinakes::search::vectors::Method::Graph);
+                let started = Instant::now();
+                let exact = vectors.best(&q, keep);
+                exact_us.push(started.elapsed().as_micros() as u64);
+                // A page as similar as the exact scan's tenth counts: among equal scores
+                // either is right.
+                let Some(&(_, tenth)) = exact.get(9).or(exact.last()) else {
+                    continue;
+                };
+                wanted += exact.len().min(10);
+                hits += graph
+                    .iter()
+                    .take(10)
+                    .filter(|(_, s)| *s >= tenth - 1e-6)
+                    .count();
+            }
+        }
+        let (g50, g95) = stats(&mut graph_us);
+        let (e50, e95) = stats(&mut exact_us);
+        println!(
+            "graph vs exact, per slot: graph {g50:.2} ms (p95 {g95:.2}), exact {e50:.2} ms (p95 {e95:.2}), recall@10 {:.3} ({hits}/{wanted})",
+            hits as f64 / wanted.max(1) as f64
+        );
     }
 }
 

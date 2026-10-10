@@ -19,6 +19,7 @@
 //! 7. assemble: summaries, matching lines, routes, coverage and unmatched keywords.
 
 pub mod catalog;
+pub mod hnsw;
 pub mod index;
 pub mod names;
 pub mod relations;
@@ -452,6 +453,9 @@ pub struct Hit {
     pub about: Vec<String>,
     /// The raw records the page cites, as `/read` ids (`sources/<name>`).
     pub sources: Vec<String>,
+    /// The page was written from a page found outside (`crate::acquisition`): lower trust.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
     pub route: Route,
     pub read: bool,
 }
@@ -1125,9 +1129,11 @@ pub fn search(
 
     // 3 and 4. Search and ranking, per channel.
     let audiences = scope.audience_keys();
-    // Meaning: the query's similarity to every page the caller may see, found once and shared
-    // by both slots.
-    let mut by_meaning: Option<Vec<(usize, f32)>> = None;
+    // Meaning: the query, embedded once, and the pages most similar to it per slot. Compared
+    // exactly, every page the caller may see is scored at once for both slots; through the
+    // graph index, each slot is searched on its own.
+    let mut query_vector: Option<Vec<f32>> = None;
+    let mut by_meaning: HashMap<Slot, Vec<(usize, f32)>> = HashMap::new();
     let mut by_keywords: HashMap<Slot, Vec<(f32, usize)>> = HashMap::new();
     let mut run_channel = |slot: Slot,
                            mode: Mode,
@@ -1162,32 +1168,61 @@ pub fn search(
         if matches!(mode, Mode::Semantic | Mode::Both)
             && let Some((vectors, embedder)) = meaning
         {
-            if by_meaning.is_none() {
+            if query_vector.is_none() {
                 let started = std::time::Instant::now();
                 let v = tracing::info_span!("embed_query")
                     .in_scope(|| embedder.embed(&[req.query.trim().to_owned()]))?;
                 timings.push(("embed_query", micros(started)));
-                let q = v.into_iter().next().unwrap_or_default();
-                let started = std::time::Instant::now();
-                by_meaning = Some(tracing::info_span!("meaning_search").in_scope(|| {
-                    vectors.best(&q, |ord| {
-                        audiences.contains(&snap.catalog.pages[ord].audience)
-                    })
-                }));
-                timings.push(("meaning_search", micros(started)));
+                query_vector = Some(v.into_iter().next().unwrap_or_default());
             }
-            let found = by_meaning
-                .iter()
-                .flatten()
-                .filter(|(ord, _)| snap.catalog.pages[*ord].slot == slot);
-            // In `both` mode every keyword candidate gets its similarity too.
-            for (rank, &(ord, sim)) in found.enumerate() {
+            let q = query_vector.as_deref().unwrap_or_default();
+            if !by_meaning.contains_key(&slot) {
+                let started = std::time::Instant::now();
+                let visible = |ord: usize| audiences.contains(&snap.catalog.pages[ord].audience);
+                let both = tracing::info_span!("meaning_graph")
+                    .in_scope(|| vectors.nearest_both(q, &audiences, CANDIDATES));
+                if let Some([memories, knowledge]) = both {
+                    // The trace's timing says which ran: `meaning_graph` or `meaning_search`.
+                    let key = if memories.1 == vectors::Method::Graph
+                        || knowledge.1 == vectors::Method::Graph
+                    {
+                        "meaning_graph"
+                    } else {
+                        "meaning_search"
+                    };
+                    timings.push((key, micros(started)));
+                    by_meaning.insert(Slot::Memories, memories.0);
+                    by_meaning.insert(Slot::Knowledge, knowledge.0);
+                } else {
+                    let all =
+                        tracing::info_span!("meaning_search").in_scope(|| vectors.best(q, visible));
+                    timings.push(("meaning_search", micros(started)));
+                    for s in [Slot::Memories, Slot::Knowledge] {
+                        by_meaning.insert(
+                            s,
+                            all.iter()
+                                .copied()
+                                .filter(|(ord, _)| snap.catalog.pages[*ord].slot == s)
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            let found = by_meaning.get(&slot).map(Vec::as_slice).unwrap_or_default();
+            for (rank, &(ord, sim)) in found.iter().enumerate() {
                 match by_ord.get_mut(&ord) {
                     Some(e) => e.1 = Some(sim),
                     None if rank < CANDIDATES => {
                         by_ord.insert(ord, (None, Some(sim)));
                     }
                     None => {}
+                }
+            }
+            // In `both` mode every keyword candidate gets its similarity too; through the graph,
+            // a candidate the walk didn't reach is compared on its own.
+            for (&ord, e) in by_ord.iter_mut() {
+                if e.1.is_none() {
+                    e.1 = vectors.similarity(q, ord);
                 }
             }
         }
@@ -1257,7 +1292,7 @@ pub fn search(
     // which have their own entries.
     let embedded = |t: &[(&'static str, u64)]| -> u64 {
         t.iter()
-            .filter(|(k, _)| matches!(*k, "embed_query" | "meaning_search"))
+            .filter(|(k, _)| matches!(*k, "embed_query" | "meaning_search" | "meaning_graph"))
             .map(|(_, v)| v)
             .sum()
     };
@@ -1639,6 +1674,10 @@ fn hit(
             .iter()
             .map(|s| format!("{}{s}", crate::api::read::SOURCE_PREFIX))
             .collect(),
+        external: page
+            .sources
+            .iter()
+            .any(|s| crate::librarian::sources::is_external(s)),
     }
 }
 

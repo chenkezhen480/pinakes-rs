@@ -97,6 +97,10 @@ fn body(model: &str, prompt: &Prompt, shape: Shape) -> Value {
 #[async_trait]
 impl LlmClient for Anthropic {
     async fn complete(&self, prompt: &Prompt) -> anyhow::Result<String> {
+        Ok(self.complete_counted(prompt).await?.0)
+    }
+
+    async fn complete_counted(&self, prompt: &Prompt) -> anyhow::Result<(String, u64)> {
         let body = body(&self.model, prompt, self.shape);
         let reply = post_json(
             || {
@@ -109,7 +113,13 @@ impl LlmClient for Anthropic {
             "anthropic",
         )
         .await?;
-        reply_of(&reply, self.shape)
+        let text = reply_of(&reply, self.shape)?;
+        let used = super::reported_usage(&reply).unwrap_or_else(|| {
+            super::estimate_tokens(&prompt.system)
+                + super::estimate_tokens(&prompt.user)
+                + super::estimate_tokens(&text)
+        });
+        Ok((text, used))
     }
 }
 

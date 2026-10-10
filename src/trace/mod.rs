@@ -330,6 +330,21 @@ pub(crate) fn parse_date(s: &str) -> Option<i64> {
     ((1..=12).contains(&m) && (1..=31).contains(&d)).then(|| days_from_civil(y, m, d))
 }
 
+/// Whether `YYYY-MM-DD` is a day of the calendar (not February 30th).
+pub(crate) fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    let shaped = b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            _ => c.is_ascii_digit(),
+        });
+    shaped
+        && parse_date(s).is_some_and(|d| {
+            let (y, m, day) = civil_from_days(d);
+            format!("{y:04}-{m:02}-{day:02}") == s
+        })
+}
+
 // Howard Hinnant's civil calendar algorithms.
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };

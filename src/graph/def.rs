@@ -87,7 +87,59 @@ pub struct NodeTypeDef {
     pub zh: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// What a node of this type may hold besides its name and aliases, as the schema's author
+    /// declares it (decided with the user 2026-10-10).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, PropertyDef>,
 }
+
+/// A property a node type declares: the kind of value it holds, and what it means.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PropertyDef {
+    #[serde(rename = "type")]
+    pub ty: PropertyType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub en: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zh: Option<String>,
+}
+
+/// The kinds of property values: text, a number, a date (`YYYY-MM-DD`) or true/false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PropertyType {
+    Text,
+    Number,
+    Date,
+    Bool,
+}
+
+impl PropertyType {
+    fn as_str(self) -> &'static str {
+        match self {
+            PropertyType::Text => "text",
+            PropertyType::Number => "number",
+            PropertyType::Date => "date",
+            PropertyType::Bool => "bool",
+        }
+    }
+
+    /// Whether a value is of this kind.
+    fn holds(self, v: &serde_json::Value) -> bool {
+        match self {
+            PropertyType::Text => v
+                .as_str()
+                .is_some_and(|s| validate_text("a value", s).is_ok()),
+            PropertyType::Number => v.as_f64().is_some_and(f64::is_finite),
+            PropertyType::Bool => v.is_boolean(),
+            PropertyType::Date => v.as_str().is_some_and(crate::trace::is_date),
+        }
+    }
+}
+
+/// Most properties a node type may declare.
+pub const MAX_PROPERTIES: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -148,6 +200,21 @@ impl SchemaDef {
             validate_opt(&format!("en of node type {name}"), &def.en)?;
             validate_opt(&format!("zh of node type {name}"), &def.zh)?;
             validate_aliases(&format!("node type {name}"), &def.aliases)?;
+            if def.properties.len() > MAX_PROPERTIES {
+                return Err(format!(
+                    "node type {name} declares more than {MAX_PROPERTIES} properties"
+                ));
+            }
+            for (prop, d) in &def.properties {
+                validate_name("property", prop)?;
+                if matches!(prop.as_str(), "name" | "aliases" | "key" | "type" | "space") {
+                    return Err(format!(
+                        "property {prop} of node type {name} has a name every node has already"
+                    ));
+                }
+                validate_opt(&format!("en of property {prop}"), &d.en)?;
+                validate_opt(&format!("zh of property {prop}"), &d.zh)?;
+            }
         }
         for (name, def) in &self.relations {
             validate_name("relation type", name)?;
@@ -187,6 +254,27 @@ impl SchemaDef {
                     fill(&mut now.zh, &before.zh);
                     if now.aliases.is_empty() {
                         now.aliases.clone_from(&before.aliases);
+                    }
+                    // Properties are only added: one stays, with its kind of value.
+                    for (prop, was) in &before.properties {
+                        match now.properties.get_mut(prop) {
+                            Some(p) if p.ty == was.ty => {
+                                fill(&mut p.en, &was.en);
+                                fill(&mut p.zh, &was.zh);
+                            }
+                            Some(p) => {
+                                return Err(format!(
+                                    "property {prop} of node type {name} changes from {} to {}; only additions are allowed",
+                                    was.ty.as_str(),
+                                    p.ty.as_str()
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "property {prop} of node type {name} is removed; only additions are allowed"
+                                ));
+                            }
+                        }
                     }
                 }
                 None if usage.uses_node_type(&old.schema, name) => {
@@ -352,6 +440,9 @@ pub struct NodeRecord {
     pub name: String,
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Values of the properties its type declares.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, serde_json::Value>,
 }
 
 /// One edge of a space, as stored. Both ends are in the same space.
@@ -364,6 +455,15 @@ pub struct EdgeRecord {
     pub from_key: String,
     pub to_type: String,
     pub to_key: String,
+}
+
+/// Which node: its space, type and key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NodeKey {
+    pub space: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub key: String,
 }
 
 /// Every node and edge of one tenant.
@@ -385,6 +485,9 @@ pub struct NodeIn {
     pub name: Option<String>,
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Values of properties its type declares; a node written again replaces them all.
+    #[serde(default)]
+    pub properties: BTreeMap<String, serde_json::Value>,
 }
 
 /// An edge as a caller writes it: ends as `type/key` inside the request's space.
@@ -431,6 +534,28 @@ pub fn check_nodes(
         }
         validate_key(&format!("the key of a {} node", n.ty), &n.key)?;
         validate_opt(&format!("the name of {}/{}", n.ty, n.key), &n.name)?;
+        let declared = &schema.nodes[&n.ty].properties;
+        for (prop, value) in &n.properties {
+            let Some(d) = declared.get(prop) else {
+                return Err(format!(
+                    "node type {} declares no property {prop:?} (schema {})",
+                    n.ty, schema.schema
+                ));
+            };
+            if !d.ty.holds(value) {
+                return Err(format!(
+                    "property {prop} of {}/{} must be {}",
+                    n.ty,
+                    n.key,
+                    match d.ty {
+                        PropertyType::Text => "text of at most 200 characters",
+                        PropertyType::Number => "a number",
+                        PropertyType::Date => "a date such as 2026-10-10",
+                        PropertyType::Bool => "true or false",
+                    }
+                ));
+            }
+        }
         validate_aliases(&format!("{}/{}", n.ty, n.key), &n.aliases)?;
         let name = n.name.unwrap_or_else(|| n.key.clone());
         out.insert(
@@ -441,6 +566,7 @@ pub fn check_nodes(
                 key: n.key,
                 name,
                 aliases: n.aliases,
+                properties: n.properties,
             },
         );
     }
@@ -589,6 +715,7 @@ mod tests {
                 en: None,
                 zh: None,
                 aliases: vec![],
+                properties: BTreeMap::new(),
             },
         );
         let merged = added.apply_change(&old, &Uses(&[])).unwrap();
@@ -651,6 +778,7 @@ mod tests {
                 key: "1042".into(),
                 name: None,
                 aliases: vec![],
+                properties: BTreeMap::new(),
             }],
         )
         .unwrap();
@@ -664,6 +792,7 @@ mod tests {
                     key: "x".into(),
                     name: None,
                     aliases: vec![],
+                    properties: BTreeMap::new(),
                 }]
             )
             .is_err()
@@ -711,5 +840,76 @@ mod tests {
         ] {
             assert_eq!(EntityRef::parse(bad), None, "{bad}");
         }
+    }
+
+    /// Node types declare their properties; values are checked against them, and a schema
+    /// change may add properties but not drop one or change its kind.
+    #[test]
+    fn properties_are_declared_checked_and_only_added() {
+        let with = |props: serde_json::Value| -> SchemaDef {
+            serde_json::from_value(serde_json::json!({
+                "schema": "novel",
+                "nodes": { "person": { "key": "id", "properties": props } }
+            }))
+            .unwrap()
+        };
+        let s = with(serde_json::json!({
+            "age": { "type": "number", "zh": "年龄" },
+            "born": { "type": "date" },
+            "alive": { "type": "bool" },
+            "motto": { "type": "text" }
+        }));
+        s.validate().unwrap();
+        let node = |props: serde_json::Value| NodeIn {
+            ty: "person".into(),
+            key: "anna".into(),
+            name: None,
+            aliases: vec![],
+            properties: serde_json::from_value(props).unwrap(),
+        };
+        let ok = check_nodes(
+            &s,
+            "book1",
+            vec![node(serde_json::json!({ "age": 31, "born": "1995-04-02", "alive": true, "motto": "carpe diem" }))],
+        )
+        .unwrap();
+        assert_eq!(ok[0].properties["age"], 31);
+        for bad in [
+            serde_json::json!({ "height": 170 }),
+            serde_json::json!({ "age": "thirty" }),
+            serde_json::json!({ "born": "April 2nd" }),
+            serde_json::json!({ "born": "2026-02-30" }),
+            serde_json::json!({ "born": "2026-13-01" }),
+            serde_json::json!({ "alive": "yes" }),
+            serde_json::json!({ "motto": "" }),
+        ] {
+            assert!(
+                check_nodes(&s, "book1", vec![node(bad.clone())]).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            with(serde_json::json!({ "name": { "type": "text" } }))
+                .validate()
+                .is_err(),
+            "a property can't shadow a node's own fields"
+        );
+        // Adding is fine; dropping one or changing its kind isn't.
+        let more = with(serde_json::json!({
+            "age": { "type": "number" }, "born": { "type": "date" }, "alive": { "type": "bool" },
+            "motto": { "type": "text" }, "rank": { "type": "text" }
+        }));
+        let merged = more.apply_change(&s, &Uses(&[])).unwrap();
+        assert_eq!(
+            merged.nodes["person"].properties["age"].zh.as_deref(),
+            Some("年龄")
+        );
+        let fewer = with(serde_json::json!({ "age": { "type": "number" } }));
+        assert!(fewer.apply_change(&s, &Uses(&[])).is_err());
+        let changed = with(serde_json::json!({
+            "age": { "type": "text" }, "born": { "type": "date" }, "alive": { "type": "bool" },
+            "motto": { "type": "text" }
+        }));
+        assert!(changed.apply_change(&s, &Uses(&[])).is_err());
     }
 }

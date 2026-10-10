@@ -40,6 +40,12 @@ pub struct JobResult {
     /// For a lint run: what it found and proposed (the findings are at `GET /lint`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lint: Option<crate::librarian::lint::LintRun>,
+    /// For an acquisition run: what it searched for and proposed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acquisition: Option<crate::acquisition::RunReport>,
+    /// For an approved graph draft: what it applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph: Option<crate::api::draft::GraphApplied>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

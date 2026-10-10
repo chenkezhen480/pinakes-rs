@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use common::app::{Caller, TestApp};
-use common::embed::Fake;
+use common::embed::{FAKE_DIM, Fake};
 use pinakes::store::{SqliteStore, Store};
 use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::{Value, json};
@@ -385,4 +385,113 @@ async fn tenants_can_build_vectors_without_storing_them() {
     let snap = tenant.snapshot().await.unwrap();
     assert_eq!(snap.vectors.as_ref().map(|v| v.len()), Some(5));
     assert!(w.stored().await.is_empty(), "nothing was stored");
+}
+
+/// The page key the graph files store for a page (as the search catalog makes it).
+fn page_key(path: &str) -> u64 {
+    use sha2::{Digest, Sha256};
+    u64::from_le_bytes(Sha256::digest(path.as_bytes())[..8].try_into().unwrap())
+}
+
+/// From `[search] vector_graph_rows` on, meaning searches walk a graph index per slot, kept in
+/// the tenant's `index/` folder; it follows writes, and a deleted user's pages leave it and its
+/// files (M9 "done when": after a deletion the deleted pages' vectors are gone from it too).
+#[tokio::test]
+async fn the_graph_index_follows_writes_and_deletions() {
+    use pinakes::search::hnsw::Graph;
+    use pinakes::tenants::user_dir_name;
+
+    let fake = Fake::new();
+    let mut app = TestApp::with_embedder("[search]\nvector_graph_rows = 1\n", fake.clone());
+    let key = app.create_tenant("acme").await;
+    let wiki = WikiFs::new(app.wiki_dir("acme"));
+    wiki.write(&page(
+        "expertise/returns",
+        "Returns policy",
+        &[],
+        "# Returns policy\n\nGoods may be returned within seven days.\n",
+    ))
+    .unwrap();
+    let hers = format!("users/{}/decisions/discount", user_dir_name("lily"));
+    wiki.write(&page(
+        &hers,
+        "Discount for Lily",
+        &[],
+        "# Discount for Lily\n\nA ten percent discount on the next order.\n",
+    ))
+    .unwrap();
+    wiki.write(&page(
+        "experience/refund-playbook",
+        "Refund playbook",
+        &[],
+        "# Refund playbook\n\nRefund after the parcel is back.\n",
+    ))
+    .unwrap();
+    app.restart();
+    let lily = Caller::new(&key).user(Some("lily"));
+    let (_, resp) = app
+        .post(
+            lily,
+            "/search",
+            json!({ "query": "Discount for Lily", "mode": "semantic" }),
+        )
+        .await;
+    assert!(
+        hits(&resp, "memories").iter().any(|(p, _)| *p == hers),
+        "{resp}"
+    );
+    // The trace says the graph answered.
+    app.state.traces.flush();
+    let today = &pinakes::trace::now_rfc3339()[..10];
+    let traces = std::fs::read_to_string(
+        app.tenant_dir("acme")
+            .join("logs")
+            .join(format!("search-{today}.jsonl")),
+    )
+    .unwrap();
+    let last: Value = serde_json::from_str(traces.lines().last().unwrap()).unwrap();
+    assert!(last["timings_us"].get("meaning_graph").is_some(), "{last}");
+
+    let index = app.tenant_dir("acme").join("index");
+    let keys = |file: &str| -> Vec<u64> {
+        Graph::load(&index.join(file), FAKE_DIM, "fake")
+            .unwrap()
+            .unwrap()
+            .keys()
+            .map(|(_, k)| k.0)
+            .collect()
+    };
+    assert!(keys("vectors-memories.hnsw").contains(&page_key(&hers)));
+    assert!(keys("vectors-knowledge.hnsw").contains(&page_key("expertise/returns")));
+
+    // A write adds the new page's rows to its slot's graph.
+    wiki.write(&page(
+        "expertise/shipping",
+        "Shipping times",
+        &[],
+        "# Shipping times\n\nParcels arrive in two to four days.\n",
+    ))
+    .unwrap();
+    let tenant = app.state.tenants.authenticate(&key).await.unwrap().unwrap();
+    tenant.reindex().await.unwrap();
+    assert!(keys("vectors-knowledge.hnsw").contains(&page_key("expertise/shipping")));
+
+    // Deleting Lily takes her page out of the graph and its file.
+    let (status, body) = app.delete(Caller::new(&key), "/users/lily").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left = keys("vectors-memories.hnsw");
+    assert!(!left.contains(&page_key(&hers)), "{left:?}");
+    assert!(left.contains(&page_key("experience/refund-playbook")));
+    let (_, resp) = app
+        .post(
+            Caller::new(&key),
+            "/search",
+            json!({ "query": "Refund playbook", "mode": "semantic" }),
+        )
+        .await;
+    assert_eq!(
+        hits(&resp, "memories")[0].0,
+        "experience/refund-playbook",
+        "{resp}"
+    );
 }

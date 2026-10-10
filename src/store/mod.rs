@@ -72,6 +72,24 @@ pub trait Store: Send + Sync {
     /// Proposals still waiting for review, oldest first.
     async fn held_proposals(&self) -> anyhow::Result<Vec<Proposal>>;
 
+    /// Every proposal, whatever its status, oldest first.
+    async fn proposals(&self) -> anyhow::Result<Vec<Proposal>>;
+
+    /// Removes a proposal (its row is overwritten, as every deleted row is).
+    async fn delete_proposal(&self, id: &str) -> anyhow::Result<()>;
+
+    /// The trusted sites' pages acquisition's crawl indexed.
+    async fn crawled_pages(&self) -> anyhow::Result<Vec<crate::acquisition::crawl::CrawledPage>>;
+
+    /// Stores crawled pages, replacing any at the same address, in one transaction.
+    async fn put_crawled_pages(
+        &self,
+        pages: &[crate::acquisition::crawl::CrawledPage],
+    ) -> anyhow::Result<()>;
+
+    /// Removes crawled pages by address.
+    async fn delete_crawled_pages(&self, urls: &[String]) -> anyhow::Result<()>;
+
     /// A document the service issued an id for.
     async fn document(&self, id: &str) -> anyhow::Result<Option<Document>>;
 

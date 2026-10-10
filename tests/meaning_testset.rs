@@ -11,7 +11,12 @@
 //! PINAKES_TEST_EMBEDDING=1 cargo test --test meaning_testset -- --nocapture
 //! ```
 //!
-//! Without `PINAKES_TEST_EMBEDDING` it says so and passes.
+//! Without `PINAKES_TEST_EMBEDDING` it says so and passes. `PINAKES_TEST_GRAPH_ROWS=1` runs the
+//! meaning-based questions with every slot searched through the graph index (`[search]
+//! vector_graph_rows`); the answers must be the same. The graph's recall against the exact scan
+//! on pages embedded by the real model is measured by
+//! `the_graph_finds_what_the_exact_scan_finds_on_real_vectors` (`PINAKES_TEST_GRAPH_PAGES`
+//! filler pages made from the test set's lines, 3,000 by default).
 
 mod common;
 
@@ -30,8 +35,12 @@ struct Loaded {
 }
 
 async fn load(embedder: Option<Arc<dyn Embedder>>) -> Loaded {
+    let extra = match std::env::var("PINAKES_TEST_GRAPH_ROWS") {
+        Ok(n) => format!("[search]\nvector_graph_rows = {}\n", n.trim()),
+        Err(_) => String::new(),
+    };
     let mut app = match embedder {
-        Some(e) => TestApp::with_embedder("", e),
+        Some(e) => TestApp::with_embedder(&extra, e),
         None => TestApp::new(),
     };
     let mut keys = HashMap::new();
@@ -257,3 +266,135 @@ async fn semantic_mode_recovers_cross_language_misses() {
 
 // Measured 2026-10-03 with jina-embeddings-v2-base-zh, default slot sizes.
 const CROSS_LANG_FLOOR: usize = 12;
+
+/// The graph index against the exact scan, on vectors the real model made: filler pages built
+/// from the test set's titles, headings and lines (as the benchmark's are), the test set's own
+/// pages among them, searched with every question of the set.
+#[tokio::test]
+async fn the_graph_finds_what_the_exact_scan_finds_on_real_vectors() {
+    use pinakes::search::SearchSnapshot;
+    use pinakes::search::catalog::Slot;
+    use pinakes::search::vectors::{self, Earlier, Method};
+    use pinakes::wiki::{Page, PagePath, WikiFs};
+
+    let Some(embedder) = common::embed::real() else {
+        println!("PINAKES_TEST_EMBEDDING not set; the graph recall test was skipped");
+        return;
+    };
+    let fillers: usize = std::env::var("PINAKES_TEST_GRAPH_PAGES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(3000);
+    let mut real: Vec<Page> = Vec::new();
+    for t in testset::tenants() {
+        let dir = tempfile::tempdir().unwrap();
+        testset::install_wiki(&t.id, dir.path());
+        for mut p in WikiFs::new(dir.path()).all_pages().unwrap() {
+            if p.path
+                .kind()
+                .is_some_and(|k| k != pinakes::kinds::Kind::Graph)
+            {
+                // Each scenario's pages under names of their own; a fixed name (a user's
+                // preferences) is left out.
+                if let Ok(path) = PagePath::parse(&format!("{}-{}", p.path, t.id)) {
+                    p.path = path;
+                    real.push(p);
+                }
+            }
+        }
+    }
+    let (mut titles, mut headings, mut lines) = (Vec::new(), Vec::new(), Vec::new());
+    for p in &real {
+        titles.extend(p.front.title.clone());
+        for l in p.body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            match l.strip_prefix("## ") {
+                Some(h) => headings.push(h.to_owned()),
+                None if !l.starts_with('#') => lines.push(l.to_owned()),
+                None => {}
+            }
+        }
+    }
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut below = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    let mut pages = real.clone();
+    for i in 0..fillers {
+        let dir = if below(2) == 0 {
+            "experience"
+        } else {
+            "expertise"
+        };
+        let mut p = Page::new(PagePath::parse(&format!("{dir}/filler-{i}")).unwrap());
+        let title = format!("{} {i}", titles[below(titles.len())]);
+        p.front.title = Some(title.clone());
+        let mut body = format!("# {title}\n");
+        for _ in 0..2 + below(2) {
+            body.push_str(&format!("\n## {}\n\n", headings[below(headings.len())]));
+            for _ in 0..3 + below(3) {
+                body.push_str(&lines[below(lines.len())]);
+                body.push('\n');
+            }
+        }
+        p.body = body;
+        pages.push(p);
+    }
+    let snap = SearchSnapshot::build(pages).unwrap();
+    let started = std::time::Instant::now();
+    let model = embedder.clone();
+    let catalog_snap = Arc::new(snap);
+    let s2 = catalog_snap.clone();
+    let mut v = tokio::task::spawn_blocking(move || {
+        vectors::build(&s2.catalog, Earlier::Stored(Vec::new()), &*model)
+            .unwrap()
+            .vectors
+    })
+    .await
+    .unwrap();
+    println!(
+        "{} pages, {} rows embedded in {:.0} s",
+        catalog_snap.catalog.pages.len(),
+        v.len(),
+        started.elapsed().as_secs_f64()
+    );
+    let started = std::time::Instant::now();
+    vectors::index(&mut v, &catalog_snap.catalog, None, None, 1).unwrap();
+    println!("graphs built in {:.1} s", started.elapsed().as_secs_f64());
+
+    let (mut hits, mut wanted, mut top1) = (0, 0, 0);
+    let mut queries = 0;
+    for t in testset::tenants() {
+        for q in testset::questions(&t.id) {
+            let qv = embedder
+                .embed(std::slice::from_ref(&q.query))
+                .unwrap()
+                .remove(0);
+            queries += 1;
+            for slot in [Slot::Memories, Slot::Knowledge] {
+                let keep = |ord: usize| catalog_snap.catalog.pages[ord].slot == slot;
+                let (graph, method) = v.nearest(&qv, slot, keep, 50);
+                assert_eq!(method, Method::Graph);
+                let exact = v.best(&qv, keep);
+                let Some(&(_, tenth)) = exact.get(9).or(exact.last()) else {
+                    continue;
+                };
+                wanted += exact.len().min(10);
+                hits += graph
+                    .iter()
+                    .take(10)
+                    .filter(|(_, s)| *s >= tenth - 1e-6)
+                    .count();
+                top1 += usize::from(graph.first().map(|g| g.0) == exact.first().map(|e| e.0));
+            }
+        }
+    }
+    let recall = hits as f64 / wanted.max(1) as f64;
+    println!(
+        "{queries} questions, two slots each: recall@10 {recall:.3} ({hits}/{wanted}), same first page {top1}/{}",
+        queries * 2
+    );
+    assert!(recall >= 0.95, "recall@10 {recall:.3}");
+}

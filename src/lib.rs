@@ -1,6 +1,7 @@
 //! A self-hosted knowledge service: an LLM-maintained wiki that agents search in milliseconds.
 //! See `docs/design.md`.
 
+pub mod acquisition;
 pub mod api;
 pub mod config;
 pub mod convert;
@@ -144,7 +145,8 @@ impl AppState {
         // Wiki versions are kept only for replaying traces.
         .keep_history(config.trace.enabled)
         .graph_backend(graph::GraphBackend::from_config(&config))
-        .embedder(embedder.clone());
+        .embedder(embedder.clone())
+        .vector_graph_rows(config.search.vector_graph_rows);
         let traces = trace::TraceLog::start(
             config.tenants_dir(),
             config.trace.enabled,
@@ -153,6 +155,11 @@ impl AppState {
         let librarian = llm.map(|llm| librarian_for(&config, llm, embedder.clone()));
         let converter =
             convert::Converter::new(&config.converter).expect("an HTTP client for the converter");
+        if config.acquisition.providers.is_some() {
+            tracing::warn!(
+                "[acquisition] providers is no longer read: only the sites a tenant trusts are read (remove the line)"
+            );
+        }
         Self(Arc::new(AppInner {
             converter,
             jobs: jobs::Jobs::new(std::time::Duration::from_secs(

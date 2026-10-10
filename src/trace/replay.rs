@@ -292,7 +292,18 @@ pub async fn replay(
                                             tenant.store.embeddings(embedder.model()).await?,
                                         ),
                                     };
-                                    s.vectors = Some(build(&s.catalog, earlier, embedder)?.vectors);
+                                    let mut v = build(&s.catalog, earlier, embedder)?.vectors;
+                                    // Searched as the service searches it: through the graph
+                                    // index when there are enough rows, today's graph changed
+                                    // for the version's pages (kept in memory only).
+                                    crate::search::vectors::index(
+                                        &mut v,
+                                        &s.catalog,
+                                        today.vectors.as_ref().map(|t| (t, &today.catalog)),
+                                        None,
+                                        cfg.vector_graph_rows,
+                                    )?;
+                                    s.vectors = Some(v);
                                 }
                                 let s = Arc::new(s);
                                 recorded.insert(key, s.clone());

@@ -111,6 +111,8 @@ pub struct Tenant {
     history_saves: Arc<HistorySaves>,
     /// Embeds the wiki's pages when the snapshot is built, if a model is configured.
     embedder: Option<Arc<dyn Embedder>>,
+    /// From this many page vectors on, they get a graph index (`search::vectors::index`).
+    vector_graph_rows: usize,
     /// Whether the tenant's folder may be written: page vectors to SQLite and the search index
     /// to `index/tantivy/` (off for tools such as replays that read a live folder).
     writable: bool,
@@ -458,6 +460,8 @@ impl Tenant {
             },
         };
         let started = Instant::now();
+        let graph_dir = self.writable.then(|| self.dir.join("index"));
+        let graph_rows = self.vector_graph_rows;
         let (built, mut snapshot) = tokio::task::spawn_blocking(move || {
             let earlier = match previous.as_ref() {
                 Some(p) => {
@@ -465,7 +469,32 @@ impl Tenant {
                 }
                 None => Earlier::Stored(stored),
             };
-            (build(&snapshot.catalog, earlier, &*embedder), snapshot)
+            let built = build(&snapshot.catalog, earlier, &*embedder).and_then(|mut built| {
+                // The graph index over the rows, when there are enough of them.
+                let started = Instant::now();
+                let before = previous
+                    .as_ref()
+                    .map(|p| (p.vectors.as_ref().expect("checked above"), &p.catalog));
+                let change = crate::search::vectors::index(
+                    &mut built.vectors,
+                    &snapshot.catalog,
+                    before,
+                    graph_dir.as_deref(),
+                    graph_rows,
+                )?;
+                if let Some(c) = change.filter(|c| c.added > 0 || c.removed > 0) {
+                    tracing::info!(
+                        kept = c.kept,
+                        added = c.added,
+                        removed = c.removed,
+                        from_file = c.from_file,
+                        ms = started.elapsed().as_millis() as u64,
+                        "vector graph updated"
+                    );
+                }
+                Ok(built)
+            });
+            (built, snapshot)
         })
         .await
         .context("embedding pages panicked")?;
@@ -795,6 +824,7 @@ pub struct Tenants {
     keep_history: bool,
     graph_backend: GraphBackend,
     embedder: Option<Arc<dyn Embedder>>,
+    vector_graph_rows: usize,
     /// Whether tenants' folders may be written (off for replays, which only read).
     writable: bool,
     /// Open tenants. The lock is only ever held for a map lookup or insert, never across disk
@@ -817,6 +847,7 @@ impl Tenants {
             keep_history: false,
             graph_backend: GraphBackend::Sqlite,
             embedder: None,
+            vector_graph_rows: crate::config::SearchConfig::default().vector_graph_rows,
             writable: true,
             open: RwLock::new(HashMap::new()),
             creating: Mutex::new(()),
@@ -839,6 +870,13 @@ impl Tenants {
     /// The model that embeds tenants' pages for meaning-based search (none by default).
     pub fn embedder(mut self, embedder: Option<Arc<dyn Embedder>>) -> Self {
         self.embedder = embedder;
+        self
+    }
+
+    /// From how many page vectors on a tenant keeps a graph index over them (`[search]
+    /// vector_graph_rows`; 0 never).
+    pub fn vector_graph_rows(mut self, rows: usize) -> Self {
+        self.vector_graph_rows = rows;
         self
     }
 
@@ -1088,6 +1126,7 @@ impl Tenants {
             keep_history: self.keep_history,
             history_saves: Arc::new(HistorySaves::default()),
             embedder: self.embedder.clone(),
+            vector_graph_rows: self.vector_graph_rows,
             writable: self.writable,
             graph_store,
             graph: std::sync::RwLock::new(None),

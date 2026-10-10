@@ -176,6 +176,7 @@ async fn graph_data_moves_to_neo4j_and_back() {
                 key: "stale".into(),
                 name: "Stale order".into(),
                 aliases: Vec::new(),
+                properties: Default::default(),
             }],
             &[],
         )

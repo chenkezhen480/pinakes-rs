@@ -13,6 +13,8 @@ pub const VERIFY_DESCRIBE: &str = include_str!("../../prompts/verify-describe.md
 pub const MATCH: &str = include_str!("../../prompts/match.md");
 pub const READ: &str = include_str!("../../prompts/read.md");
 pub const LINT: &str = include_str!("../../prompts/lint.md");
+pub const ACQUIRE_RANK: &str = include_str!("../../prompts/acquire-rank.md");
+pub const ACQUIRE_SCREEN: &str = include_str!("../../prompts/acquire-screen.md");
 
 /// The rules shipped with the service for a kind.
 pub fn default_rules(kind: Kind) -> &'static str {

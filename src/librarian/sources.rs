@@ -18,6 +18,24 @@ pub fn new_name(kind: Kind, today: &str) -> String {
     )
 }
 
+/// A new name for a page fetched from outside (`crate::acquisition`), such as
+/// `2026-10-10-external-3fa91c0b.json`: pages citing it are marked as lower trust.
+pub fn new_external_name(today: &str) -> String {
+    format!(
+        "{today}-{EXTERNAL}-{}.json",
+        hex::encode(rand::random::<[u8; 4]>())
+    )
+}
+
+const EXTERNAL: &str = "external";
+
+/// Whether a cited record (a name, or a citation of its lines) is a page fetched from outside.
+pub fn is_external(cited: &str) -> bool {
+    let name = cited.split('#').next().unwrap_or(cited);
+    name.get(11..)
+        .is_some_and(|rest| rest.starts_with(&format!("{EXTERNAL}-")))
+}
+
 /// Whether a name can be a file in `sources/`: letters, digits, `-`, `_` and `.`, never starting
 /// with a dot or holding `..`. Nothing else is ever joined onto the folder.
 fn safe_name(name: &str) -> bool {
@@ -80,6 +98,41 @@ pub fn read(tenant_dir: &Path, name: &str) -> io::Result<Option<String>> {
         Ok(t) => Ok(Some(t)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+/// Replaces a record whole, through a temporary file: only for a fetched page whose text may
+/// not be kept once filed (`crate::acquisition`); records are otherwise never changed.
+pub fn replace(tenant_dir: &Path, name: &str, record: &serde_json::Value) -> io::Result<()> {
+    if !valid_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bad source name",
+        ));
+    }
+    let dir = tenant_dir.join("sources");
+    let tmp = dir.join(format!("{name}.tmp"));
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        let mut text = serde_json::to_string_pretty(record).map_err(io::Error::other)?;
+        text.push('\n');
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, dir.join(name))
+}
+
+/// Deletes one file of `sources/` (an uploaded or fetched original); a missing one is fine.
+pub fn remove_file(tenant_dir: &Path, name: &str) -> io::Result<()> {
+    if !safe_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bad source name",
+        ));
+    }
+    match std::fs::remove_file(tenant_dir.join("sources").join(name)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 

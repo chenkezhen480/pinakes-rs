@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 
-use super::def::{EdgeRecord, GraphData, NodeRecord};
+use super::def::{EdgeRecord, GraphData, NodeKey, NodeRecord};
 
 #[async_trait]
 pub trait GraphStore: Send + Sync {
@@ -18,6 +18,17 @@ pub trait GraphStore: Send + Sync {
     /// in the same space replaces its name and aliases; an edge already stored is kept once.
     /// Callers check that both ends of every edge exist.
     async fn write(&self, nodes: &[NodeRecord], edges: &[EdgeRecord]) -> anyhow::Result<()>;
+
+    /// Applies an approved change in one transaction: removes the edges listed and the nodes
+    /// listed with every edge of theirs, then writes nodes and edges as [`GraphStore::write`]
+    /// does.
+    async fn apply(
+        &self,
+        remove_nodes: &[NodeKey],
+        remove_edges: &[EdgeRecord],
+        nodes: &[NodeRecord],
+        edges: &[EdgeRecord],
+    ) -> anyhow::Result<()>;
 
     /// Every node and edge of the tenant.
     async fn load(&self) -> anyhow::Result<GraphData>;

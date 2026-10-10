@@ -1,7 +1,9 @@
 //! HTTP handlers. Every tenant route takes a `Scope`; admin routes take `Admin`.
 
+mod acquisition;
 mod admin;
 mod delete;
+pub(crate) mod draft;
 pub(crate) mod graph;
 mod ingest;
 pub(crate) mod insert;
@@ -31,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/read", post(read::read))
         .route("/graph", post(graph::graph))
         .route("/graph/path", post(graph::path))
+        .route("/graph/draft", get(draft::get).post(draft::propose))
         .route("/ingest/experience", post(insert::experience))
         .route("/ingest/decision", post(insert::decision))
         // A document can be long.
@@ -43,6 +46,12 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get))
         .route("/proposals", get(jobs::list))
         .route("/proposals/{id}/approve", post(jobs::approve))
+        .route("/proposals/{id}/reject", post(jobs::reject))
+        .route("/acquisition", get(acquisition::status))
+        .route(
+            "/admin/tenants/{id}/acquisition",
+            axum::routing::put(acquisition::put_settings),
+        )
         .route("/lint", get(lint::report).post(lint::run))
         .route("/ingest/graph/schema", post(ingest::schema))
         .route("/ingest/graph/space", post(ingest::space))

@@ -145,6 +145,7 @@ async fn shopline(llm: &Arc<FakeLlm>) -> (TestApp, String) {
 
 fn librarian() -> Arc<FakeLlm> {
     FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
         Step::Plan => {
             let read = msg
                 .lines()
@@ -187,7 +188,8 @@ async fn tools_are_listed_with_their_strategy() {
                 "path",
                 "record_experience",
                 "record_decision",
-                "record_preference"
+                "record_preference",
+                "propose_graph_change"
             ]
         );
         let search = &tools[0];
@@ -209,7 +211,66 @@ async fn tools_are_listed_with_their_strategy() {
         assert_eq!(search["annotations"]["readOnlyHint"], true);
         assert_eq!(tools[4]["annotations"]["readOnlyHint"], false);
         assert!(tools[6]["inputSchema"]["properties"]["session"].is_null());
+        assert_eq!(tools[7]["annotations"]["readOnlyHint"], false);
+        assert!(tools[7]["inputSchema"]["properties"]["session"].is_null());
     }
+}
+
+/// An agent proposes a graph change over MCP: it lands in the space's draft, for review; the
+/// graph is unchanged until a person approves it.
+#[tokio::test]
+async fn graph_changes_are_proposed_for_review() {
+    let (app, key) = shopline(&librarian()).await;
+    let t = common::testset::tenants()
+        .into_iter()
+        .find(|t| t.id == "shopline")
+        .unwrap();
+    for call in common::testset::graph_calls(&t) {
+        let caller = common::app::Caller::new(&key)
+            .user(call.user.as_deref())
+            .groups(&call.groups);
+        let (status, body) = app.post(caller, call.uri, call.body).await;
+        assert!(status.is_success(), "{} {status} {body}", call.uri);
+    }
+    let mut c = Client::connect(&app, &key, None, NEW).await;
+    let empty = c
+        .ok("propose_graph_change", json!({ "space": "mainland" }))
+        .await;
+    assert!(empty.get("proposal").is_none(), "{empty}");
+    let (refused, error) = c
+        .call(
+            "propose_graph_change",
+            json!({ "space": "mainland",
+                    "changes": [{ "op": "put_node", "type": "customer", "key": "bc_new", "name": "新客户" }] }),
+        )
+        .await;
+    assert!(error, "a reason is required: {refused}");
+    let draft = c
+        .ok(
+            "propose_graph_change",
+            // Fields that don't apply may come as null, as an agent filling the schema sends them.
+            json!({ "space": "mainland", "reason": "a customer who called today",
+                    "changes": [{ "op": "put_node", "type": "customer", "key": "bc_new", "name": "新客户",
+                                  "aliases": null, "from": null, "to": null }] }),
+        )
+        .await;
+    assert!(
+        draft["proposal"].as_str().unwrap().starts_with("p_"),
+        "{draft}"
+    );
+    assert_eq!(draft["put_nodes"][0]["key"], "bc_new");
+    let (status, _) = app
+        .post(
+            common::app::Caller::new(&key),
+            "/graph",
+            json!({ "node": "mainland:customer/bc_new" }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "not in the graph before approval"
+    );
 }
 
 #[tokio::test]
