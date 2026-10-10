@@ -7,15 +7,17 @@
 //! and expire with the retention period. The Neo4j part runs with `PINAKES_TEST_NEO4J_URI` set
 //! (see `tests/graph_testset.rs`), and says so and passes without it.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::embed::Fake;
+use crate::common::llm::{
+    FakeLlm, OK, Step, all_ok, create, describe_from_definition, folder, items,
+};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::embed::Fake;
-use common::llm::{FakeLlm, OK, Step, all_ok, create, describe_from_definition, folder, items};
 use pinakes::tenants::{group_dir_name, user_dir_name};
 use serde_json::{Value, json};
 

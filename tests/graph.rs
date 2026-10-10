@@ -2,10 +2,8 @@
 //! slot of `/search`, and the `/graph` and `/graph/path` follow-ups, with the visibility rules
 //! of graph spaces (design, "Who can see a graph space").
 
-mod common;
-
+use crate::common::app::{Caller, TestApp};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
 use serde_json::{Value, json};
 
 fn schema() -> Value {

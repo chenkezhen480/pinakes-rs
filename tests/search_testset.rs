@@ -6,13 +6,11 @@
 //! every slot in `expect_empty` is empty or weak (testset/README.md, "Questions").
 //! Run with `-- --nocapture` for the per-category report.
 
-mod common;
-
 use std::collections::HashMap;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset::{self, Tally, describe, judge, slot_pages};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::testset::{self, Tally, describe, judge, slot_pages};
 use serde_json::json;
 
 struct Outcome {

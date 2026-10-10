@@ -3,11 +3,9 @@
 //! expired, signed by another key, for another audience or issuer, or that name a tenant the
 //! service doesn't have are all a plain 401.
 
-mod common;
-
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset;
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::testset;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use pinakes::tenants::user_dir_name;
 use serde_json::{Value, json};

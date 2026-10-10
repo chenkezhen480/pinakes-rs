@@ -10,6 +10,8 @@ readme = "README.md"
 keywords = ["knowledge-base", "mcp", "agent", "rag", "wiki"]
 categories = ["web-programming::http-server", "text-processing", "database"]
 default-run = "pinakes"
+# The tests in tests/ are one program (tests/main.rs), not one per file: see [[test]] below.
+autotests = false
 
 [dependencies]
 aho-corasick = "1"
@@ -49,6 +51,12 @@ unicode-normalization = "0.1.25"
 http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Every file of tests/ is a module of this one test program: linking the service (and ONNX
+# Runtime) once instead of 26 times keeps builds fast and target/ small.
+[[test]]
+name = "integration"
+path = "tests/main.rs"
 
 # Debug builds (and tests) keep line tables only: backtraces still name files and lines. With
 # full debug info every test binary, each linking ONNX Runtime, had a .pdb of about 300 MB, and

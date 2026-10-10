@@ -3,15 +3,15 @@
 //! earlier version (its `Mcp-Session-Id` stands in for the session). The tools answer as the
 //! HTTP endpoints do, with the caller's scope from the same credentials.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::llm::{FakeLlm, Step, all_ok, create, describe_from_definition};
+use crate::common::testset;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::app::{Caller, TestApp};
-use common::llm::{FakeLlm, Step, all_ok, create, describe_from_definition};
-use common::testset;
 use serde_json::{Value, json};
 
 const NEW: &str = "2026-07-28";

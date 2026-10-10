@@ -2,10 +2,8 @@
 //! first start with its key in a file, and a request without the user header acts as the
 //! default user, who has no admin rights.
 
-mod common;
-
+use crate::common::app::{Caller, TestApp};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
 use pinakes::PERSONAL_KEY_FILE;
 use pinakes::tenants::user_dir_name;
 use pinakes::wiki::{Page, PagePath, WikiFs};

@@ -26,10 +26,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   `pinakes-migrate-graph --to sqlite|neo4j` (service stopped; it removes the old copy;
   `tests/graph_switch.rs`).
 - Graph tests against Neo4j (M3 on): `NEO4J_PASSWORD=... docker compose --profile neo4j up -d neo4j`, then
-  `PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset`.
+  `PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test integration graph_testset::`.
   Without `PINAKES_TEST_NEO4J_URI` that test is skipped; the SQLite backend always runs.
 - The speed benchmark (M6): `PINAKES_BENCH_PAGES=1000,10000,100000 PINAKES_BENCH_SETTLE=240 cargo
-  test --release --test bench -- --ignored --nocapture` (100k pages take about 10 minutes; results
+  test --release --test integration bench:: -- --ignored --nocapture` (100k pages take about 10 minutes; results
   in design.md "As built in M6"). Don't build or run other heavy work while it runs.
 - Run the server bound to `127.0.0.1` locally; binding `0.0.0.0` pops a Windows Firewall dialog.
   Start it with `run_in_background`, never with `&` inside a foreground command (that hangs the tool).
@@ -48,7 +48,7 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   `response_format` on OpenAI-compatible ones.
 - The librarian's model and key live only in `model.conf` (git-ignored; template
   `model.conf.example`), never in `config.toml` or code. Never print or commit it. The live test
-  reads it: `PINAKES_TEST_LLM=1 cargo test --test librarian_live -- --nocapture` (costs money).
+  reads it: `PINAKES_TEST_LLM=1 cargo test --test integration librarian_live:: -- --nocapture` (costs money).
 - Every wiki write runs as a job on the tenant's write queue (`src/jobs.rs`) or holds the
   tenant's `wiki_writer` lock; code, never the LLM, writes `kind`, `updated` and `sources`.
 - Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
@@ -56,7 +56,7 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   never parses Word, PDF or HTML itself. In the compose stack it sits on an internal network with
   no egress; for the host, start `docker compose --profile dev up -d --build
   converter-dev` (127.0.0.1:8090); `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test
-  convert` runs a real Word file through it (skipped without the variable).
+  integration convert::` runs a real Word file through it (skipped without the variable).
 - Expertise documents get ids from the service (`d_…`), never from the host. A new version
   finds the pages of earlier ones through the raw records they cite (`sources`), not by
   similarity. Code never interprets a document's structure; the model reads it from the top
@@ -83,7 +83,7 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   fixed revision, no prefixes), chosen on the test set (design.md "As built in M5"). Page vectors
   are built when the snapshot is (`search::vectors`) and kept in SQLite by page, heading and text
   hash. Tests use `common::embed::Fake`; the real model runs with
-  `PINAKES_TEST_EMBEDDING=1 cargo test --test meaning_testset -- --nocapture` (downloads it into
+  `PINAKES_TEST_EMBEDDING=1 cargo test --test integration meaning_testset:: -- --nocapture` (downloads it into
   `target/models` the first time; skipped without the variable).
 - The librarian never writes graph data, and every memory page has at least one anchor.
 - A graph schema backs many graph spaces. Only creating or changing a schema writes the wiki (via
@@ -125,9 +125,9 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   one review step more). Fetched text is shown to the model only between markers as data, and
   screened before anyone is asked; fetches reach only allowlisted, public hosts (redirects
   included). Tests use a local stand-in for the trusted site (`tests/acquisition.rs`); the real
-  model's screening: `PINAKES_TEST_LLM=1 cargo test --test acquisition_live -- --nocapture`;
+  model's screening: `PINAKES_TEST_LLM=1 cargo test --test integration acquisition_live:: -- --nocapture`;
   reading a real site: `PINAKES_TEST_CRAWL=<domain> PINAKES_TEST_CONVERTER=http://127.0.0.1:8090
-  cargo test --test crawl_live -- --nocapture`.
+  cargo test --test integration crawl_live:: -- --nocapture`.
 - Large tenants' page vectors get a graph index per search slot (`search::hnsw`, our own HNSW
   over the snapshot's int8 rows; `index/vectors-<slot>.hnsw` holds only lists and 64-bit keys),
   from `[search] vector_graph_rows` rows on; it follows every snapshot update, deletions
@@ -141,4 +141,7 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 
 Single package: `src/lib.rs` holds the modules, `src/main.rs` only reads config and starts the
 server, `src/bin/pinakes-replay.rs` replays search traces, and `tests/` holds HTTP-level integration
-tests that drive the axum `Router` directly (shared helpers in `tests/common/`).
+tests that drive the axum `Router` directly (shared helpers in `tests/common/`). They are one test
+program, `integration` (`tests/main.rs` declares each file as a module; `autotests = false`), so
+the service is linked once: a new test file gets a `mod` line there, and one file's tests run
+with its module as the filter (`cargo test --test integration lint::`).

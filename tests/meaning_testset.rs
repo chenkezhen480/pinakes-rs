@@ -8,7 +8,7 @@
 //! first use:
 //!
 //! ```text
-//! PINAKES_TEST_EMBEDDING=1 cargo test --test meaning_testset -- --nocapture
+//! PINAKES_TEST_EMBEDDING=1 cargo test --test integration meaning_testset:: -- --nocapture
 //! ```
 //!
 //! Without `PINAKES_TEST_EMBEDDING` it says so and passes. `PINAKES_TEST_GRAPH_ROWS=1` runs the
@@ -18,14 +18,14 @@
 //! `the_graph_finds_what_the_exact_scan_finds_on_real_vectors` (`PINAKES_TEST_GRAPH_PAGES`
 //! filler pages made from the test set's lines, 3,000 by default).
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset::{self, Question, Tally, describe, judge, slot_pages};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::testset::{self, Question, Tally, describe, judge, slot_pages};
 use pinakes::embed::Embedder;
 use serde_json::{Value, json};
 

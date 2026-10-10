@@ -4,15 +4,13 @@
 //!
 //! ```text
 //! PINAKES_TEST_CRAWL=www.example.com PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 \
-//!   cargo test --test crawl_live -- --nocapture
+//!   cargo test --test integration crawl_live:: -- --nocapture
 //! ```
 //!
 //! `PINAKES_TEST_CRAWL` is a domain, or a domain and start address separated by a space.
 //! `PINAKES_TEST_CRAWL_PAGES` caps the pages read (15 by default); requests are a second apart.
 
-mod common;
-
-use common::app::TestApp;
+use crate::common::app::TestApp;
 use pinakes::acquisition::crawl;
 use pinakes::acquisition::{AllowedSource, Settings};
 

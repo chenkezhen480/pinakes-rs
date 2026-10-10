@@ -5,14 +5,14 @@
 //! costs money with a paid API):
 //!
 //! ```text
-//! PINAKES_TEST_LLM=1 cargo test --test librarian_live -- --nocapture
+//! PINAKES_TEST_LLM=1 cargo test --test integration librarian_live:: -- --nocapture
 //! ```
 
-mod common;
+use crate::common;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset;
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::testset;
 use pinakes::config::Config;
 use pinakes::llm::Llm;
 use serde_json::json;

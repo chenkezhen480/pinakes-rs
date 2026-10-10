@@ -4,10 +4,8 @@
 //! move runs against Neo4j with `PINAKES_TEST_NEO4J_URI` set (see `tests/graph_testset.rs`),
 //! and says so and passes without it.
 
-mod common;
-
+use crate::common::app::{Caller, TestApp};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
 use pinakes::config::Config;
 use pinakes::graph::GraphBackend;
 use serde_json::{Value, json};

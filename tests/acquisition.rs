@@ -5,22 +5,20 @@
 //! names a sitemap, the sitemap, a page found only through another's link, a redirect to a host
 //! the allowlist doesn't name, and a page with instructions planted for an AI. No search engine
 //! exists here, and none is needed: only the site is read. The model is scripted
-//! ([`common::llm::FakeLlm`]): it picks every page shown, and reports the instructions planted
+//! ([`crate::common::llm::FakeLlm`]): it picks every page shown, and reports the instructions planted
 //! in a page, as the screening prompt asks. What a real model's screening catches is
 //! `tests/acquisition_live.rs`.
-
-mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::common::app::{ADMIN, Caller, TestApp};
+use crate::common::llm::{
+    FakeLlm, NO_FINDINGS, NOT_THE_SAME, Step, UNREACHABLE, all_ok, create, folder, items, reader,
+};
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use common::app::{ADMIN, Caller, TestApp};
-use common::llm::{
-    FakeLlm, NO_FINDINGS, NOT_THE_SAME, Step, UNREACHABLE, all_ok, create, folder, items, reader,
-};
 use serde_json::{Value, json};
 
 // The site never writes the keywords searched for (跨境退货, 保修期) in one piece, so the

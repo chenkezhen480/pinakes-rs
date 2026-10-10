@@ -1,13 +1,11 @@
 //! `/search` and `/read` over HTTP: request checks, user, group and tenant isolation, routes,
 //! headings, links and the read tracker. Uses the `shopline` and `factoryops` scenarios.
 
-mod common;
-
 use std::collections::HashMap;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset;
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::testset;
 use pinakes::tenants::{group_dir_name, user_dir_name};
 use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::{Value, json};

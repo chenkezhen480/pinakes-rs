@@ -2,13 +2,11 @@
 //! leaves one line in the tenant's trace file, with folder names instead of raw ids, and a
 //! replay reruns the recorded searches and reports what changed.
 
-mod common;
-
 use std::collections::HashMap;
 use std::time::Duration;
 
-use common::app::{Caller, TestApp};
-use common::testset;
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset;
 use pinakes::tenants::{Tenants, group_dir_name, tenant_dir_name, user_dir_name};
 use pinakes::trace::replay::{TraceReader, WikiSource, replay, trace_files};
 use pinakes::trace::{Endpoint, TraceRecord};

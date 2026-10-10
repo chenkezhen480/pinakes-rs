@@ -6,13 +6,13 @@
 //! claim planted here and proposes the fixes it is asked for. What a real model finds is the
 //! subject of `tests/librarian_live.rs`.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::llm::{FakeLlm, OK, Step, all_ok, describe_from_definition};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::llm::{FakeLlm, OK, Step, all_ok, describe_from_definition};
 use pinakes::tenants::user_dir_name;
 use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::{Value, json};

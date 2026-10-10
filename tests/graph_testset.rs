@@ -10,19 +10,17 @@
 //!
 //! ```text
 //! NEO4J_PASSWORD=... docker compose up -d neo4j
-//! PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test graph_testset
+//! PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=... cargo test --test integration graph_testset::
 //! ```
 //!
 //! Without `PINAKES_TEST_NEO4J_URI` the Neo4j test says so and passes. Run with `-- --nocapture` for
 //! the per-category report.
 
-mod common;
-
 use std::collections::HashMap;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset::{self, Tally, describe, judge};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::testset::{self, Tally, describe, judge};
 use serde_json::json;
 
 struct Outcome {

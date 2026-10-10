@@ -3,14 +3,14 @@
 //! are embedded again, removed pages lose their vectors, and hits say how they were found.
 //! Search quality with the real model is measured in `meaning_testset.rs`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::embed::{FAKE_DIM, Fake};
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::embed::{FAKE_DIM, Fake};
 use pinakes::store::{SqliteStore, Store};
 use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::{Value, json};

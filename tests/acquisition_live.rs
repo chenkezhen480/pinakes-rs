@@ -6,14 +6,12 @@
 //! only when asked, since it calls the model for real (`model.conf`):
 //!
 //! ```text
-//! PINAKES_TEST_LLM=1 cargo test --test acquisition_live -- --nocapture
+//! PINAKES_TEST_LLM=1 cargo test --test integration acquisition_live:: -- --nocapture
 //! ```
 //!
 //! Every verdict is written to `target/acquisition-eval/` for reading.
 
-mod common;
-
-use common::testset;
+use crate::common::testset;
 use pinakes::config::Config;
 use pinakes::librarian::Librarian;
 use pinakes::librarian::acquire::GapText;

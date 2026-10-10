@@ -3,7 +3,7 @@
 //! anything in. Runs only when asked, since it calls the model for real:
 //!
 //! ```text
-//! PINAKES_LINT_EVAL=1 cargo test --test lint_eval -- --nocapture
+//! PINAKES_LINT_EVAL=1 cargo test --test integration lint_eval:: -- --nocapture
 //! ```
 //!
 //! `PINAKES_LINT_RUNS` sets the number of runs (3 by default); with `PINAKES_TEST_EMBEDDING`
@@ -19,13 +19,13 @@
 //! of the model is written to `target/lint-eval/` for reading; the clean runs' findings are what
 //! the model reports without anything planted, true problems of the scenarios or not.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset;
 use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::testset;
 use pinakes::config::Config;
 use pinakes::wiki::{Page, PagePath, WikiFs};
 use serde_json::{Value, json};

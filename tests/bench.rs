@@ -10,7 +10,7 @@
 //! the real model is timed on its own when `PINAKES_TEST_EMBEDDING` is set.
 //!
 //! ```text
-//! PINAKES_BENCH_PAGES=1000,10000,100000 cargo test --release --test bench -- --ignored --nocapture
+//! PINAKES_BENCH_PAGES=1000,10000,100000 cargo test --release --test integration bench:: -- --ignored --nocapture
 //! ```
 //!
 //! Without the variable it runs 1,000 pages. `PINAKES_BENCH_THREADS=<n>` sets the service's
@@ -18,15 +18,15 @@
 //! tenant opens, so the history save it starts in the background is done before anything else
 //! is timed.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::app::{Caller, TestApp};
-use common::testset;
+use crate::common::app::{Caller, TestApp};
+use crate::common::testset;
 use pinakes::embed::Embedder;
 use pinakes::tenants::{group_dir_name, tenant_dir_name, user_dir_name};
 use pinakes::wiki::{Page, PagePath, WikiFs};
@@ -484,7 +484,7 @@ vector_graph_rows = {}
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "benchmark: PINAKES_BENCH_PAGES=1000,10000,100000 cargo test --release --test bench -- --ignored --nocapture"]
+#[ignore = "benchmark: PINAKES_BENCH_PAGES=1000,10000,100000 cargo test --release --test integration bench:: -- --ignored --nocapture"]
 async fn bench() {
     // The service's own log lines say where opening a tenant spends its time.
     let _ = tracing_subscriber::fmt()

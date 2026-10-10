@@ -3,18 +3,18 @@
 //! were written from), new versions read again only where they changed, uploads without an id
 //! recognized from the wiki, and a stopped reading resumed where it stopped.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::llm::{
+use crate::common::app::{Caller, TestApp};
+use crate::common::llm::{
     FakeLlm, NOT_THE_SAME, OK, Step, UNREACHABLE, all_ok, candidates, create, cursor_of,
     describe_from_definition, focus_title, folder, items, line_after, read_reply, reader,
     record_of, related_pages, same_as, shown, task_title, update,
 };
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 fn filler(topic: &str, n: usize) -> String {

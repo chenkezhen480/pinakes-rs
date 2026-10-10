@@ -4,10 +4,8 @@
 //! until the admin approves, and then the whole draft is applied at once. Drafts follow their
 //! space's visibility and leave with the user who wrote into them.
 
-mod common;
-
+use crate::common::app::{ADMIN, Caller, TestApp};
 use axum::http::StatusCode;
-use common::app::{ADMIN, Caller, TestApp};
 use serde_json::{Value, json};
 
 fn schema() -> Value {

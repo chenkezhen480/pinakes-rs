@@ -6,17 +6,17 @@
 //! --build converter`, then `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090`), a Word file also
 //! goes through MarkItDown itself.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
-use axum::Json;
-use axum::http::{HeaderMap, StatusCode};
-use common::app::{Caller, TestApp};
-use common::llm::{
+use crate::common::app::{Caller, TestApp};
+use crate::common::llm::{
     FakeLlm, NOT_THE_SAME, OK, Step, all_ok, create, describe_from_definition, folder, read_reply,
     read_step, read_steps, record_of, shown,
 };
+use axum::Json;
+use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
 /// A model that reads the whole text as one concept and files it as one page.

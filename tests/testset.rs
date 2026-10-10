@@ -1,6 +1,6 @@
 //! Checks that `testset/` is internally consistent: pages parse and follow the wiki rules,
 //! anchors and graph data resolve, and every question points at things that exist.
-//! Run `cargo test --test testset -- --nocapture` to see the per-category counts.
+//! Run `cargo test --test integration testset:: -- --nocapture` to see the per-category counts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;

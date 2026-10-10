@@ -2,15 +2,15 @@
 //! streams back as a Server-Sent Event. Mounted only with `PINAKES_DEV=1`, so these tests merge
 //! its routes themselves.
 
-mod common;
+use crate::common;
 
 use std::sync::{Arc, Mutex};
 
+use crate::common::app::TestApp;
+use crate::common::testset;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::app::TestApp;
-use common::testset;
 use http_body_util::BodyExt;
 use pinakes::llm::{LlmClient, Prompt};
 use serde_json::{Value, json};

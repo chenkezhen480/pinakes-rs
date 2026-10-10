@@ -7,17 +7,17 @@
 //! their approval, raw sources, the write queue, `index.md` and `log.md`. A real model's
 //! judgement is the subject of the live test in `tests/librarian_live.rs`.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
-use axum::http::StatusCode;
-use common::app::{Caller, TestApp};
-use common::llm::{
+use crate::common::app::{Caller, TestApp};
+use crate::common::llm::{
     FakeLlm, NO_EDITS, OK, Step, UNREACHABLE, all_ok, all_rejected, create,
     describe_from_definition, folder, items, related_pages, update,
 };
-use common::testset;
+use crate::common::testset;
+use axum::http::StatusCode;
 use pinakes::tenants::{group_dir_name, user_dir_name};
 use serde_json::{Value, json};
 

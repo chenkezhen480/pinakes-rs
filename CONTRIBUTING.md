@@ -38,7 +38,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test -j 2 --no-fail-fast
 ```
 
-`-j 2` keeps the test build within a 16 GB machine's memory. CI runs the same three. Tests that
+`-j 2` keeps the test build within a 16 GB machine's memory. The files of `tests/` are modules of
+one test program, `integration` (listed in `tests/main.rs`; add a `mod` line for a new file), and
+one file's tests run with its name as the filter: `cargo test --test integration lint::`. CI runs the same three. Tests that
 need a service or cost money run only when asked:
 
 | Variable | Runs |
@@ -48,7 +50,7 @@ need a service or cost money run only when asked:
 | `PINAKES_TEST_EMBEDDING=1` | the real embedding model on the test set (downloads it once) |
 | `PINAKES_TEST_LLM=1` | the librarian and acquisition against a real model (costs money) |
 | `PINAKES_TEST_CRAWL=<domain>` | reading a real site |
-| `PINAKES_BENCH_PAGES=1000,10000` with `--release --test bench -- --ignored` | the speed benchmark |
+| `PINAKES_BENCH_PAGES=1000,10000` with `--release --test integration bench:: -- --ignored` | the speed benchmark |
 
 ## Rules a change keeps
 

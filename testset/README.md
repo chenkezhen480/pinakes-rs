@@ -5,7 +5,7 @@ test set"). It is a **starter set**: synthetic but realistic content across six 
 scenarios, written so M2 can be built and measured. Real questions from real deployments should
 replace or extend it over time; the thesis experiments need them.
 
-`cargo test --test testset` checks that the set is internally consistent (see "Validation").
+`cargo test --test integration testset::` checks that the set is internally consistent (see "Validation").
 
 ## Scenarios
 
