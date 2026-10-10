@@ -15,10 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # About 40 test binaries each link ONNX Runtime statically: with full debug info they fill the
-  # runner's disk and the linker dies (signal 7). Line tables keep backtraces readable.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Debug info is line tables only (Cargo.toml's dev profile); no incremental files in CI.
   CARGO_INCREMENTAL: "0"
 
 jobs:

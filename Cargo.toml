@@ -49,3 +49,12 @@ unicode-normalization = "0.1.25"
 http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Debug builds (and tests) keep line tables only: backtraces still name files and lines. With
+# full debug info every test binary, each linking ONNX Runtime, had a .pdb of about 300 MB, and
+# target/ grew past 100 GB as dependency changes left old binaries behind.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
