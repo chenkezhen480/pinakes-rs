@@ -1,0 +1,37 @@
+name: Docker images
+
+on:
+  push:
+    branches: [main]
+    paths: [Dockerfile, docker/**, docker-compose.yml, converter/**, Cargo.toml, Cargo.lock, src/**]
+  pull_request:
+    paths: [Dockerfile, docker/**, docker-compose.yml, converter/**]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: pinakes
+            context: .
+          - image: pinakes-converter
+            context: converter
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          tags: ${{ matrix.image }}:ci
+          build-args: |
+            PINAKES_GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

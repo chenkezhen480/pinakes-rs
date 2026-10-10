@@ -2,6 +2,13 @@
 name = "pinakes"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+description = "A self-hosted knowledge service for AI agents: an LLM-maintained wiki with a business graph, searched in milliseconds over HTTP and MCP, in Chinese and English"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/chenkezhen480/pinakes-rs"
+readme = "README.md"
+keywords = ["knowledge-base", "mcp", "agent", "rag", "wiki"]
+categories = ["web-programming::http-server", "text-processing", "database"]
 default-run = "pinakes"
 
 [dependencies]

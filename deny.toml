@@ -1,0 +1,44 @@
+# cargo-deny: what CI accepts among the dependencies (`cargo deny check`).
+
+[graph]
+all-features = false
+
+[advisories]
+# Known vulnerabilities and unmaintained crates fail the check, unless listed below with why.
+ignore = [
+    # `rsa`, through `jsonwebtoken` (JWT mode): the Marvin attack recovers a private key from the
+    # timing of decryption or signing. Pinakes only verifies tokens with the host's public key
+    # and never decrypts or signs with RSA; no fixed version exists.
+    { id = "RUSTSEC-2023-0071", reason = "only RSA signature verification with public keys is used" },
+    # `paste`, unmaintained, through `fastembed` -> `tokenizers`: a compile-time macro crate,
+    # with no runtime exposure; it goes when tokenizers drops it.
+    { id = "RUSTSEC-2024-0436", reason = "build-time macro crate pulled in by tokenizers" },
+]
+
+[licenses]
+# Permissive licenses only; MPL-2.0 is file-level copyleft (one crate, `option-ext`), compatible
+# with distributing Pinakes under MIT OR Apache-2.0.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

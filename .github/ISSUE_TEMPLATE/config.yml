@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability / 报告安全漏洞
+    url: https://github.com/chenkezhen480/pinakes-rs/security/advisories/new
+    about: Privately, to the maintainers only. 私下报告，仅维护者可见。
+  - name: Design and documentation / 设计与文档
+    url: https://github.com/chenkezhen480/pinakes-rs/blob/main/docs/design.md
+    about: How each part works and why. 各部分如何工作、为什么这样设计。

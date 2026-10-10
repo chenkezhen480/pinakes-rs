@@ -1169,7 +1169,7 @@ The thesis experiments run on M2 to M6. Other search entry points are opened onl
 - ☐ **Which entry point to open first.** After the wiki-only experiment: direct graph queries, search over raw chunks, or per-kind search tools?
 - ☑ **Embedding model.** Decided 2026-10-03, after measuring on the test set (see "As built in M5"): only Chinese and English are needed, and jina-embeddings-v2-base-zh found every cross-language answer first while multilingual-e5-small found 7 of 12 in its top three.
 - ☑ **First external sources.** Decided with the user 2026-10-10: no search engine; only the tenant's trusted sites are read, into a local index gaps are matched against (see "Plan for M9").
-- ☐ **License.** MIT, Apache-2.0, or both (the usual choice for Rust crates)?
+- ☑ **License.** Decided with the user 2026-10-10, before entering the project in an open-source competition: MIT OR Apache-2.0, at the user's option (the Rust ecosystem's usual pair: `LICENSE-MIT`, `LICENSE-APACHE`; third-party components listed in the README, dependency licenses checked in CI by `cargo deny`).
 
 ## Sources
 
