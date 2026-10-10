@@ -15,57 +15,113 @@ English · [简体中文](README.zh-CN.md)
 
 Pinakes is named after the catalogue Callimachus wrote for the Library of Alexandria. It works
 like a library: the wiki is the collection, and an LLM acts as the **librarian** that files,
-merges and checks everything that comes in. The expensive thinking happens once, when content
-is added (the [LLM wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)),
-so agents read with **no LLM on the read path**: lookups, keyword search, graph walks and, when
-the agent asks, a vector search, all over data in memory.
+merges and checks everything that comes in. It is built around two things.
 
-The service returns knowledge, not answers: writing the answer is the calling agent's job.
+## 1. Retrieval in milliseconds
 
-## Why
+The expensive thinking happens once, when knowledge is added (the
+[LLM wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)): the
+librarian writes the synthesis into pages ahead of time. So a read is only a lookup. **No LLM
+and no database query on the read path**: name matching, keyword search, graph walks and, when
+the agent asks, a vector search, all over an in-memory snapshot. Classic RAG pays an LLM call on
+every question; Pinakes answers before an LLM would have started.
 
-Classic RAG searches raw text chunks and asks an LLM to assemble an answer on every question.
-Pinakes writes the synthesis into pages ahead of time, so a search returns answer-shaped pages,
-related memories and real graph edges together, and the agent decides what to open next
-(following [A-RAG](https://arxiv.org/abs/2602.03442)'s agent-driven retrieval).
+Measured on a laptop with 4 compute threads (medians; method and every number in
+[docs/design.md](docs/design.md), "How it stays fast"):
 
-## Features
+| Wiki size | Keyword search | Vector search | Semantic search, query embedding included | One page changed (write) |
+|---|---|---|---|---|
+| 10,000 pages | **2.3 ms** | 7 ms (exact) | about 37 ms | 0.16 s |
+| 100,000 pages | **10 ms** | **3 to 5 ms** (HNSW, recall@10 0.983) | about 33 ms | 1.29 s |
 
-- **One search entry, three slots.** `/search` brings back **memories** (agent experience,
-  decisions, preferences), **knowledge** (expertise, graph schema descriptions) and
-  **relations** (graph edges), each hit with a route for the agent to follow.
-- **Five kinds of knowledge, five ways in.** Agent experience, user decision history, vertical
-  expertise (documents and manuals), the business graph, and user preferences, each with its own
-  rules and page shape. The librarian updates related pages instead of piling up documents, and
-  an LLM verifies every change; unsupported edits are held for a person to review.
-- **A business graph described by its schema.** Schemas define node and relation types (and the
-  properties a node may hold); any number of graph spaces hold real nodes and edges. Graph data
-  is stored in SQLite by default, or Neo4j.
-- **Chinese and English** from day one: jieba-based tokenizing, a name matcher over page and node
-  names, and a local Chinese–English embedding model (`jina-embeddings-v2-base-zh`) for
-  cross-language meaning search.
-- **Isolation by tenant, group and user**, on pages and graph spaces alike (shared, private or
-  restricted). Identity comes from the host system: API keys or JWT.
+Graph walks take microseconds, and name matching under 0.3 ms at every size. Most of a semantic
+search is embedding the query on the CPU (about 29 ms). What makes it fast:
+
+- **Compiled at write time, looked up at read time**: one search returns answer-shaped pages,
+  related memories and real graph edges together, in three slots, with routes to follow.
+- **Everything a search touches is in memory**: the tantivy index (memory-mapped), page vectors
+  as int8 (a quarter of the memory, compared with AVX2), the graph as adjacency lists.
+- **Our own HNSW index** over the int8 vectors of large tenants, one per search slot, updated
+  on every write and deletion.
+- **Writes change only what changed**: incremental snapshots, so a 100,000-page wiki takes a new
+  page in about a second.
+- **Rust**, with one bounded compute pool: no garbage-collection pauses, predictable latency.
+
+## 2. Knowledge that hosts and manages itself
+
+**Self-hosted.** Pinakes is one Rust binary (plus an optional converter container) on your own
+machine or server. Your knowledge stays in files you can read: the wiki is plain Markdown, each
+tenant has one SQLite file, and graph data sits in SQLite or Neo4j. The embedding model runs
+locally. The only outside call is the librarian's model at write time, and that can be any
+Anthropic-compatible or OpenAI-compatible endpoint, a local model too (Ollama, vLLM). Tenants,
+groups and users are isolated; deletion is hard, checked byte by byte.
+
+**Self-managing.** Nobody has to curate the wiki by hand; people step in only to approve:
+
+```mermaid
+flowchart LR
+    In["Agents and systems add knowledge<br/>(5 kinds, documents)"] --> Lib["Librarian files it:<br/>merges into existing pages,<br/>verifies every change"]
+    Lib --> Wiki[("Wiki + graph")]
+    Wiki --> Search["Agents search<br/>(traces kept)"]
+    Search --> Lint["Lint: contradictions, stale claims,<br/>duplicates, broken links, weak searches"]
+    Lint --> Fix["Fixes and gap-filling proposals<br/>(acquisition from trusted sites,<br/>agents' graph drafts)"]
+    Fix --> Review{"A person approves"}
+    Review --> Lib
+```
+
+- **Filing, not piling up**: new content updates the pages it belongs to instead of adding
+  another document; a document is read like a person reads it, one concept at a time, and a new
+  version updates only what changed. Edits the evidence doesn't support are held for review.
+- **Upkeep**: lint finds contradictions, stale claims, duplicates, broken links, unanchored
+  memories and keywords searches keep missing, and proposes fixes.
+- **Growing on its own**: acquisition reads the sites a tenant trusts (its allowlist only, no
+  search engine), matches pages to the gaps lint found, screens them for prompt injection, and
+  proposes them; a person approves before anything is filed.
+- **Agents take part**: they record experience, decisions and preferences as they work, and
+  propose changes to the graph as one reviewable draft per space.
+
+## How it works
+
+Pinakes keeps three layers apart, and only the librarian writes the middle one:
+
+| Layer | What it is | Who writes it |
+|---|---|---|
+| Raw sources | Task records, decision records, documents, schema definitions, preference notes; kept as they arrived, never changed | The agents and systems that call Pinakes |
+| The wiki | Markdown pages per kind and audience, linked to each other and anchored to graph entities | The librarian (an LLM): it plans each change, writes it, and another step verifies it against the sources |
+| Graph data | Nodes and edges in graph spaces, checked against their schema | The host system, or agents' drafts once a person approves them; never an LLM |
+
+Knowledge comes in through **one entry per kind**, and goes out through **one search entry**:
+
+| Kind | Added with | Comes back in |
+|---|---|---|
+| Agent experience: what worked, pitfalls and fixes | `/ingest/experience`, MCP `record_experience` | memories |
+| User decisions and their outcomes | `/ingest/decision`, MCP `record_decision` | memories |
+| User preferences | `/ingest/preference`, MCP `record_preference` | memories |
+| Vertical expertise: documents and manuals | `/ingest/expertise` (JSON or a file) | knowledge |
+| The business graph: schemas, spaces, nodes, edges | `/ingest/graph/schema`, `/space`, `/data` | knowledge (the schema's description) and relations (the edges) |
+
+A search (`/search`, MCP `search`) brings back three slots at once: **memories**, **knowledge**
+and **relations**. Each hit says how it matched and carries a route: read the page, open the
+source it cites, walk the graph from a node. The service returns signals, not decisions: the
+agent chooses keywords or meaning, what to open and what to follow
+([A-RAG](https://arxiv.org/abs/2602.03442)), and writes the answer itself.
+
+| | Classic RAG | Pinakes |
+|---|---|---|
+| When the thinking happens | on every question | once, when knowledge is added |
+| What a search finds | raw text chunks | synthesized pages, related memories, real graph edges |
+| An LLM on the read path | yes | no |
+| Who decides how to search | the pipeline | the agent |
+| How knowledge stays current | re-index the documents | the librarian merges, lint checks, people approve |
+
+## Also
+
+- **A business graph described by its schema**: node and relation types, node properties, any
+  number of graph spaces (shared, private or restricted).
+- **Chinese and English** from day one: jieba tokenizing, a name matcher, and a local
+  Chinese–English embedding model for cross-language search.
 - **Built for agents**: an MCP server with eight tools whose descriptions teach the retrieval
   strategy, beside the HTTP API.
-- **Self-maintaining**: lint finds contradictions, stale claims, duplicates, broken links and
-  frequent weak searches; acquisition can then propose pages from sites the tenant trusts
-  (read only from its allowlist, screened for prompt injection, filed only after a person
-  approves). Agents may propose graph changes too, held for review.
-- **Fast at scale**: an HNSW index of our own over int8 page vectors for large tenants.
-
-## Performance
-
-Measured on a laptop with 4 compute threads (median, see [docs/design.md](docs/design.md)
-"How it stays fast"):
-
-| Wiki size | Keyword search | Semantic search (with the query embedding) | One page changed (write) |
-|---|---|---|---|
-| 10,000 pages | 2.3 ms | about 37 ms | 0.16 s |
-| 100,000 pages | 10 ms | about 33 ms (HNSW; recall@10 0.983 on real vectors) | 1.29 s |
-
-Embedding the query takes most of a semantic search (about 29 ms on CPU); the vector search
-itself takes 3 to 5 ms at 100,000 pages.
 
 ## Architecture
 
@@ -88,6 +144,31 @@ flowchart LR
 
 Reads never call the LLM or query a database: they search the in-memory snapshot. Writes go
 through each tenant's queue, where the librarian files them.
+
+## Running modes
+
+Each is one line of `config.toml` (or the compose profile named); the defaults are marked.
+
+| Choice | Options | When |
+|---|---|---|
+| **Deployment** (`[identity] deployment`) | `multi_tenant` (default) | A platform: an admin creates tenants (`POST /admin/tenants`), each gets an API key; the host sends the user in `X-User-Id`, the groups in `X-User-Groups`, and who a write is for in `X-Audience` |
+| | `personal` | One person: the default tenant `000000` is created on first start, its key written to `<data>/personal-api-key.txt`; calls without a user act as `admin` |
+| **Identity** (`[identity] mode`) | `api_key` (default) | Calls come from a trusted backend, which names the user |
+| | `jwt` | Calls come straight from users' machines (an agent with MCP): the host signs a token holding tenant, user and groups; Pinakes checks it with the host's public key |
+| **Graph store** (`[graph] backend`) | `sqlite` (default) | `graph.sqlite` in each tenant's folder: nothing else to run |
+| | `neo4j` | The compose profile `neo4j`; move data between the two with `pinakes-migrate-graph` |
+| **Meaning search** (`[embedding] model`) | `jina-embeddings-v2-base-zh` (default) | Downloads the model (about 640 MB) into `<data>/models` on first start, in the background; set `HF_ENDPOINT` for a mirror |
+| | unset | Keyword search only (`semantic` and `both` answer 503) |
+| **Default search mode** (`[search] default_mode`) | `keyword` (default), `semantic`, `both`, `auto` | When a search doesn't say; `auto` tries keywords first and falls back to meaning when coverage is weak |
+| **Document converter** (`[converter] url`) | the MarkItDown container | Uploads of Word, PowerPoint, Excel, PDF and HTML; without it, Markdown and text files only |
+| **Acquisition** (`[acquisition] enabled`) | off (default) | On for the deployment, then per tenant with its allowlist (`PUT /admin/tenants/{id}/acquisition`) |
+| **Test chat** (`PINAKES_DEV=1`) | off (default) | A small page at `/dev` that answers from search results, for trying the service |
+
+How to run it: **Docker Compose** (the service and the converter, `docker compose up -d --build`;
+add `--profile neo4j` for Neo4j), or **from source** (`cargo run --release`, with the converter
+started alone by `docker compose --profile dev up -d converter-dev` if you upload documents).
+Secrets never go in `config.toml`: `PINAKES_ADMIN_KEY` (admin routes), `NEO4J_PASSWORD`, and the
+model's key in `model.conf` (git-ignored) or the variable it names.
 
 ## Quick start
 
