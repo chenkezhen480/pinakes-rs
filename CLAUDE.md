@@ -5,7 +5,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 
 ## Working agreement
 
-- Build one milestone at a time (M1…M9 in "Build milestones"). Each milestone ends with its
+- Build one milestone at a time (M1…M10 in "Build milestones"). M10 (planned 2026-10-10, not
+  built: a web console, built-in conversion, vectors off by default) is written up in design.md
+  "M10: a web console, built-in conversion, vectors off by default"; settle its "(to confirm)"
+  points with the user before building them. Each milestone ends with its
   "done when" check, backed by tests.
 - Reply to the user in Chinese. Code, comments and docs stay in English; commit messages may be
   in Chinese (identifiers, test names and error strings as in the code).
