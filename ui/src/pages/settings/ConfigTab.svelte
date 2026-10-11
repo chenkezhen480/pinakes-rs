@@ -64,7 +64,10 @@
 
 {#snippet control(f: FieldView)}
   {@const v = shown(f)}
-  {#if f.kind === "boolean"}
+  {#if !f.editable}
+    <code class="fixed">{text(v) || t("settings.unset")}</code>
+    <span class="hint">{t("settings.byHand")}</span>
+  {:else if f.kind === "boolean"}
     <label class="switch">
       <input type="checkbox" checked={v === true} onchange={(e) => set(f, e.currentTarget.checked)} />
       <span>{v === true ? t("settings.on") : t("settings.off")}</span>
@@ -102,7 +105,7 @@
     </div>
     <div class="input">
       {@render control(f)}
-      {#if JSON.stringify(shown(f)) !== JSON.stringify(f.default)}
+      {#if f.editable && JSON.stringify(shown(f)) !== JSON.stringify(f.default)}
         <button class="btn quiet small" onclick={() => set(f, null)}>{t("settings.toDefault")}</button>
       {/if}
     </div>
@@ -251,6 +254,17 @@
   .input :global(input[type="number"]),
   .input :global(select) {
     width: 100%;
+  }
+  .fixed {
+    font-family: var(--mono);
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    overflow-wrap: anywhere;
+  }
+  .hint {
+    color: var(--muted);
+    font-size: var(--step--2);
   }
   .switch {
     display: inline-flex;

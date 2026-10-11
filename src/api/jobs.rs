@@ -4,27 +4,31 @@
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::identity::{Admin, Scope};
+use crate::identity::{Admin, Scope, is_admin};
 use crate::jobs::{JobInfo, JobState};
 use crate::librarian::{self, Proposal, ProposalStatus};
 
 #[tracing::instrument(name = "get_job", skip_all)]
 pub async fn get(
     State(app): State<AppState>,
+    headers: HeaderMap,
     scope: Scope,
     id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<JobInfo>, ApiError> {
     let Path(id) = id?;
-    let user = scope.user().map(|u| u.dir.as_str());
-    app.jobs
-        .get(&id, &scope.tenant().dir_name, user)
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    let tenant = &scope.tenant().dir_name;
+    let job = if is_admin(&headers, &app) {
+        app.jobs.get_any(&id, tenant)
+    } else {
+        app.jobs
+            .get(&id, tenant, scope.user().map(|u| u.dir.as_str()))
+    };
+    job.map(Json).ok_or(ApiError::NotFound)
 }
 
 #[derive(Debug, Serialize)]
@@ -33,14 +37,21 @@ pub struct JobList {
     pub jobs: Vec<JobInfo>,
 }
 
-/// The tenant's jobs this caller may see (its own and those queued without a user), the
-/// newest first.
+/// The tenant's jobs this caller may see, the newest first: its own and the tenant's lint runs,
+/// or every one for the console's admin (who approves, and follows the filing jobs it starts).
 #[tracing::instrument(name = "list_jobs", skip_all)]
-pub async fn list_jobs(State(app): State<AppState>, scope: Scope) -> Json<JobList> {
-    let user = scope.user().map(|u| u.dir.as_str());
-    Json(JobList {
-        jobs: app.jobs.list(&scope.tenant().dir_name, user),
-    })
+pub async fn list_jobs(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    scope: Scope,
+) -> Json<JobList> {
+    let tenant = &scope.tenant().dir_name;
+    let jobs = if is_admin(&headers, &app) {
+        app.jobs.list_all(tenant)
+    } else {
+        app.jobs.list(tenant, scope.user().map(|u| u.dir.as_str()))
+    };
+    Json(JobList { jobs })
 }
 
 /// A proposal as callers see it: without the writer's folders.

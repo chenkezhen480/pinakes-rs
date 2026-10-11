@@ -150,6 +150,7 @@ export const en = {
   "settings.appliesRestart": "after a restart",
   "settings.pending": "saved; the service runs with {value} until it restarts",
   "settings.toDefault": "Back to default",
+  "settings.byHand": "Names the variable a secret is read from: change it in the config file by hand.",
   "settings.file": "Written to",
   "settings.noFile": "The service was started without a config file, so changes can't be saved. Start it with config.toml (or PINAKES_CONFIG).",
   "settings.restartNeeded": "Saved changes wait for a restart of the service.",

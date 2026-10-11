@@ -313,3 +313,88 @@ async fn the_account_is_changed_on_the_console() {
     let (status, _) = send(&app, "GET", "/console/account", HERE, None, &[], None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn a_session_follows_every_job_of_the_tenant() {
+    let app = TestApp::new();
+    let acme = app.create_tenant("acme").await;
+    let dir = pinakes::tenants::tenant_dir_name("acme");
+    // An approval runs without a user; another user's job has its owner.
+    let approval = app
+        .state
+        .jobs
+        .run(
+            &dir,
+            None,
+            "approve",
+            Box::pin(async { Ok(Default::default()) }),
+        )
+        .await;
+    let jins = app
+        .state
+        .jobs
+        .run(
+            &dir,
+            Some(&pinakes::tenants::user_dir_name("jin")),
+            "memory",
+            Box::pin(async { Ok(Default::default()) }),
+        )
+        .await;
+    let ids = |list: &Value| -> Vec<String> {
+        list["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| j["job"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // A user of the tenant sees neither in the list.
+    let (status, list) = send(
+        &app,
+        "GET",
+        "/jobs",
+        HERE,
+        Some(&acme),
+        &[("X-User-Id", "ann")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(ids(&list).is_empty(), "{list}");
+    let (status, _) = send(
+        &app,
+        "GET",
+        &format!("/jobs/{}", jins.job),
+        HERE,
+        Some(&acme),
+        &[("X-User-Id", "ann")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The console's admin sees both, and opens either.
+    let (_, body) = sign_in(&app, HERE, "root", "1234").await;
+    let token = body["token"].as_str().unwrap().to_owned();
+    let tenant = [("X-Pinakes-Tenant", "acme")];
+    let (status, list) = send(&app, "GET", "/jobs", HERE, Some(&token), &tenant, None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let seen = ids(&list);
+    assert!(
+        seen.contains(&approval.job) && seen.contains(&jins.job),
+        "{list}"
+    );
+    let (status, job) = send(
+        &app,
+        "GET",
+        &format!("/jobs/{}", jins.job),
+        HERE,
+        Some(&token),
+        &tenant,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    assert_eq!(job["status"], "done");
+}

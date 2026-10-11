@@ -634,6 +634,8 @@ pub struct FieldView {
     pub applies: Applies,
     pub advanced: bool,
     pub default: Value,
+    /// Whether the console may change it (see [`editable`]).
+    pub editable: bool,
     /// The value the running service uses.
     pub value: Value,
     /// The value in the file, when it differs from the running one (a restart applies it).
@@ -716,6 +718,7 @@ pub fn view(running: &Config, embedding_on: Option<bool>) -> SettingsView {
                 applies: field.applies,
                 advanced: field.advanced,
                 default: defaults.get(field.path).cloned().unwrap_or(Value::Null),
+                editable: editable(field.path),
                 saved: in_file.filter(|v| *v != value),
                 value,
             }
@@ -738,16 +741,21 @@ pub fn view(running: &Config, embedding_on: Option<bool>) -> SettingsView {
     }
 }
 
-/// Checks a change against its field: known, and of the field's kind. `null` puts the field
-/// back to its default (its line is removed).
+/// Whether the console may change a field. One naming a secret's variable isn't changed from
+/// the console: pointed at another variable (and an address elsewhere), it would send that
+/// variable's value out.
+pub fn editable(path: &str) -> bool {
+    !path.ends_with("_env")
+}
+
+/// Checks a change against its field: known, editable, and of the field's kind. `null` puts the
+/// field back to its default (its line is removed).
 pub fn check(path: &str, value: &Value) -> Result<Option<toml_edit::Value>, String> {
     let field = FIELDS
         .iter()
         .find(|f| f.path == path)
         .ok_or_else(|| format!("{path} is not a setting"))?;
-    // A field naming a secret's variable isn't changed from the console: pointed at another
-    // variable (and an address elsewhere), it would send that variable's value out.
-    if path.ends_with("_env") {
+    if !editable(path) {
         return Err(format!(
             "{path} names the variable a secret is read from: change it in the config file by hand"
         ));
@@ -887,6 +895,19 @@ mod tests {
         assert!(check("converter.url", &Value::Null).unwrap().is_none());
         for field in ["neo4j.password_env", "identity.admin_key_env"] {
             assert!(check(field, &serde_json::json!("DEEPSEEK_API_KEY")).is_err());
+        }
+    }
+
+    #[test]
+    fn the_console_is_told_which_fields_it_may_change() {
+        let v = view(&Config::default(), None);
+        let editable = |path: &str| v.fields.iter().find(|f| f.path == path).unwrap().editable;
+        assert!(!editable("neo4j.password_env"));
+        assert!(!editable("identity.admin_key_env"));
+        assert!(editable("server.port"));
+        // Every field the console shows as editable passes the check with its own value.
+        for f in v.fields.iter().filter(|f| f.editable) {
+            assert!(check(f.path, &f.value).is_ok(), "{}", f.path);
         }
     }
 }

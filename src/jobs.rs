@@ -263,11 +263,24 @@ impl Jobs {
 
     /// A job of this tenant that this caller may see; `None` otherwise, as for an unknown id.
     pub fn get(&self, id: &str, tenant: &str, user: Option<&str>) -> Option<JobInfo> {
+        self.found(id, tenant, |owner| owner.is_none() || owner == user)
+    }
+
+    /// A job of this tenant, whoever queued it: for the service's admin.
+    pub fn get_any(&self, id: &str, tenant: &str) -> Option<JobInfo> {
+        self.found(id, tenant, |_| true)
+    }
+
+    fn found(
+        &self,
+        id: &str,
+        tenant: &str,
+        shown: impl Fn(Option<&str>) -> bool,
+    ) -> Option<JobInfo> {
         let mut inner = self.lock();
         self.prune(&mut inner);
         let e = inner.jobs.get(id)?;
-        let mine = e.tenant == tenant && (e.owner.is_none() || e.owner.as_deref() == user);
-        mine.then(|| e.info.clone())
+        (e.tenant == tenant && shown(e.owner.as_deref())).then(|| e.info.clone())
     }
 
     /// The jobs of this tenant listed to this caller, the newest first: queued, running, and
@@ -276,15 +289,24 @@ impl Jobs {
     /// are counts. A job queued without a user may name a group's pages; listing it to every
     /// user would show those pages exist, so it stays reachable only by its id.
     pub fn list(&self, tenant: &str, user: Option<&str>) -> Vec<JobInfo> {
+        self.listed(tenant, |owner, kind| {
+            owner == user || (owner.is_none() && kind == "lint")
+        })
+    }
+
+    /// Every job of this tenant, the newest first: for the service's admin, who may see all of
+    /// it (approvals and filings queued without a user included).
+    pub fn list_all(&self, tenant: &str) -> Vec<JobInfo> {
+        self.listed(tenant, |_, _| true)
+    }
+
+    fn listed(&self, tenant: &str, shown: impl Fn(Option<&str>, &str) -> bool) -> Vec<JobInfo> {
         let mut inner = self.lock();
         self.prune(&mut inner);
         let mut out: Vec<JobInfo> = inner
             .jobs
             .values()
-            .filter(|e| {
-                e.tenant == tenant
-                    && (e.owner.as_deref() == user || (e.owner.is_none() && e.info.kind == "lint"))
-            })
+            .filter(|e| e.tenant == tenant && shown(e.owner.as_deref(), &e.info.kind))
             .map(|e| e.info.clone())
             .collect();
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.job.cmp(&a.job)));
@@ -372,6 +394,12 @@ mod tests {
         assert!(jobs.get(&info.job, "t_a", Some("u_1")).is_some());
         assert!(jobs.get(&info.job, "t_a", Some("u_2")).is_none());
         assert!(jobs.get(&info.job, "t_a", None).is_none());
+        // The admin sees every job of the tenant, and no other tenant's.
+        assert!(jobs.get_any(&info.job, "t_a").is_some());
+        assert!(jobs.get_any(&info.job, "t_b").is_none());
+        assert!(jobs.list("t_a", Some("u_2")).is_empty());
+        assert_eq!(jobs.list_all("t_a").len(), 1);
+        assert!(jobs.list_all("t_b").is_empty());
         // The queue survives the panic.
         let next = jobs
             .run(

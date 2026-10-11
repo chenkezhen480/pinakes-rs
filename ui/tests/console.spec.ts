@@ -164,8 +164,12 @@ test.describe("signed in", () => {
     await expect(source).toContainText("Return windows for orders shipped abroad.");
     await source.getByRole("button", { name: "批准" }).click();
     await expect(page.getByText("没有待审内容")).toBeVisible({ timeout: 20_000 });
-    await page.goto("/ui/#/wiki/expertise/returns-abroad");
-    await expect(page.getByRole("heading", { level: 1, name: "Returns abroad" })).toBeVisible({ timeout: 20_000 });
+    // Filed by a job in the background: the page is opened again until the job has written it.
+    await expect(async () => {
+      await page.goto("/ui/#/wiki/expertise/returns-abroad");
+      await page.reload();
+      await expect(page.getByRole("heading", { level: 1, name: "Returns abroad" })).toBeVisible({ timeout: 1_000 });
+    }).toPass({ timeout: 30_000 });
     // The draft is in the graph now.
     await page.goto("/ui/#/graph/node/mainland:customer/c2");
     await expect(page.locator(".detail h2")).toHaveText("王芳");
@@ -179,6 +183,10 @@ test.describe("signed in", () => {
     await page.getByRole("button", { name: "保存" }).click();
     await expect(page.getByText("已保存的改动要在服务重启后才生效。")).toBeVisible();
     await expect(row).toContainText("重启前服务仍按 30 运行");
+    // A field naming a secret's variable is shown, not offered for editing.
+    const fixed = page.locator(".field-row").filter({ has: page.locator("code.key", { hasText: /^admin_key_env$/ }) });
+    await expect(fixed).toContainText("只能在配置文件里手动修改");
+    await expect(fixed.locator("input")).toHaveCount(0);
   });
 
   test("turning embeddings on downloads the model in the background", async ({ page }) => {

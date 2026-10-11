@@ -234,31 +234,8 @@ fn blank_to_none(v: &Option<String>) -> Option<String> {
 }
 
 impl ModelChange {
-    /// The model with this change applied. A key kept in the file goes only where it went:
-    /// a change of provider or address that brings no key of its own drops it, so the
-    /// console's write-only key can't be sent to an address someone just typed.
+    /// The model with this change applied; the key stays unless the change sets or removes it.
     fn applied(&self, to: &ModelConfig) -> ModelConfig {
-        let mut m = self.fields(to);
-        if self.moves_without_key(to) {
-            m.api_key = None;
-        }
-        m
-    }
-
-    /// Whether the change brings a key of its own (a `null` or blank one empties the key, and
-    /// brings none).
-    fn brings_key(&self) -> bool {
-        matches!(&self.api_key, Some(Some(k)) if !k.trim().is_empty())
-    }
-
-    /// Whether this change sends the model to another provider or address without a key of its
-    /// own.
-    fn moves_without_key(&self, to: &ModelConfig) -> bool {
-        let m = self.fields(to);
-        (m.provider != to.provider || m.base_url != to.base_url) && !self.brings_key()
-    }
-
-    fn fields(&self, to: &ModelConfig) -> ModelConfig {
         let mut m = to.clone();
         if let Some(p) = self.provider {
             m.provider = p;
@@ -394,59 +371,11 @@ impl AppState {
         }
     }
 
-    /// The variables that hold the service's own secrets, which a model's `key_env` may not name
-    /// (the model's key is sent to the model's address).
-    fn own_secrets(&self) -> [String; 3] {
-        [
-            self.config.identity.admin_key_env.clone(),
-            crate::login::PASSWORD_ENV.to_owned(),
-            self.config.neo4j.password_env.clone(),
-        ]
-    }
-
-    /// Where a change would send a key: never one of the service's own secrets, and never a key
-    /// someone didn't choose for the new place. Moving to another provider or address without a
-    /// key of its own drops the key typed at the terminal (the file's is dropped by `applied`),
-    /// and a key in the environment goes along only when the change names its variable.
-    fn guard_key(&self, change: &ModelChange, state: &mut ModelState) -> Result<(), String> {
-        if let Some(Some(v)) = &change.key_env {
-            let v = v.trim();
-            if self.own_secrets().iter().any(|s| s.eq_ignore_ascii_case(v)) {
-                return Err(format!(
-                    "key_env can't be {v}: it holds one of the service's own secrets"
-                ));
-            }
-            // Only a variable named for an API key: any other (a proxy, a cloud secret) could
-            // be read out by pointing the model at an address of one's choosing.
-            if !v.is_empty() && !v.to_ascii_uppercase().ends_with("_API_KEY") {
-                return Err(format!(
-                    "key_env must name a variable ending in _API_KEY (such as DEEPSEEK_API_KEY), not {v}"
-                ));
-            }
-        }
-        if change.moves_without_key(&state.config) {
-            state.entered_key = None;
-            let next = change.applied(&state.config);
-            let in_env = std::env::var(next.key_env())
-                .ok()
-                .is_some_and(|k| !k.trim().is_empty());
-            if in_env && change.key_env.is_none() {
-                return Err(format!(
-                    "the key in {} doesn't follow a new provider or address on its own: enter the key for it, or name the variable that holds it (key_env)",
-                    next.key_env()
-                ));
-            }
-        }
-        Ok(())
-    }
-
     /// Changes the model: written to the model file (its comments kept), and the librarian
     /// switched to it at once. A model that can't be called yet (no key, no name) is saved,
     /// and the librarian is off until it can. Audited, without the key.
     pub fn set_model(&self, change: &ModelChange) -> Result<ModelView, ApiError> {
         let mut state = self.model_state();
-        self.guard_key(change, &mut state)
-            .map_err(ApiError::BadRequest)?;
         let next = change.applied(&state.config);
         if next.provider == LlmProvider::OpenaiCompatible && next.base_url.is_none() {
             return Err(ApiError::BadRequest(
@@ -476,13 +405,6 @@ impl AppState {
     /// One tiny call to the model as it is, or as `change` would make it (unsaved), timed.
     pub async fn test_model(&self, change: &ModelChange) -> ModelTest {
         let mut state = self.model_state();
-        if let Err(e) = self.guard_key(change, &mut state) {
-            return ModelTest {
-                ok: false,
-                ms: 0,
-                error: Some(e),
-            };
-        }
         state.config = change.applied(&state.config);
         let started = Instant::now();
         let client = match llm::client(
@@ -640,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_key_never_follows_a_new_address() {
+    fn a_change_keeps_the_key_unless_it_sets_one() {
         let saved = ModelConfig::from_toml_str(
             "provider = \"anthropic\"
 base_url = \"https://api.deepseek.com/anthropic\"
@@ -650,39 +572,26 @@ api_key = \"sk-saved\"
         )
         .unwrap();
         let elsewhere = ModelChange {
-            base_url: Some(Some("https://attacker.example".into())),
+            base_url: Some(Some("https://other.example".into())),
+            model: Some(Some("m2".into())),
             ..Default::default()
         };
-        assert_eq!(elsewhere.applied(&saved).api_key, None);
-        assert!(elsewhere.moves_without_key(&saved));
+        let m = elsewhere.applied(&saved);
+        assert_eq!(m.base_url.as_deref(), Some("https://other.example"));
+        assert_eq!(m.api_key.as_deref(), Some("sk-saved"));
         let with_key = ModelChange {
-            base_url: Some(Some("https://other.example".into())),
             api_key: Some(Some("sk-new".into())),
             ..Default::default()
         };
         assert_eq!(with_key.applied(&saved).api_key.as_deref(), Some("sk-new"));
-        assert!(!with_key.moves_without_key(&saved));
-        // Emptying the key brings none: the move still counts as one without a key.
-        let emptied = ModelChange {
-            base_url: Some(Some("https://attacker.example".into())),
-            api_key: Some(None),
-            ..Default::default()
-        };
-        assert!(emptied.moves_without_key(&saved));
-        let blank = ModelChange {
-            base_url: Some(Some("https://attacker.example".into())),
-            api_key: Some(Some("  ".into())),
-            ..Default::default()
-        };
-        assert!(blank.moves_without_key(&saved));
-        let same_place = ModelChange {
-            model: Some(Some("m2".into())),
-            ..Default::default()
-        };
-        assert_eq!(
-            same_place.applied(&saved).api_key.as_deref(),
-            Some("sk-saved")
-        );
+        // `null` or a blank key removes it.
+        for removed in [None, Some("  ".to_owned())] {
+            let change = ModelChange {
+                api_key: Some(removed),
+                ..Default::default()
+            };
+            assert_eq!(change.applied(&saved).api_key, None);
+        }
     }
 
     #[test]

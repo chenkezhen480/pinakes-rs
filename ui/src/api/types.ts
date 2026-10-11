@@ -371,6 +371,10 @@ document: string | null, source_url: string | null, entities: Array<string>, dat
  */
 export type FieldView = { path: string, section: string, description: string, description_zh: string, applies: Applies, advanced: boolean, default: JsonValue, 
 /**
+ * Whether the console may change it (see [`editable`]).
+ */
+editable: boolean, 
+/**
  * The value the running service uses.
  */
 value: JsonValue, 

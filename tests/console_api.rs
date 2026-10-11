@@ -248,30 +248,33 @@ async fn fake_openai() -> String {
 }
 
 #[tokio::test]
-async fn a_model_key_never_comes_from_the_services_own_secrets() {
+async fn a_model_keeps_its_key_when_moved_and_takes_any_key_variable() {
     let app = TestApp::with_config_file("");
-    for secret in [
-        "PINAKES_ADMIN_KEY",
-        "PINAKES_ADMIN_PASSWORD",
-        "NEO4J_PASSWORD",
-    ] {
-        let change = json!({ "provider": "openai_compatible", "base_url": "https://elsewhere.example",
-                             "model": "m", "key_env": secret });
-        let (status, t) = app.post_admin("/admin/model/test", change.clone()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(t["ok"], false, "{t}");
-        assert!(t["error"].as_str().unwrap().contains("own secrets"), "{t}");
-        let (status, body) = app.put_admin("/admin/model", change).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    }
-    // Nor from any variable that isn't named for an API key.
-    for other in ["HTTPS_PROXY", "AWS_SECRET_ACCESS_KEY", "PATH"] {
-        let change = json!({ "provider": "openai_compatible", "base_url": "https://elsewhere.example",
-                             "model": "m", "key_env": other });
-        let (_, t) = app.post_admin("/admin/model/test", change).await;
-        assert!(t["error"].as_str().unwrap().contains("_API_KEY"), "{t}");
-    }
-    assert!(!app.data.path().join("model.conf").exists());
+    let first = fake_openai().await;
+    let (status, m) = app
+        .put_admin(
+            "/admin/model",
+            json!({ "provider": "openai_compatible", "base_url": first,
+                    "model": "m", "api_key": "sk-kept" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{m}");
+    // Another address without a key of its own: the stored key goes along.
+    let second = fake_openai().await;
+    let (status, m) = app
+        .put_admin("/admin/model", json!({ "base_url": second }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{m}");
+    assert_eq!(m["key"], "file");
+    assert_eq!(m["librarian"], true);
+    let file = std::fs::read_to_string(app.data.path().join("model.conf")).unwrap();
+    assert!(file.contains("sk-kept"), "{file}");
+    // `key_env` may name any variable.
+    let (status, m) = app
+        .put_admin("/admin/model", json!({ "key_env": "MY_LLM_TOKEN" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{m}");
+    assert_eq!(m["key_env"], "MY_LLM_TOKEN");
 }
 
 #[tokio::test]

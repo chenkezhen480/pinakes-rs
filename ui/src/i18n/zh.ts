@@ -143,6 +143,7 @@ export const zh: Strings = {
   "settings.appliesRestart": "重启后生效",
   "settings.pending": "已保存；重启前服务仍按 {value} 运行",
   "settings.toDefault": "恢复默认",
+  "settings.byHand": "这一项指明从哪个环境变量读取密钥，只能在配置文件里手动修改。",
   "settings.file": "写入文件",
   "settings.noFile": "服务启动时没有配置文件，改动无法保存。请用 config.toml（或 PINAKES_CONFIG）启动它。",
   "settings.restartNeeded": "已保存的改动要在服务重启后才生效。",
