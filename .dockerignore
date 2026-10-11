@@ -6,3 +6,6 @@ converter
 testset
 tests
 docs
+ui/node_modules
+ui/test-results
+ui/playwright-report

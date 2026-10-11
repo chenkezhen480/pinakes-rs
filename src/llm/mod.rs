@@ -133,17 +133,33 @@ pub(crate) fn retryable(status: reqwest::StatusCode) -> bool {
         || status.as_u16() == 529
 }
 
+tokio::task_local! {
+    /// Set while a call must be tried once only (the console's model test).
+    static NO_RETRIES: bool;
+}
+
+/// Runs `call` with every model request in it tried once, not retried: for a test that
+/// should answer at once.
+pub async fn once<F: std::future::Future>(call: F) -> F::Output {
+    NO_RETRIES.scope(true, call).await
+}
+
 /// Sends a JSON POST, retrying what is worth retrying, and returns the parsed reply body.
 pub(crate) async fn post_json(
     req: impl Fn() -> reqwest::RequestBuilder,
     what: &str,
 ) -> anyhow::Result<serde_json::Value> {
+    let retries = if NO_RETRIES.try_with(|n| *n).unwrap_or(false) {
+        0
+    } else {
+        RETRIES
+    };
     let mut attempt = 0;
     loop {
         attempt += 1;
         let resp = match req().send().await {
             Ok(r) => r,
-            Err(e) if attempt <= RETRIES && (e.is_connect() || e.is_timeout()) => {
+            Err(e) if attempt <= retries && (e.is_connect() || e.is_timeout()) => {
                 tracing::warn!(error = %e, attempt, "{what}: request failed, retrying");
                 tokio::time::sleep(backoff(attempt, None)).await;
                 continue;
@@ -159,7 +175,7 @@ pub(crate) async fn post_json(
         }
         let wait = backoff(attempt, resp.headers().get(reqwest::header::RETRY_AFTER));
         let body = resp.text().await.unwrap_or_default();
-        if attempt <= RETRIES && retryable(status) {
+        if attempt <= retries && retryable(status) {
             tracing::warn!(%status, attempt, "{what}: retrying");
             tokio::time::sleep(wait).await;
             continue;

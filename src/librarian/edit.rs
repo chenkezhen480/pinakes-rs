@@ -22,6 +22,7 @@ const MAX_BODY: usize = 100_000;
 /// One edit. `create`, `update` and `supersede` come from the librarian's plan; `replace` is a
 /// hand edit through `PUT /pages`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Edit {
     Create {

@@ -599,6 +599,7 @@ pub fn build(
     }
 
     let texts: Vec<String> = missing.iter().map(|(_, u)| u.text.clone()).collect();
+    embedder.will_embed(texts.len());
     let fresh = embedder.embed(&texts)?;
     anyhow::ensure!(
         fresh.len() == missing.len(),

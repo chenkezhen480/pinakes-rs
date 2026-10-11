@@ -45,11 +45,12 @@ be built.
 - **No component library.** Every component is drawn to this skill's language; a library would
   make it look like every other admin template.
 - **Few dependencies, each with a reason**: `svelte`, `vite` and its Svelte plugin, `typescript`,
-  `svelte-check`, `d3-force` (the graph's layout only, not all of d3) and `@playwright/test` for
-  the browser tests. A routing library isn't needed: a small hash router of our own (`#/wiki/…`).
+  `svelte-check`, `d3-force` (the graph's layout only, not all of d3), `three` (the hall, in its
+  own chunk; see "The hall") and `@playwright/test` for the browser tests. A routing library isn't needed: a small hash router of our own (`#/wiki/…`).
   Anything else is written, not added, unless a note next to it says why.
-- **Budget.** The built JavaScript under 150 KB and CSS under 30 KB, gzipped (`npm run build`
-  prints the sizes); a page that pushes past it is split or slimmed before it is done.
+- **Budget.** The built JavaScript under 150 KB and CSS under 30 KB, gzipped, and the hall's
+  scene chunk (three.js, loaded only in the hall) under 200 KB on its own (`npm run build` prints
+  the sizes); a page that pushes past it is split or slimmed before it is done.
 - **The service renders Markdown.** Pages arrive as sanitized HTML from the API (rendered and
   sanitized in Rust); the console never parses Markdown. `{@html}` appears in exactly one
   component (`SafeHtml.svelte`), fed only by those API fields; everything else is text.
@@ -137,6 +138,61 @@ Keyboard reachable everywhere with a visible focus ring; WCAG AA contrast in bot
 the kind hues on cards); `aria-live` for job progress; semantic elements before `div`s. Works
 from a phone's width up (the local-app direction): at narrow widths the drawers stack and the
 graph gets the full screen.
+
+## The hall: the Library you walk into
+
+Decided with the user 2026-10-11: the console's main face is a 3D hall of the Library of
+Alexandria, drawn with **three.js** (`ui/src/hall/`), and every section stands in it as the thing
+it is there. The list layout (the rail and the pages, as before) stays one click away
+(`lib/layout.svelte.ts`, remembered per browser) and is what a browser without WebGL, or a phone
+by default, gets.
+
+- **The room** (`scene.ts`): a colonnaded reading hall of limestone and fluted marble, a coffered
+  ceiling of lapis and gold stars, a meander frieze, cedar armaria of scrolls with kind-coloured
+  tags along both walls, and at the far end three tall arches open on a terrace above a sea of
+  clouds (decided with the user 2026-10-11: as if the library stood in the clouds; outside is
+  only sky and cloud, no island, shore, ships or plants). The arches are the composition's
+  centre: keep the sky large in the entrance view. Above the shelves runs a Pompeian fresco band (cinnabar
+  panels, garlands); amphorae and small busts stand on the cabinets, bronze lampstands along the
+  aisle, velvet hangings tied back at each arch.
+- **The clouds**: a sea of clouds just under the terrace (a shader of drifting value noise, lit on
+  the sun's side, hazing into the horizon), cumulus heaps (`textures.cumulus`, lit tops and grey
+  undersides) in bands from just past the railing to towers at the horizon, filling the lower
+  part of every arch, and banks overhead. Their colours come from the sky (`cloudColor`,
+  `below`), a little brighter than its light so the tops stand out against it.
+- **Surface and light**: the paintings double as relief (bump maps: stone joints, flutes, grain,
+  coffers); polished things (bronze, marble, water, the floor) reflect an environment map made
+  from the sky itself (`PMREMGenerator`, renewed with the sky); flames and the sun
+  bloom (`UnrealBloomPass`, HDR colours above 1), and a finishing pass adds a vignette centred on
+  what is in view and a little film grain.
+- **Stations** (`stations.ts`, placed in `scene.ts`): overview, the stele inscribed with the
+  catalogue's title; search, Callimachus' table of pinakes; wiki, the armaria; knowledge, the
+  scriptorium desk; graph, the armillary sphere before the middle arch; review, the sealing
+  lectern; lint, the correctors' table under its lamps; acquisition, the far window over the
+  clouds and a ship model (ships once brought Alexandria its books); admin, the founder's bust; settings, Ctesibius' water clock. Each has a floating
+  label (positioned in the DOM from the scene every frame) and a place in the dock along the
+  bottom, the keyboard's way in; choosing one walks the camera there (1.4 s, eased) and opens the
+  page on a folio from the right, framed beside the object (`setViewOffset`). Escape walks back.
+- **The sky follows the local clock** (`sky.ts`, pure, blended between key hours; the bar shows
+  the local time and the phase): early morning
+  light through the day, or a grey rainy day (about three in ten, picked by the date), the sunset
+  in the evening setting inside the right arch over the clouds, stars and the moon over moonlit
+  cloud tops at night, the oil lamps coming up as the light goes. `?sky=dawn|day|rain|dusk|night` forces a
+  look (`?sky=now` returns to the clock) for screenshots and tests.
+- **Drawn, not downloaded**: every surface is painted with the canvas API in `textures.ts`
+  (marble, cedar, limestone, papyrus, the mosaic floor, the frieze, the coffers, the inscription,
+  glows, clouds, cumulus); geometry is built from three's primitives. No models, images or fonts are
+  fetched.
+- **Cost**: three.js lives only in the scene's chunk, loaded when the hall is shown; its budget
+  is separate (200 KB gzipped) from the console's 150 KB. A software renderer (CI, a VM) gets no
+  shadows, no environment map, no post-processing and fewer pixels, and draws only when
+  something changes (as under reduced motion); reduced motion cuts the camera and stops the drifting (clouds, rain,
+  the sphere's rings).
+- **Colours over the scene** are the `--hall-*` tokens (gilt and lamplight), the same in both
+  themes; the folio and the pages follow the theme as before.
+- **Looking at it**: `node scripts/shoot.mjs --login root:1234 --layout hall --routes -,graph
+  --skies dawn,dusk,night,rain --gpu 1` shoots each sky with the real GPU; judge the composition
+  in all five skies and at a phone's width.
 
 ## Before calling a page done
 

@@ -49,8 +49,9 @@ search is embedding the query on the CPU (about 29 ms). What makes it fast:
 
 ## 2. Knowledge that hosts and manages itself
 
-**Self-hosted.** Pinakes is one Rust binary (plus an optional converter container) on your own
-machine or server. Your knowledge stays in files you can read: the wiki is plain Markdown, each
+**Self-hosted.** Pinakes is one Rust binary, with its web console built in, on your own
+machine or server; it reads Word, Excel, PowerPoint and web pages itself (an optional
+converter container adds PDF). Your knowledge stays in files you can read: the wiki is plain Markdown, each
 tenant has one SQLite file, and graph data sits in SQLite or Neo4j. The embedding model runs
 locally. The only outside call is the librarian's model at write time, and that can be any
 Anthropic-compatible or OpenAI-compatible endpoint, a local model too (Ollama, vLLM). Tenants,
@@ -157,27 +158,35 @@ Each is one line of `config.toml` (or the compose profile named); the defaults a
 | | `jwt` | Calls come straight from users' machines (an agent with MCP): the host signs a token holding tenant, user and groups; Pinakes checks it with the host's public key |
 | **Graph store** (`[graph] backend`) | `sqlite` (default) | `graph.sqlite` in each tenant's folder: nothing else to run |
 | | `neo4j` | The compose profile `neo4j`; move data between the two with `pinakes-migrate-graph` |
-| **Meaning search** (`[embedding] model`) | `jina-embeddings-v2-base-zh` (default) | Downloads the model (about 640 MB) into `<data>/models` on first start, in the background; set `HF_ENDPOINT` for a mirror |
-| | unset | Keyword search only (`semantic` and `both` answer 503) |
+| **Meaning search** (`[embedding] enabled`) | off (default) | Keyword search only: nothing is downloaded; `semantic` and `both` say how to turn it on |
+| | on (the console's switch, or the config line) | Downloads `jina-embeddings-v2-base-zh` (about 640 MB) into `<data>/models` once, in the background, and embeds every page; no restart. `HF_ENDPOINT` names a mirror |
 | **Default search mode** (`[search] default_mode`) | `keyword` (default), `semantic`, `both`, `auto` | When a search doesn't say; `auto` tries keywords first and falls back to meaning when coverage is weak |
-| **Document converter** (`[converter] url`) | the MarkItDown container | Uploads of Word, PowerPoint, Excel, PDF and HTML; without it, Markdown and text files only |
+| **Document conversion** | built in (default) | Markdown, text, HTML, Word (`.docx`), spreadsheets (`.xlsx`, `.csv`) and PowerPoint (`.pptx`), read by the service itself |
+| | plus MarkItDown (`[converter] url`, compose profile `markitdown`) | PDF and the old binary Office formats (`.doc`, `.xls`, `.ppt`); without it they are refused with what to do |
 | **Acquisition** (`[acquisition] enabled`) | off (default) | On for the deployment, then per tenant with its allowlist (`PUT /admin/tenants/{id}/acquisition`) |
-| **Test chat** (`PINAKES_DEV=1`) | off (default) | A small page at `/dev` that answers from search results, for trying the service |
+| **Test chat** (`PINAKES_DEV=1`) | off (default) | The console's Search page gets a chat tab that answers with the read tools an agent has |
 
-How to run it: **Docker Compose** (the service and the converter, `docker compose up -d --build`;
-add `--profile neo4j` for Neo4j), or **from source** (`cargo run --release`, with the converter
-started alone by `docker compose --profile dev up -d converter-dev` if you upload documents).
-Secrets never go in `config.toml`: `PINAKES_ADMIN_KEY` (admin routes), `NEO4J_PASSWORD`, and the
-model's key in `model.conf` (git-ignored) or the variable it names.
+How to run it: **Docker Compose** (`docker compose up -d --build` starts the service alone;
+add `--profile markitdown` for PDF and `--profile neo4j` for Neo4j), or **from source**
+(`cargo run --release`). Either way the **web console** is at `http://127.0.0.1:8080/ui`: search,
+the wiki rendered, adding knowledge, the graph drawn, review, lint, acquisition, tenants and
+every setting explained, laid out as a 3D hall of the Library of Alexandria whose sky follows
+your clock (or as a plain list, a click away). Sign in as `root` with the password `1234` and change it in Settings,
+Environment (or set `PINAKES_ADMIN_PASSWORD`) before others can reach the service. The browser
+stays signed in until you sign out.
+Secrets never go in `config.toml`: `PINAKES_ADMIN_PASSWORD` (the console), `PINAKES_ADMIN_KEY`
+(scripts calling the admin routes), `NEO4J_PASSWORD`, and the model's key in `model.conf`
+(git-ignored) or the variable it names.
 
 ## Quick start
 
-With Docker (the service, plus the document converter):
+With Docker:
 
 ```bash
 cp model.conf.example model.conf      # set the librarian's model and key (DeepSeek's Anthropic-compatible endpoint by default)
 export PINAKES_ADMIN_KEY=$(openssl rand -hex 24)
-docker compose up -d --build          # serves on http://127.0.0.1:8080
+export PINAKES_ADMIN_PASSWORD='choose one'   # the console's sign-in as root
+docker compose up -d --build          # the console: http://127.0.0.1:8080/ui
 
 # create a tenant and get its API key
 curl -s -X POST http://127.0.0.1:8080/admin/tenants \
@@ -220,10 +229,10 @@ curl -s -X POST http://127.0.0.1:8080/search \
 
 ## Status
 
-Milestones M1 to M9 are built: isolation, search, the graph, the librarian, meaning search,
-speed, MCP and packaging, lint and deletion, acquisition and the HNSW index. **M10** is planned:
-a web console for every operation, built-in document conversion (the MarkItDown container
-becoming optional) and vector search off by default. Pinakes is pre-1.0: APIs may still change.
+Milestones M1 to M10 are built: isolation, search, the graph, the librarian, meaning search,
+speed, MCP and packaging, lint and deletion, acquisition and the HNSW index, and the web console
+with built-in document conversion and vector search off by default. Pinakes is pre-1.0: APIs may
+still change.
 
 ## Contributing
 
@@ -249,8 +258,10 @@ None of them is part of this repository; each keeps its own license.
 |---|---|---|---|
 | [jina-embeddings-v2-base-zh](https://huggingface.co/jinaai/jina-embeddings-v2-base-zh) | page and query vectors | downloaded from Hugging Face on first use into `<data>/models` | Apache-2.0 |
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) | running the embedding model | prebuilt library linked into the binary at build time (through `ort`) | MIT |
-| [MarkItDown](https://github.com/microsoft/markitdown) | converting uploaded files to Markdown | the `converter` container image | MIT |
-| [Python](https://www.python.org/) | the converter's runtime | the `python:3.12-slim` base image | PSF-2.0 |
+| [MarkItDown](https://github.com/microsoft/markitdown) | converting PDF and old Office files (optional) | the `converter` container image (`markitdown` compose profile) | MIT |
+| [Python](https://www.python.org/) | the optional converter's runtime | the `python:3.12-slim` base image | PSF-2.0 |
+| [Svelte](https://svelte.dev/) and [d3-force](https://github.com/d3/d3-force) | the web console and its graph layout | compiled into `ui/dist`, embedded in the binary | MIT, ISC |
+| [three.js](https://threejs.org/) | the console's 3D hall | compiled into `ui/dist` (its own chunk), embedded in the binary | MIT |
 | [jieba](https://github.com/messense/jieba-rs) dictionary | Chinese word segmentation | bundled in the `jieba-rs` crate | MIT |
 | [Neo4j Community Edition](https://neo4j.com/) | the optional graph backend | the official `neo4j` image (`neo4j` compose profile) | GPL-3.0 (a separate server, not linked) |
 | [Debian](https://www.debian.org/) | the runtime image | the `debian:trixie-slim` base image | various free licenses |

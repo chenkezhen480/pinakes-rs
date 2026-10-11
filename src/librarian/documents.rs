@@ -29,6 +29,7 @@ pub struct Document {
 
 /// How a job knew which document it was filing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum DocumentMatch {
     /// The caller sent the id.

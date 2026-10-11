@@ -39,10 +39,27 @@ struct Manifest {
     /// Pages of the base that this version no longer has.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     removed: Vec<String>,
+    /// When it was saved (RFC 3339); versions saved before M10 don't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_at: Option<String>,
 }
 
 fn one() -> u32 {
     1
+}
+
+/// One text a page had, as [`History::page_versions`] lists it.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PageVersion {
+    /// The stored wiki version that holds it.
+    pub version: String,
+    /// When the wiki came to that text (a page changed back lists its earlier text again,
+    /// with the time it came back).
+    pub saved_at: String,
+    /// The text's object name (a hash of the text).
+    #[serde(skip)]
+    pub object: String,
 }
 
 /// The `history/` folder of one tenant.
@@ -81,6 +98,22 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
+/// One line of a page's list.
+#[derive(Debug, Deserialize)]
+struct LogLine {
+    v: String,
+    o: String,
+    at: String,
+}
+
+/// Appends one line to a page's list.
+fn append_line(path: &Path, version: &str, object: &str, at: &str) -> io::Result<()> {
+    use std::io::Write as _;
+    let line = serde_json::json!({ "v": version, "o": object, "at": at }).to_string();
+    let mut f = File::options().create(true).append(true).open(path)?;
+    f.write_all(format!("{line}\n").as_bytes())
+}
+
 /// Removes a file; one already gone is fine.
 fn remove_if_there(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
@@ -99,6 +132,66 @@ impl History {
 
     fn manifest_path(&self, version: &str) -> PathBuf {
         self.root.join("versions").join(format!("{version}.json"))
+    }
+
+    /// A page's own list of the texts it came to: one line per change, `{v, o, at}` (version,
+    /// object, time), named by a hash of the path, so it holds no text and no path.
+    fn log_path(&self, page: &str) -> PathBuf {
+        self.root
+            .join("pages")
+            .join(format!("{}.log", object_name(page)))
+    }
+
+    /// The version saved last, so a save without a base still notes only what changed.
+    fn last_path(&self) -> PathBuf {
+        self.root.join("last")
+    }
+
+    fn last(&self) -> Option<String> {
+        std::fs::read_to_string(self.last_path())
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|v| valid_version(v))
+    }
+
+    /// Appends `version` to the lists of the pages whose text differs from `prev` (all of them
+    /// without one), and notes it as the last version. A history from before the lists
+    /// existed gets them first, from its manifests.
+    fn note(
+        &self,
+        version: &str,
+        at: &str,
+        pages: &BTreeMap<String, String>,
+        prev: Option<&BTreeMap<String, String>>,
+    ) -> io::Result<()> {
+        let dir = self.root.join("pages");
+        if !dir.exists() {
+            self.backfill()?;
+            std::fs::create_dir_all(&dir)?;
+        }
+        for (path, object) in pages {
+            if prev.and_then(|p| p.get(path)) == Some(object) {
+                continue;
+            }
+            append_line(&self.log_path(path), version, object, at)?;
+        }
+        write_atomic(&self.last_path(), version.as_bytes())
+    }
+
+    /// Writes the pages' lists from the stored manifests (each lists the pages it set), oldest
+    /// first: once, for a history kept before the lists existed.
+    fn backfill(&self) -> io::Result<()> {
+        let found = self.manifests_oldest_first()?;
+        if found.is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(self.root.join("pages"))?;
+        for (at, version, m) in &found {
+            for (path, object) in &m.pages {
+                append_line(&self.log_path(path), version, object, at)?;
+            }
+        }
+        Ok(())
     }
 
     fn manifest(&self, version: &str) -> Result<Option<Manifest>, WikiError> {
@@ -165,10 +258,28 @@ impl History {
             return Err(io::Error::other(format!("bad version name {version:?}")));
         }
         let manifest_path = self.manifest_path(version);
-        // Already stored: mark it used so the garbage collector keeps it. If the collector
-        // removed it just now, store it again below.
+        // What changed is told against the base, or else (none given, or no longer stored)
+        // the version saved last.
+        let stored = |v: Option<String>| {
+            v.filter(|v| valid_version(v) && v != version)
+                .and_then(|v| self.pages_of(&v).ok().flatten())
+        };
+        let prev = stored(base.map(str::to_owned)).or_else(|| stored(self.last()));
+        // Already stored: mark it used so the garbage collector keeps it, and note the pages
+        // that came back to it. If the collector removed it just now, store it again below.
         match File::options().write(true).open(&manifest_path) {
-            Ok(file) => return file.set_modified(SystemTime::now()),
+            Ok(file) => {
+                file.set_modified(SystemTime::now())?;
+                match &prev {
+                    Some(prev) => {
+                        self.note(version, &crate::trace::now_rfc3339(), pages, Some(prev))?
+                    }
+                    // Nothing to tell the change against: the wiki is at this version now, at
+                    // least, for the next save to compare with.
+                    None => write_atomic(&self.last_path(), version.as_bytes())?,
+                }
+                return Ok(());
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
@@ -183,6 +294,7 @@ impl History {
             });
         let mut manifest = Manifest {
             depth: 1,
+            saved_at: Some(crate::trace::now_rfc3339()),
             ..Default::default()
         };
         let mut new: Vec<(&String, &String)> = pages.iter().collect();
@@ -219,7 +331,9 @@ impl History {
             manifest.pages.insert(path.clone(), name.clone());
         }
         let json = serde_json::to_vec(&manifest).map_err(io::Error::other)?;
-        write_atomic(&manifest_path, &json)
+        write_atomic(&manifest_path, &json)?;
+        let at = manifest.saved_at.clone().unwrap_or_default();
+        self.note(version, &at, pages, prev.as_ref())
     }
 
     /// Stores a version made of these pages, in full.
@@ -251,6 +365,106 @@ impl History {
         Ok(Some(pages))
     }
 
+    /// The stored versions of one page: each text it had once, with the first version that
+    /// holds it and when that was saved (or last used, for versions that don't say), oldest
+    /// first. Versions are kept as long as the search traces that name them.
+    pub fn page_versions(&self, path: &str) -> Result<Vec<PageVersion>, WikiError> {
+        if let Ok(text) = std::fs::read_to_string(self.log_path(path)) {
+            let mut found: Vec<PageVersion> = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<LogLine>(l).ok())
+                .filter(|l| valid_version(&l.v) && valid_object(&l.o))
+                // A version the trace retention removed is gone from the list too.
+                .filter(|l| self.manifest_path(&l.v).exists())
+                .map(|l| PageVersion {
+                    version: l.v,
+                    saved_at: l.at,
+                    object: l.o,
+                })
+                .collect();
+            found.sort_by(|a, b| a.saved_at.cmp(&b.saved_at));
+            found.dedup_by(|later, earlier| later.object == earlier.object);
+            return Ok(found);
+        }
+        self.page_versions_from_manifests(path)
+    }
+
+    /// The same, read from every manifest: for a history kept before the pages' lists.
+    fn page_versions_from_manifests(&self, path: &str) -> Result<Vec<PageVersion>, WikiError> {
+        let mut found: Vec<PageVersion> = self
+            .manifests_oldest_first()?
+            .into_iter()
+            .filter_map(|(at, version, m)| {
+                m.pages.get(path).map(|object| PageVersion {
+                    version,
+                    saved_at: at,
+                    object: object.clone(),
+                })
+            })
+            .collect();
+        // A version is listed when its text differs from the one before it.
+        found.dedup_by(|later, earlier| later.object == earlier.object);
+        Ok(found)
+    }
+
+    /// Every stored manifest with when it was saved (its own record, else its file's time),
+    /// oldest first; unreadable ones are left out.
+    fn manifests_oldest_first(&self) -> io::Result<Vec<(String, String, Manifest)>> {
+        let entries = match std::fs::read_dir(self.root.join("versions")) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut found = Vec::new();
+        for entry in entries.flatten() {
+            let file = entry.path();
+            let Some(version) = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|v| valid_version(v))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let Ok(Some(m)) = self.manifest(&version) else {
+                continue;
+            };
+            let at = m
+                .saved_at
+                .clone()
+                .or_else(|| {
+                    entry
+                        .metadata()
+                        .and_then(|meta| meta.modified())
+                        .map(crate::trace::rfc3339)
+                        .ok()
+                })
+                .unwrap_or_default();
+            found.push((at, version, m));
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        Ok(found)
+    }
+
+    /// A page's text in a stored version, or `None` when the version (or the page in it)
+    /// isn't stored.
+    pub fn page_text(&self, version: &str, path: &str) -> Result<Option<String>, WikiError> {
+        if !valid_version(version) {
+            return Ok(None);
+        }
+        let Some(pages) = self.pages_of(version)? else {
+            return Ok(None);
+        };
+        let Some(name) = pages.get(path) else {
+            return Ok(None);
+        };
+        match std::fs::read_to_string(self.root.join("objects").join(name)) {
+            Ok(t) => Ok(Some(t)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Takes the pages under `prefix` (a deleted user's or group's folder) out of every stored
     /// version, then removes every object no version refers to any more, so their text is gone
     /// from the history. A version keeps its name and when it was last used. Callers make sure
@@ -262,6 +476,7 @@ impl History {
             Err(e) => return Err(e),
         };
         let mut referenced: HashSet<String> = HashSet::new();
+        let mut gone: HashSet<String> = HashSet::new();
         for entry in versions.flatten() {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "json") {
@@ -279,6 +494,7 @@ impl History {
                 continue;
             };
             let before = (m.pages.len(), m.removed.len());
+            gone.extend(m.pages.keys().filter(|p| p.starts_with(prefix)).cloned());
             m.pages.retain(|p, _| !p.starts_with(prefix));
             m.removed.retain(|p| !p.starts_with(prefix));
             if (m.pages.len(), m.removed.len()) != before {
@@ -294,6 +510,9 @@ impl History {
                     .set_modified(used)?;
             }
             referenced.extend(m.pages.into_values());
+        }
+        for page in &gone {
+            remove_if_there(&self.log_path(page))?;
         }
         if let Ok(objects) = std::fs::read_dir(self.root.join("objects")) {
             for entry in objects.flatten() {
@@ -466,6 +685,121 @@ mod tests {
         let (names, texts) = names(pages);
         h.save(version, base, &names, |p| texts.get(p).cloned())
             .unwrap();
+    }
+
+    fn texts_of(h: &History, page: &str) -> Vec<(String, String)> {
+        h.page_versions(page)
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.version, v.object))
+            .collect()
+    }
+
+    /// A page changed back to an earlier text, the wiki coming back to a stored version,
+    /// lists that text again, after the one between.
+    #[test]
+    fn a_page_changed_back_lists_its_text_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = History::new(dir.path());
+        let v1 = vec![page("expertise/a", "A")];
+        let v2 = vec![page("expertise/a", "A2")];
+        save_on(&h, "0000000000000001", None, &v1);
+        save_on(&h, "0000000000000002", Some("0000000000000001"), &v2);
+        save_on(&h, "0000000000000001", Some("0000000000000002"), &v1);
+        let list = texts_of(&h, "expertise/a");
+        let versions: Vec<&str> = list.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(
+            versions,
+            ["0000000000000001", "0000000000000002", "0000000000000001"]
+        );
+        assert_eq!(list[0].1, list[2].1);
+        assert_ne!(list[0].1, list[1].1);
+    }
+
+    /// Changed back while the base given is no longer stored: told against the version saved
+    /// last instead, so the return is still listed.
+    #[test]
+    fn a_return_is_listed_though_its_base_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = History::new(dir.path());
+        let v1 = vec![page("expertise/a", "A")];
+        save_on(&h, "0000000000000001", None, &v1);
+        save_on(
+            &h,
+            "0000000000000002",
+            Some("0000000000000001"),
+            &[page("expertise/a", "A2")],
+        );
+        save_on(&h, "0000000000000001", Some("00000000000000ff"), &v1);
+        assert_eq!(texts_of(&h, "expertise/a").len(), 3);
+    }
+
+    /// A save without a base (the first after a restart) notes only the pages that changed
+    /// since the version saved last.
+    #[test]
+    fn a_save_without_a_base_notes_only_what_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = History::new(dir.path());
+        save_on(
+            &h,
+            "0000000000000001",
+            None,
+            &[page("expertise/a", "A"), page("expertise/b", "B")],
+        );
+        save_on(
+            &h,
+            "0000000000000002",
+            None,
+            &[page("expertise/a", "A"), page("expertise/b", "B2")],
+        );
+        assert_eq!(texts_of(&h, "expertise/a").len(), 1);
+        assert_eq!(texts_of(&h, "expertise/b").len(), 2);
+    }
+
+    /// A history kept before the pages' lists existed gets them from its manifests at its next
+    /// save, and lists the same versions as before.
+    #[test]
+    fn a_history_from_before_the_lists_gets_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = History::new(dir.path());
+        save_on(&h, "0000000000000001", None, &[page("expertise/a", "A")]);
+        save_on(
+            &h,
+            "0000000000000002",
+            Some("0000000000000001"),
+            &[page("expertise/a", "A2")],
+        );
+        std::fs::remove_dir_all(dir.path().join("history/pages")).unwrap();
+        std::fs::remove_file(dir.path().join("history/last")).unwrap();
+        let before = texts_of(&h, "expertise/a");
+        assert_eq!(before.len(), 2, "read from the manifests");
+        save_on(
+            &h,
+            "0000000000000003",
+            Some("0000000000000002"),
+            &[page("expertise/a", "A3")],
+        );
+        let after = texts_of(&h, "expertise/a");
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert_eq!(after[..2], before[..]);
+    }
+
+    /// Deleting a user's folder takes its pages' lists with it.
+    #[test]
+    fn a_purged_folder_loses_its_pages_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = History::new(dir.path());
+        let mine = "users/u_0123456789abcdef/preferences";
+        save_on(
+            &h,
+            "0000000000000001",
+            None,
+            &[page("expertise/a", "A"), page(mine, "Mine")],
+        );
+        assert!(h.log_path(mine).exists());
+        h.purge("users/u_0123456789abcdef/").unwrap();
+        assert!(!h.log_path(mine).exists());
+        assert!(h.log_path("expertise/a").exists());
     }
 
     /// A version saved on a stored base records only the change, loads in full, and keeps its

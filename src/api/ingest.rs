@@ -19,6 +19,7 @@ use crate::librarian::DescribeError;
 use crate::wiki::WikiError;
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SchemaResponse {
     pub schema: String,
     /// The schema's wiki description.
@@ -161,6 +162,7 @@ fn schema_to_store(graph: &GraphSnapshot, def: &SchemaDef) -> Result<(SchemaDef,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SpaceResponse {
     pub space: String,
     pub schema: String,
@@ -226,6 +228,7 @@ pub async fn space(
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DataResponse {
     pub space: String,
     pub nodes_written: usize,

@@ -35,6 +35,7 @@ const PATH_HOPS: usize = 4;
 
 /// How an edge reached the relations slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeMatch {
     /// On the shortest path between two named nodes.
@@ -50,6 +51,7 @@ pub enum EdgeMatch {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Edge {
     pub space: String,
     pub from: String,

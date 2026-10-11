@@ -7,7 +7,7 @@
 mod sqlite;
 
 pub use sqlite::SqliteStore;
-pub(crate) use sqlite::checkpoint;
+pub(crate) use sqlite::{checkpoint, read_tenant_id};
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -17,6 +17,7 @@ use crate::librarian::documents::{Reading, ReadingState};
 use crate::librarian::{Document, Proposal};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "TenantAuditEntry"))]
 pub struct AuditEntry {
     pub at: String,
     pub actor: String,

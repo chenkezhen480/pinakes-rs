@@ -8,13 +8,37 @@ Details, measurements and decisions for each milestone are in
 
 ## [Unreleased]
 
-### Planned (M10)
+### Added (M10, 2026-10-10)
 
-- A web console for every operation (search, wiki, knowledge, graph, review, lint, acquisition,
-  administration, settings), in Svelte 5 and TypeScript.
-- Built-in conversion of HTML, Word, Excel and PowerPoint files; the MarkItDown container becomes
-  optional, with clear errors for formats only it reads.
-- Vector search off by default, turned on from the console (the embedding model downloads then).
+- **A web console** at `/ui` for every operation: an overview, search (the three slots, with the
+  developer chat as a tab), the wiki rendered with its history and hand edits, adding knowledge
+  (documents dragged in, records by kind and audience, every job followed), the graph browsed and
+  drawn (schemas, spaces, data, drafts), review (held edits as diffs, sources, drafts drawn),
+  lint, acquisition, tenants and audit logs, and settings (the configuration explained field by
+  field and written back with its comments, the environment, the model with a test call, the
+  embedding switch, the converters). Svelte 5 and TypeScript, built into `ui/dist/` and embedded
+  in the binary, under a strict Content-Security-Policy; Chinese and English, light and dark,
+  phone-sized too. Its API types are generated from the Rust structs.
+- **Built-in conversion** of HTML, Word, Excel (`.xlsx`, CSV) and PowerPoint in pure
+  Rust, every file bounded (size, zip bombs, entities, nesting, cells, time). MarkItDown is
+  optional (compose profile `markitdown`), for PDF and `.doc`/`.xls`/`.ppt`; without it those are
+  refused with what to do.
+- **The Library's hall**: the console opens as a 3D hall of the Library of Alexandria (three.js,
+  loaded on demand), its sections standing in it as the catalogue table, the scroll shelves, the
+  scriptorium, the armillary sphere, the sealing lectern, the water clock and the rest; through
+  the arches a sea of clouds under a sky that follows the clock (morning or rain by day, sunset,
+  stars). The list layout is a click away.
+- **Signing in to the console** with one admin account: `root` / `1234` (change it before
+  exposing the service) or `PINAKES_ADMIN_USER` / `PINAKES_ADMIN_PASSWORD`,
+  changed in Settings; the browser stays signed in. The signed-in admin looks at any tenant as
+  any of its users, so the console needs no tenant keys and no admin key.
+- **Vector search off by default**, turned on and off while the service runs
+  (`/admin/embedding`): the model downloads and loads in the background, with its progress shown.
+- New APIs for the console: `/status`, `/jobs`, `/admin/tenants` (list), graph browsing
+  (`/graph/schemas`, `/graph/spaces`, `/graph/nodes`), `/pages/{path}?html=true`,
+  `/history/{path}`, `/admin/settings`, `/admin/environment`, `/admin/model` (and `/test`),
+  `/admin/audit`, `/admin/tenants/{id}/audit`. `docs/configuration.md` is generated from the
+  settings' descriptions.
 
 ## [0.1.0] - 2026-10-10
 

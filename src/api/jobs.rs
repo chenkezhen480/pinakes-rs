@@ -27,29 +27,37 @@ pub async fn get(
         .ok_or(ApiError::NotFound)
 }
 
-/// A proposal as callers see it: without the writer's folders.
 #[derive(Debug, Serialize)]
-pub struct ProposalView {
-    #[serde(flatten)]
-    proposal: serde_json::Value,
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct JobList {
+    pub jobs: Vec<JobInfo>,
 }
 
-fn view(p: &Proposal) -> ProposalView {
+/// The tenant's jobs this caller may see (its own and those queued without a user), the
+/// newest first.
+#[tracing::instrument(name = "list_jobs", skip_all)]
+pub async fn list_jobs(State(app): State<AppState>, scope: Scope) -> Json<JobList> {
+    let user = scope.user().map(|u| u.dir.as_str());
+    Json(JobList {
+        jobs: app.jobs.list(&scope.tenant().dir_name, user),
+    })
+}
+
+/// A proposal as callers see it: without the writer's folders.
+fn view(p: &Proposal) -> Proposal {
     let mut p = p.clone();
     if let Some(g) = p.graph.take() {
         p.graph = Some(Box::new(g.shown()));
     }
-    let mut v = serde_json::to_value(&p).unwrap_or_default();
-    if let Some(o) = v.as_object_mut() {
-        o.remove("user");
-        o.remove("groups");
-    }
-    ProposalView { proposal: v }
+    p.user = None;
+    p.groups.clear();
+    p
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProposalList {
-    pub proposals: Vec<ProposalView>,
+    pub proposals: Vec<Proposal>,
 }
 
 /// Proposals waiting for review whose pages the caller may see.
@@ -77,6 +85,7 @@ pub async fn list(scope: Scope) -> Result<Json<ProposalList>, ApiError> {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Approved {
     pub proposal: String,
     pub status: ProposalStatus,
@@ -179,6 +188,7 @@ pub struct RejectRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "RejectResponse"))]
 pub struct Rejected {
     pub proposal: String,
     pub status: ProposalStatus,

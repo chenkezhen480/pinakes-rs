@@ -1,0 +1,144 @@
+/* The console's visual language: paper and ink, one lapis accent, a hue per kind. Every colour,
+   size and duration a component uses comes from here (the console skill). */
+:root {
+  color-scheme: light;
+  --paper: #f6f3ec;
+  --paper-2: #efeadf;
+  --card: #fffdf8;
+  --ink: #1f2328;
+  --ink-2: #4a4f57;
+  --muted: #6b7077;
+  --rule: #e2dccf;
+  --rule-2: #d3cbb9;
+  --accent: #2f5d8a;
+  --accent-ink: #ffffff;
+  --accent-wash: #e3ebf4;
+  --seal: #b4432f;
+  --seal-wash: #f6e4df;
+  --ok: #3f7d4e;
+  --ok-wash: #e2efe4;
+  --warn: #93610f;
+  --warn-wash: #f6ecd8;
+
+  /* the five kinds */
+  --k-experience: #b5612d;
+  --k-decision: #7a4e9c;
+  --k-expertise: #2f6f8a;
+  --k-graph: #3f7d4e;
+  --k-preference: #a3476b;
+
+  /* the hall: gilt and lamplight over the scene, the same in both themes */
+  --hall-night: #0e1220;
+  --hall-gold: #d9b25a;
+  --hall-gold-line: rgb(201 154 60 / 0.55);
+  --hall-label: rgb(20 18 14 / 0.62);
+  --hall-label-hot: rgb(36 30 20 / 0.86);
+  --hall-ink: #f3e7cc;
+  --hall-ink-2: #cdb98e;
+  --hall-veil: rgb(10 9 7 / 0.28);
+  --hall-shadow: -24px 0 48px -24px rgb(0 0 0 / 0.55);
+
+  --serif: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", SimSun, Georgia, serif;
+  --sans: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", system-ui,
+    -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+
+  --step--2: 0.75rem;
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.4rem;
+  --step-3: 1.85rem;
+  --leading: 1.6;
+  --leading-read: 1.85;
+  --measure: 68ch;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 40px;
+  --space-7: 64px;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+  --shadow: 0 1px 0 var(--rule), 0 6px 18px -12px rgb(31 35 40 / 0.35);
+  --shadow-lift: 0 1px 0 var(--rule), 0 14px 28px -16px rgb(31 35 40 / 0.45);
+  --focus: 0 0 0 2px var(--paper), 0 0 0 4px var(--accent);
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --fast: 120ms;
+  --base: 200ms;
+  --slow: 320ms;
+  --stagger: 30ms;
+
+  --rail: 228px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #14161a;
+    --paper-2: #191c21;
+    --card: #1c1f24;
+    --ink: #e8e6e1;
+    --ink-2: #c4c2bc;
+    --muted: #9aa0a8;
+    --rule: #2c3038;
+    --rule-2: #3a3f49;
+    --accent: #86acd8;
+    --accent-ink: #10161d;
+    --accent-wash: #1f2a37;
+    --seal: #e07a62;
+    --seal-wash: #3a221d;
+    --ok: #82c191;
+    --ok-wash: #1d2d22;
+    --warn: #e2b45c;
+    --warn-wash: #33291a;
+    --k-experience: #e09a69;
+    --k-decision: #b993d8;
+    --k-expertise: #7bb8d1;
+    --k-graph: #82c191;
+    --k-preference: #df8aad;
+    --shadow: 0 1px 0 var(--rule), 0 8px 22px -14px rgb(0 0 0 / 0.7);
+    --shadow-lift: 0 1px 0 var(--rule), 0 16px 30px -16px rgb(0 0 0 / 0.8);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #14161a;
+  --paper-2: #191c21;
+  --card: #1c1f24;
+  --ink: #e8e6e1;
+  --ink-2: #c4c2bc;
+  --muted: #9aa0a8;
+  --rule: #2c3038;
+  --rule-2: #3a3f49;
+  --accent: #86acd8;
+  --accent-ink: #10161d;
+  --accent-wash: #1f2a37;
+  --seal: #e07a62;
+  --seal-wash: #3a221d;
+  --ok: #82c191;
+  --ok-wash: #1d2d22;
+  --warn: #e2b45c;
+  --warn-wash: #33291a;
+  --k-experience: #e09a69;
+  --k-decision: #b993d8;
+  --k-expertise: #7bb8d1;
+  --k-graph: #82c191;
+  --k-preference: #df8aad;
+  --shadow: 0 1px 0 var(--rule), 0 8px 22px -14px rgb(0 0 0 / 0.7);
+  --shadow-lift: 0 1px 0 var(--rule), 0 16px 30px -16px rgb(0 0 0 / 0.8);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --fast: 0ms;
+    --base: 0ms;
+    --slow: 0ms;
+    --stagger: 0ms;
+  }
+}

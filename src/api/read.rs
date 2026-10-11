@@ -26,6 +26,7 @@ pub(crate) const MAX_IDS: usize = 20;
 pub(crate) const SOURCE_PREFIX: &str = "sources/";
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct ReadRequest {
     pub ids: Vec<String>,
@@ -38,6 +39,7 @@ pub struct ReadRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct LinkSummary {
     pub page: String,
     pub title: String,
@@ -45,6 +47,7 @@ pub struct LinkSummary {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ReadItem {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,10 +61,10 @@ pub struct ReadItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Already read in this session: the text is left out.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub already_read: bool,
     /// A page written from a page found outside, or such a source itself: lower trust.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub external: bool,
     pub links: Vec<LinkSummary>,
     /// `not_found`, `unreadable` (the page's file can't be parsed) or `heading_not_found`;
@@ -89,6 +92,7 @@ impl ReadItem {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ReadResponse {
     pub pages: Vec<ReadItem>,
 }
@@ -288,7 +292,7 @@ pub async fn read(
     }
     let mut record = scope.trace_record(Endpoint::Read);
     record.snapshot = snapshot.as_ref().map(|s| s.version.clone());
-    record.search_config = app.search_fingerprint.clone();
+    record.search_config = app.search_fingerprint().to_owned();
     record.request = serde_json::to_value(&req).unwrap_or_default();
     record.result = serde_json::json!({
         "pages": out.iter().map(|p| serde_json::json!({

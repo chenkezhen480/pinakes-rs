@@ -1,0 +1,29 @@
+{
+  "name": "pinakes-console",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The Pinakes web console: built into dist/, which the service embeds and serves at /ui.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/sizes.mjs",
+    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@tsconfig/svelte": "5.0.8",
+    "@types/d3-force": "3.0.10",
+    "@types/node": "24.19.2",
+    "@types/three": "0.186.0",
+    "svelte": "5.57.2",
+    "svelte-check": "4.7.6",
+    "typescript": "6.0.3",
+    "vite": "8.3.4"
+  },
+  "dependencies": {
+    "d3-force": "3.0.0",
+    "three": "0.186.1"
+  }
+}

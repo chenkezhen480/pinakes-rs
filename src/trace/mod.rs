@@ -306,9 +306,12 @@ pub(crate) fn today() -> i64 {
 
 /// Now as `YYYY-MM-DDTHH:MM:SS.mmmZ`.
 pub fn now_rfc3339() -> String {
-    let since = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+    rfc3339(SystemTime::now())
+}
+
+/// A time as `YYYY-MM-DDTHH:MM:SS.mmmZ` (UTC).
+pub fn rfc3339(at: SystemTime) -> String {
+    let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = since.as_secs() as i64;
     let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
     let rem = secs.rem_euclid(86_400);

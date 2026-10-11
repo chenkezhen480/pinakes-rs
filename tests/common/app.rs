@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use pinakes::config::Config;
-use pinakes::embed::Embedder;
+use pinakes::embed::{Embedder, Switch};
 use pinakes::llm::Llm;
 use pinakes::tenants::tenant_dir_name;
 use pinakes::{AppState, router};
@@ -30,6 +30,11 @@ pub struct TestApp {
     llm: Option<Llm>,
     /// The embedding model, kept across restarts.
     embedder: Option<Arc<dyn Embedder>>,
+    /// Or the embedding switch, turned on by `[embedding] enabled`, kept across restarts.
+    switch: Option<Arc<Switch>>,
+    /// Whether the config is read from a file, `<data>/config.toml`, as the service reads
+    /// its own (so settings can be written back to it).
+    from_file: bool,
     /// Last, so it is dropped after the service that holds its files open (Windows can't
     /// delete open files).
     pub data: TempDir,
@@ -107,13 +112,52 @@ impl TestApp {
         Self::build_with("", Some(llm), Some(embedder))
     }
 
+    /// A service with extra config TOML whose embedding model sits behind `switch`, as the
+    /// service's own does: off unless the config turns it on, then turned on and off at
+    /// `/admin/embedding`.
+    pub fn with_switch(extra: &str, switch: Arc<Switch>) -> Self {
+        let data = tempfile::tempdir().unwrap();
+        let llm = Some(super::llm::describer().llm());
+        let (router, state) =
+            Self::make_router(&data, extra, llm.clone(), None, Some(switch.clone()), false);
+        Self {
+            data,
+            router,
+            state,
+            extra_config: extra.to_owned(),
+            llm,
+            embedder: None,
+            switch: Some(switch),
+            from_file: false,
+        }
+    }
+
+    /// A service whose config is read from `<data>/config.toml` (written from `extra`), with
+    /// the scripted librarian; its model file is `<data>/model.conf`.
+    pub fn with_config_file(extra: &str) -> Self {
+        let data = tempfile::tempdir().unwrap();
+        let llm = Some(super::llm::describer().llm());
+        let (router, state) = Self::make_router(&data, extra, llm.clone(), None, None, true);
+        Self {
+            router,
+            state,
+            extra_config: extra.to_owned(),
+            llm,
+            embedder: None,
+            switch: None,
+            from_file: true,
+            data,
+        }
+    }
+
     fn build(extra: &str, llm: Option<Llm>) -> Self {
         Self::build_with(extra, llm, None)
     }
 
     fn build_with(extra: &str, llm: Option<Llm>, embedder: Option<Arc<dyn Embedder>>) -> Self {
         let data = tempfile::tempdir().unwrap();
-        let (router, state) = Self::make_router(&data, extra, llm.clone(), embedder.clone());
+        let (router, state) =
+            Self::make_router(&data, extra, llm.clone(), embedder.clone(), None, false);
         Self {
             data,
             router,
@@ -121,6 +165,8 @@ impl TestApp {
             extra_config: extra.to_owned(),
             llm,
             embedder,
+            switch: None,
+            from_file: false,
         }
     }
 
@@ -133,15 +179,28 @@ impl TestApp {
         extra: &str,
         llm: Option<Llm>,
         embedder: Option<Arc<dyn Embedder>>,
+        switch: Option<Arc<Switch>>,
+        from_file: bool,
     ) -> (Router, AppState) {
-        let mut cfg = Config::from_toml_str(&format!(
-            "[data]\ndir = {:?}\n{extra}",
-            data.path().to_str().unwrap()
-        ))
-        .unwrap();
+        let text = format!("[data]\ndir = {:?}\n{extra}", data.path().to_str().unwrap());
+        let mut cfg = if from_file {
+            let file = data.path().join("config.toml");
+            if !file.exists() {
+                std::fs::write(&file, &text).unwrap();
+            }
+            Config::load(&file).unwrap()
+        } else {
+            Config::from_toml_str(&text).unwrap()
+        };
         cfg.load_jwt_key(std::path::Path::new(".")).unwrap();
         std::fs::create_dir_all(cfg.tenants_dir()).unwrap();
-        let state = AppState::with_models(cfg, Some(ADMIN), llm, embedder);
+        let state = match switch {
+            Some(switch) => {
+                let llm = llm.ok_or(pinakes::llm::Missing::Config("no model".into()));
+                AppState::with_switch(cfg, Some(ADMIN), llm, Some(switch))
+            }
+            None => AppState::with_models(cfg, Some(ADMIN), llm, embedder),
+        };
         (router(state.clone()), state)
     }
 
@@ -153,6 +212,8 @@ impl TestApp {
             &self.extra_config,
             self.llm.clone(),
             self.embedder.clone(),
+            self.switch.clone(),
+            self.from_file,
         );
     }
 
@@ -213,6 +274,16 @@ impl TestApp {
             Request::delete(uri).header("Authorization", format!("Bearer {}", caller.key));
         req = with_caller(req, caller);
         self.send(req.body(Body::empty()).unwrap()).await
+    }
+
+    /// A GET with the admin key.
+    pub async fn get_admin(&self, uri: &str) -> (StatusCode, Value) {
+        self.get(Caller::new(ADMIN), uri).await
+    }
+
+    /// A PUT with the admin key.
+    pub async fn put_admin(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        self.put(Caller::new(ADMIN), uri, body).await
     }
 
     /// A DELETE with the admin key.

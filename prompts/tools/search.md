@@ -24,5 +24,6 @@ Then:
   page id, `graph` with a node id).
 - On a `weak` slot or unmatched keywords: retry with other terms (synonyms, the other language,
   the identifier), or set `mode: "semantic"` to search by meaning, which also finds pages written
-  in the other language. `mode: "both"` combines keywords and meaning.
+  in the other language. `mode: "both"` combines keywords and meaning. When the service has
+  semantic search off, those modes answer that they are unavailable: retry with other keywords.
 - Pass the `session` from the result to every later call of the task.

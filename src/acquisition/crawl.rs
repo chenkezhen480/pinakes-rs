@@ -51,6 +51,7 @@ pub struct CrawledPage {
 
 /// What a crawl did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct CrawlReport {
     pub at: String,
     /// The allowlist it read, so a changed one is read again at once.
@@ -218,10 +219,10 @@ pub fn sitemap_locs(xml: &str) -> (bool, Vec<String>) {
     (index, out)
 }
 
-/// The addresses a page's Markdown links to, made absolute against the page's own, without
+/// The addresses a page's Markdown links to, with those `found` outside it (an HTML page's
+/// navigation, which its Markdown leaves out), made absolute against the page's own, without
 /// fragments; files that aren't pages (images, styles, scripts, archives) left out.
-pub fn links(markdown: &str, base: &Url) -> Vec<Url> {
-    let mut found = Vec::new();
+pub fn links_with(markdown: &str, mut found: Vec<String>, base: &Url) -> Vec<Url> {
     let mut rest = markdown;
     while let Some(i) = rest.find("](") {
         rest = &rest[i + 2..];
@@ -542,15 +543,15 @@ pub async fn crawl(
             if landed != url && !seen.insert(landed.to_string()) {
                 continue;
             }
-            let markdown = match app.converter.convert(&fetched.ext, fetched.bytes).await {
-                Ok(c) => c.markdown,
+            let (markdown, found) = match app.converter.convert(&fetched.ext, fetched.bytes).await {
+                Ok(c) => (c.markdown, c.links),
                 Err(e) => {
                     tracing::debug!(url = %url, error = %e, "a page of a trusted site wasn't converted");
                     report.failed += 1;
                     continue;
                 }
             };
-            for link in links(&markdown, &landed) {
+            for link in links_with(&markdown, found, &landed) {
                 if mine(&link) && !seen.contains(link.as_str()) && queued.insert(link.to_string()) {
                     frontier.push_back(link);
                 }
@@ -671,10 +672,14 @@ mod tests {
     fn links_are_made_absolute_and_pages_only() {
         let base = Url::parse("https://a.com/docs/one").unwrap();
         let md = "See [two](two#part) and [home](/), ![logo](/logo.png), <https://b.org/x> and [mail](mailto:x@a.com).";
-        let got: Vec<String> = links(md, &base).iter().map(Url::to_string).collect();
+        let got: Vec<String> = links_with(md, vec!["/nav".into()], &base)
+            .iter()
+            .map(Url::to_string)
+            .collect();
         assert_eq!(
             got,
             vec![
+                "https://a.com/nav",
                 "https://a.com/docs/two",
                 "https://a.com/",
                 "https://b.org/x"

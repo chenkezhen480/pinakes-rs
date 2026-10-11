@@ -10,6 +10,7 @@ use crate::kinds::Kind;
 /// The front matter fields the service reads and writes. Fields it doesn't model (such as a
 /// graph space's `nodes` and `relations`) are kept in `extra` and written back unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct FrontMatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,
@@ -30,6 +31,7 @@ pub struct FrontMatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
     #[serde(flatten)]
+    #[cfg_attr(test, ts(skip))]
     pub extra: BTreeMap<String, serde_norway::Value>,
 }
 

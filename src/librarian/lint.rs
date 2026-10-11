@@ -58,6 +58,7 @@ const MIN_SEARCHES: u32 = 3;
 const MISS_PAGES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     /// A `[[link]]` to a page or entity that doesn't exist or not every reader can see.
@@ -83,6 +84,7 @@ pub enum FindingKind {
 
 /// Text on a page that a finding is about, as the page has it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Claim {
     pub page: String,
     pub text: String,
@@ -90,6 +92,7 @@ pub struct Claim {
 
 /// One finding, as `GET /lint` lists it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Finding {
     pub kind: FindingKind,
     /// The pages it is about, as `/read` takes them.
@@ -122,6 +125,7 @@ pub struct Stored {
 
 /// What a lint run did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct LintRun {
     pub at: String,
     pub findings: usize,

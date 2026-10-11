@@ -21,6 +21,36 @@ fn main() -> anyhow::Result<()> {
     let config_path = std::env::var_os("PINAKES_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config.toml"));
+    // A first start in a container: the image's default config is copied to where the service
+    // keeps its own (the data volume), so settings changed from the console are written there
+    // and outlive the container.
+    if let Some(default) = std::env::var_os("PINAKES_CONFIG_DEFAULT").map(PathBuf::from)
+        && !config_path.exists()
+        && default.exists()
+    {
+        std::fs::copy(&default, &config_path).with_context(|| {
+            format!(
+                "copying the default config {} to {}",
+                default.display(),
+                config_path.display()
+            )
+        })?;
+        tracing::info!(from = %default.display(), to = %config_path.display(), "config file created from the default");
+    } else if let Some(default) = std::env::var_os("PINAKES_CONFIG_DEFAULT").map(PathBuf::from)
+        && let (Ok(shipped), Ok(used)) = (
+            std::fs::read_to_string(&default),
+            std::fs::read_to_string(&config_path),
+        )
+        && shipped != used
+    {
+        // The volume keeps its own config across image updates (the console writes it): say
+        // when the image's default has changed from it, so an update's new settings are seen.
+        tracing::info!(
+            default = %default.display(),
+            used = %config_path.display(),
+            "the config in use differs from this image's default (kept from an earlier start or changed in the console); compare them after an update"
+        );
+    }
     let config = if config_path.exists() {
         Config::load(&config_path)?
     } else {
@@ -67,6 +97,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 .display()
         );
     }
+    if state.login.default_password() {
+        tracing::info!(
+            "console sign-in: root / 1234; change it in the console (Settings, Environment) or set {} before others can reach the service",
+            pinakes::login::PASSWORD_ENV
+        );
+    }
     let app = pinakes::router(state.clone());
     state.start_cache_sweeper();
     ask_for_key(&state);
@@ -79,12 +115,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         tracing::info!("test chat at http://{addr}/dev");
     }
     let shutdown = state.shutdown.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            stop_signal().await;
-            shutdown.cancel();
-        })
-        .await?;
+    // The peer's address counts failed console sign-ins per caller.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        stop_signal().await;
+        shutdown.cancel();
+    })
+    .await?;
     // Lines still queued when the server stops are written before exiting.
     tokio::task::spawn_blocking(move || state.traces.flush()).await?;
     Ok(())
@@ -138,17 +178,11 @@ fn ask_for_key(state: &AppState) {
                     return;
                 }
             };
-            match pinakes::llm::client(&state.config.librarian, Some(key)) {
-                Ok(llm) => {
-                    state.set_llm(llm);
-                    println!("Librarian on.");
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "the librarian stays off");
-                    return;
-                }
+            match state.set_entered_key(key) {
+                Ok(()) => println!("Librarian on."),
+                Err(e) => tracing::warn!(error = %e, "the librarian stays off"),
             }
+            return;
         }
     });
 }

@@ -5,13 +5,17 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 
 ## Working agreement
 
-- Build one milestone at a time (M1…M10 in "Build milestones"). M10 (planned 2026-10-10, not
-  built: a web console, built-in conversion, vectors off by default) is written up in design.md
-  "M10: a web console, built-in conversion, vectors off by default"; its choices were confirmed
-  by the user the same day. Console work follows the project skill
-  `pinakes-console` (`.claude/skills/`): Svelte 5 + TypeScript built by Vite into a committed
-  `ui/dist/` (no component library, no CDN, a size budget; cargo and Docker never need Node). Each milestone ends with its
-  "done when" check, backed by tests.
+- Build one milestone at a time (M1…M10 in "Build milestones"); each ends with its "done when"
+  check, backed by tests. M10 (built 2026-10-10: the web console, built-in conversion, vectors off
+  by default) is in design.md "M10: a web console, built-in conversion, vectors off by default".
+- Console work follows the project skill `pinakes-console` (`.claude/skills/`): Svelte 5 +
+  TypeScript in `ui/`, built by Vite into a committed `ui/dist/` that the binary embeds (no
+  component library, no CDN, a size budget; cargo and Docker never need Node). After changing
+  `ui/`: `npm run check`, `npm run build` (then the dist is committed as built), and the browser
+  tests `npx playwright test` (they start `tests/console_e2e.rs` on 127.0.0.1:8097). After
+  changing a handler's request or response types: `PINAKES_WRITE_TYPES=1 cargo test --lib
+  api::types` regenerates `ui/src/api/types.ts`; after changing `Config` or `settings.rs`:
+  `PINAKES_WRITE_REFERENCE=1 cargo test --lib settings` regenerates `docs/configuration.md`.
 - Reply to the user in Chinese. Code, comments and docs stay in English; commit messages may be
   in Chinese (identifiers, test names and error strings as in the code).
 - Before calling a task done, run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
@@ -39,6 +43,12 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Every read and write path takes a `Scope` (tenant + user + groups); never take tenant, user or
   group ids from request bodies. Groups arrive in the `X-User-Groups` header (API key mode);
   who an insert is for, in the `X-Audience` header (`tenant`, `user`, `group:<id>`).
+- The console signs in with one admin account (`src/login.rs`: `root` / `1234` or
+  `PINAKES_ADMIN_USER` / `PINAKES_ADMIN_PASSWORD`, changed on the console, kept hashed in
+  `<data>/console-login.json`; the first sign-in with `1234` works from anywhere, never blocked). Its session token is the admin
+  (`identity::Admin`) and looks at a tenant as a user would (`identity::Scope`: the personal
+  tenant, or the one in `X-Pinakes-Tenant`, read only with a session). The admin key is for
+  scripts and host code.
 - Schema descriptions come only from the librarian (`librarian::Librarian::describe`); code
   adds the structure (`src/graph/describe.rs`). No description, no schema: definition and page
   are stored together or not at all.
@@ -52,11 +62,16 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Every wiki write runs as a job on the tenant's write queue (`src/jobs.rs`) or holds the
   tenant's `wiki_writer` lock; code, never the LLM, writes `kind`, `updated` and `sources`.
 - Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
-- Uploaded files go through the converter container (`converter/`, MarkItDown); the service
-  never parses Word, PDF or HTML itself. In the compose stack it sits on an internal network with
-  no egress; for the host, start `docker compose --profile dev up -d --build
-  converter-dev` (127.0.0.1:8090); `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test
-  integration convert::` runs a real Word file through it (skipped without the variable).
+- Files are converted by the service itself (`src/convert/`, pure Rust: HTML, DOCX, XLSX/XLSM (read
+  cell by cell), CSV, PPTX; decided 2026-10-10, replacing "the service never parses Word, PDF or HTML itself").
+  Every reader is bounded: the file's size, a zip's entries, unpacked size and ratio checked before
+  anything is read, XML without entities or external references, nesting and cell caps, the
+  Markdown's length, a time limit; bytes in, Markdown out (no paths, no network). PDF, `.doc`, `.xls`
+  and `.ppt` go to the optional MarkItDown container (`converter/`, compose profile `markitdown`) only
+  when `[converter] url` is set, and are refused (415) with what to do otherwise. On the host:
+  `docker compose --profile dev up -d --build converter-dev` (127.0.0.1:8090);
+  `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test integration convert::` compares
+  both converters on every fixture and runs a PDF through MarkItDown (skipped without the variable).
 - Expertise documents get ids from the service (`d_…`), never from the host. A new version
   finds the pages of earlier ones through the raw records they cite (`sources`), not by
   similarity. Code never interprets a document's structure; the model reads it from the top
@@ -73,12 +88,19 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   client's `Mcp-Session-Id` stands in). Trying them with a real agent: Pi (`pi`, with
   `pi-mcp-extension`, `.pi/mcp.json` naming `/mcp` and the key/user headers), run with
   `< /dev/null` in `-p` mode or it waits for stdin.
-- `/search` is the only search entry. `/graph`, `/graph/path` and `/read` only take ids that `/search` returns.
+- `/search` is the only search entry for agents. `/graph`, `/graph/path` and `/read` only take ids
+  that `/search` returns. The browsing endpoints for people and host code (`/pages`, `/history`,
+  `/graph/schemas`, `/graph/spaces`, `/graph/nodes`; confirmed 2026-10-10) list what a caller may
+  see and are not tools.
 - No LLM calls on the read path (`/search`, `/graph`, `/read`, `/pages`).
 - Searches read only the in-memory copies; never query SQLite or Neo4j on the read path.
 - Storage sits behind the `Store` and `GraphStore` traits, from M1 on.
 - Every Neo4j node and edge carries the tenant id, and every Cypher query filters on it.
 - Every search stage gets a tracing span with its timing.
+- Embeddings are off by default (`[embedding] enabled = false`): nothing is downloaded and keyword
+  search answers. The admin turns them on and off while the service runs (`/admin/embedding`,
+  `embed::Switch`, written back to the config file); every user asks the switch per use
+  (`Embedder::ready`), never caches whether it is on.
 - Languages are Chinese and English only. Embeddings use jina-embeddings-v2-base-zh (`src/embed.rs`,
   fixed revision, no prefixes), chosen on the test set (design.md "As built in M5"). Page vectors
   are built when the snapshot is (`search::vectors`) and kept in SQLite by page, heading and text
@@ -140,7 +162,8 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 ## Layout
 
 Single package: `src/lib.rs` holds the modules, `src/main.rs` only reads config and starts the
-server, `src/bin/pinakes-replay.rs` replays search traces, and `tests/` holds HTTP-level integration
+server, `src/bin/pinakes-replay.rs` replays search traces, `ui/` holds the web console (served at `/ui`
+by `src/console.rs`; its 3D hall, three.js in a chunk of its own, is `ui/src/hall/`), and `tests/` holds HTTP-level integration
 tests that drive the axum `Router` directly (shared helpers in `tests/common/`). They are one test
 program, `integration` (`tests/main.rs` declares each file as a module; `autotests = false`), so
 the service is linked once: a new test file gets a `mod` line there, and one file's tests run

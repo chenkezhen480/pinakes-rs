@@ -44,7 +44,7 @@ LLM；Pinakes 在 LLM 还没开始之前就已经返回了结果。
 
 ## 二、知识自托管、自管理
 
-**自托管。** Pinakes 是一个 Rust 程序（外加一个可选的文档转换容器），运行在你自己的机器或服务器上。
+**自托管。** Pinakes 是一个内置网页控制台的 Rust 程序，运行在你自己的机器或服务器上；它自己就能读取 Word、Excel、PowerPoint 和网页（可选的转换容器再加上 PDF）。
 知识保存在你看得懂的文件里：Wiki 是纯 Markdown，每个租户一个 SQLite 文件，图数据存于 SQLite 或 Neo4j。
 向量模型在本地运行。唯一的外部调用是写入时馆员所用的模型，可以是任何 Anthropic 兼容或 OpenAI 兼容的接口，
 本地模型（Ollama、vLLM）也可以。租户、组、用户彼此隔离；删除是彻底删除，测试逐字节核查。
@@ -142,26 +142,31 @@ flowchart LR
 | | `jwt` | 请求直接来自用户的机器（例如接了 MCP 的智能体）：宿主签发包含租户、用户、组的 token，Pinakes 用宿主的公钥验签 |
 | **图存储**（`[graph] backend`） | `sqlite`（默认） | 每个租户目录下一个 `graph.sqlite`，无需额外服务 |
 | | `neo4j` | 使用 compose 的 `neo4j` profile；两者之间用 `pinakes-migrate-graph` 迁移数据 |
-| **语义检索**（`[embedding] model`） | `jina-embeddings-v2-base-zh`（默认） | 首次启动时在后台下载模型（约 640 MB）到 `<data>/models`；可用 `HF_ENDPOINT` 指定镜像 |
-| | 不设置 | 只有关键词检索（`semantic` 与 `both` 返回 503） |
+| **语义检索**（`[embedding] enabled`） | 关闭（默认） | 只用关键词检索，不下载任何东西；`semantic` 与 `both` 会说明如何开启 |
+| | 开启（控制台开关或配置行） | 在后台一次性下载 `jina-embeddings-v2-base-zh`（约 640 MB）到 `<data>/models` 并嵌入所有页面，无需重启；可用 `HF_ENDPOINT` 指定镜像 |
 | **默认检索模式**（`[search] default_mode`） | `keyword`（默认）、`semantic`、`both`、`auto` | 检索请求未指定时使用；`auto` 先用关键词，覆盖不足时再用语义 |
-| **文档转换器**（`[converter] url`） | MarkItDown 容器 | 上传 Word、PowerPoint、Excel、PDF、HTML 时需要；没有它只能上传 Markdown 和纯文本 |
+| **文档转换** | 内置（默认） | Markdown、文本、HTML、Word（`.docx`）、表格（`.xlsx`、`.csv`）和 PowerPoint（`.pptx`）由服务自行读取 |
+| | 加上 MarkItDown（`[converter] url`，compose profile `markitdown`） | PDF 与旧版二进制 Office（`.doc`、`.xls`、`.ppt`）；没有它时会拒绝并说明怎么办 |
 | **外部获取**（`[acquisition] enabled`） | 关闭（默认） | 先在部署层面打开，再按租户配置白名单开启（`PUT /admin/tenants/{id}/acquisition`） |
-| **测试聊天**（`PINAKES_DEV=1`） | 关闭（默认） | `/dev` 上的一个小页面，基于检索结果回答，用于试用 |
+| **测试聊天**（`PINAKES_DEV=1`） | 关闭（默认） | 控制台检索页多出一个对话分页，用智能体同样的读取工具作答 |
 
-运行方式：**Docker Compose**（服务本体加转换器，`docker compose up -d --build`；需要 Neo4j 时加
-`--profile neo4j`），或**从源码运行**（`cargo run --release`；要上传文档时单独启动转换器：
-`docker compose --profile dev up -d converter-dev`）。密钥从不写进 `config.toml`：`PINAKES_ADMIN_KEY`（管理接口）、
-`NEO4J_PASSWORD`，以及写在 `model.conf`（不进 git）或它所指定环境变量里的模型密钥。
+运行方式：**Docker Compose**（`docker compose up -d --build` 只启动服务本体；需要 PDF 时加
+`--profile markitdown`，需要 Neo4j 时加 `--profile neo4j`），或**从源码运行**（`cargo run --release`）。
+两种方式下**网页控制台**都在 `http://127.0.0.1:8080/ui`：检索、渲染后的知识库、录入知识、画出来的图谱、
+审阅、体检、采集、租户，以及逐项说明的全部设置；界面是一座 3D 的亚历山大图书馆大厅，窗外天色随时间变化（也可一键切换为列表）。用户名 `root`、密码 `1234` 登录，
+在别人能访问到服务之前，到 设置 → 环境 修改（或设置 `PINAKES_ADMIN_PASSWORD`）。
+登录状态保存在浏览器里，直到退出。密钥从不写进 `config.toml`：`PINAKES_ADMIN_PASSWORD`（控制台）、
+`PINAKES_ADMIN_KEY`（脚本调用管理接口）、`NEO4J_PASSWORD`，以及写在 `model.conf`（不进 git）或它所指定环境变量里的模型密钥。
 
 ## 快速开始
 
-使用 Docker（服务本体加文档转换器）：
+使用 Docker：
 
 ```bash
 cp model.conf.example model.conf      # 配置馆员使用的模型和密钥（默认是 DeepSeek 的 Anthropic 兼容接口）
 export PINAKES_ADMIN_KEY=$(openssl rand -hex 24)
-docker compose up -d --build          # 服务地址 http://127.0.0.1:8080
+export PINAKES_ADMIN_PASSWORD='自己定一个'   # 控制台以 root 登录的密码
+docker compose up -d --build          # 控制台 http://127.0.0.1:8080/ui
 
 # 创建租户并取得它的 API Key
 curl -s -X POST http://127.0.0.1:8080/admin/tenants \
@@ -203,9 +208,8 @@ curl -s -X POST http://127.0.0.1:8080/search \
 
 ## 项目状态
 
-里程碑 M1 至 M9 已完成：隔离、检索、图谱、馆员、语义检索、性能、MCP 与打包、lint 与删除、外部获取
-以及 HNSW 索引。**M10** 已规划：覆盖全部操作的网页控制台、内置文档转换（MarkItDown 容器改为可选）、
-向量检索默认关闭。Pinakes 尚处于 1.0 之前，API 仍可能变化。
+里程碑 M1 至 M10 已完成：隔离、检索、图谱、馆员、语义检索、性能、MCP 与打包、lint 与删除、外部获取
+以及 HNSW 索引，还有网页控制台、内置文档转换和默认关闭的向量检索。Pinakes 尚处于 1.0 之前，API 仍可能变化。
 
 ## 参与贡献
 
@@ -227,8 +231,10 @@ curl -s -X POST http://127.0.0.1:8080/search \
 |---|---|---|---|
 | [jina-embeddings-v2-base-zh](https://huggingface.co/jinaai/jina-embeddings-v2-base-zh) | 页面与查询的向量 | 首次使用时从 Hugging Face 下载到 `<data>/models` | Apache-2.0 |
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) | 运行向量模型 | 构建时通过 `ort` 链接进程序的预编译库 | MIT |
-| [MarkItDown](https://github.com/microsoft/markitdown) | 把上传文件转成 Markdown | `converter` 容器镜像 | MIT |
-| [Python](https://www.python.org/) | 转换器的运行环境 | `python:3.12-slim` 基础镜像 | PSF-2.0 |
+| [MarkItDown](https://github.com/microsoft/markitdown) | 转换 PDF 和旧版 Office 文件（可选） | `converter` 容器镜像（compose profile `markitdown`） | MIT |
+| [Python](https://www.python.org/) | 可选转换器的运行环境 | `python:3.12-slim` 基础镜像 | PSF-2.0 |
+| [Svelte](https://svelte.dev/) 与 [d3-force](https://github.com/d3/d3-force) | 网页控制台及其图谱布局 | 编译进 `ui/dist`，嵌入程序 | MIT、ISC |
+| [three.js](https://threejs.org/) | 控制台的 3D 大厅 | 编译进 `ui/dist`（单独分块），嵌入程序 | MIT |
 | [jieba](https://github.com/messense/jieba-rs) 词典 | 中文分词 | 随 `jieba-rs` crate 一起分发 | MIT |
 | [Neo4j 社区版](https://neo4j.com/) | 可选的图存储 | 官方 `neo4j` 镜像（compose 的 `neo4j` profile） | GPL-3.0（独立服务，不链接） |
 | [Debian](https://www.debian.org/) | 运行镜像 | `debian:trixie-slim` 基础镜像 | 多种自由软件许可证 |

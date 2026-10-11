@@ -85,6 +85,11 @@ pub async fn tenant(
 ) -> Result<StatusCode, ApiError> {
     let Path(tenant_id) = id?;
     if app.tenants.delete(&tenant_id).await? {
+        app.audit.record(
+            "admin",
+            "tenant.delete",
+            serde_json::json!({ "tenant": tenant_id }),
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)

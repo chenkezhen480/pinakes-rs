@@ -25,8 +25,11 @@ updates the relevant section in the same pull request. Work is organized in mile
 - **Optional services**, each only for the tests that need it (they are skipped otherwise):
   - Neo4j, for the Neo4j graph backend:
     `NEO4J_PASSWORD=<pw> docker compose --profile neo4j up -d neo4j`
-  - the document converter: `docker compose --profile dev up -d --build converter-dev`
+  - the optional MarkItDown converter (PDF, `.doc`, `.ppt`; the service reads the other
+    formats itself): `docker compose --profile dev up -d --build converter-dev`
     (listens on 127.0.0.1:8090)
+- **Node 24**, only to change the web console (`ui/`): `npm ci` there. Building and running the
+  service never needs it; the built console in `ui/dist/` is committed.
 - **The librarian's model**: copy `model.conf.example` to `model.conf` and fill it in. It holds
   a key, so it is git-ignored: never commit it.
 
@@ -38,6 +41,19 @@ cargo clippy --all-targets -- -D warnings
 cargo test -j 2 --no-fail-fast
 ```
 
+With a change to the console (`ui/`), also:
+
+```bash
+cd ui
+npm run check                 # svelte-check and TypeScript, no errors or warnings
+npm run build                 # into dist/, within the size budget; commit dist/ as built
+npx playwright test           # the browser tests (starts a seeded test service on 127.0.0.1:8097)
+```
+
+The console's API types are generated from the Rust structs: after changing a handler's request
+or response, `PINAKES_WRITE_TYPES=1 cargo test --lib api::types`. The configuration reference
+(`docs/configuration.md`) is generated too: `PINAKES_WRITE_REFERENCE=1 cargo test --lib settings`.
+
 `-j 2` keeps the test build within a 16 GB machine's memory. The files of `tests/` are modules of
 one test program, `integration` (listed in `tests/main.rs`; add a `mod` line for a new file), and
 one file's tests run with its name as the filter: `cargo test --test integration lint::`. CI runs the same three. Tests that
@@ -46,7 +62,7 @@ need a service or cost money run only when asked:
 | Variable | Runs |
 |---|---|
 | `PINAKES_TEST_NEO4J_URI=bolt://127.0.0.1:7687 PINAKES_TEST_NEO4J_PASSWORD=<pw>` | graph tests against Neo4j |
-| `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090` | real Word files through the converter |
+| `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090` | a PDF through MarkItDown, and every fixture converted by both converters and compared |
 | `PINAKES_TEST_EMBEDDING=1` | the real embedding model on the test set (downloads it once) |
 | `PINAKES_TEST_LLM=1` | the librarian and acquisition against a real model (costs money) |
 | `PINAKES_TEST_CRAWL=<domain>` | reading a real site |

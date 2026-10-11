@@ -1,7 +1,11 @@
 # The configuration the Docker image runs with (`docker compose up`); config.toml in the
 # repository root is for running the service on the host. Secrets stay in the environment
-# (PINAKES_ADMIN_KEY; NEO4J_PASSWORD with the Neo4j backend); the librarian's model and key are in model.conf, which
-# docker-compose.yml mounts next to this file.
+# (PINAKES_ADMIN_PASSWORD for the console, 1234 when unset;
+# PINAKES_ADMIN_KEY; NEO4J_PASSWORD with the Neo4j backend); the librarian's model and key are in model.conf, which
+# docker-compose.yml mounts next to this file. On first start this file is copied into the data
+# volume (/data/config.toml), which the service then uses and the console writes back to; an
+# updated image doesn't replace it (the log says when the two differ). Relative paths in it
+# are read from /data.
 
 [server]
 host = "0.0.0.0"               # inside the container; compose decides what the host exposes
@@ -35,14 +39,15 @@ admin_key_env = "PINAKES_ADMIN_KEY"
 file_name = "pinakes.sqlite"
 
 [librarian]                    # the only LLM the service calls, never on the read path
-model_file = "model.conf"      # mounted from the repository root by docker-compose.yml
+model_file = "/app/model.conf"   # mounted (read-only) from the repository root by docker-compose.yml
 max_tokens = 16000             # per reply
 timeout_secs = 300             # per call
 related_pages = 8              # related pages the librarian is shown (5 to 10 in the design)
 read_window_tokens = 20000     # how much of a document one read sees; grows for a long concept
 
-[converter]                    # files to Markdown, on the compose file's internal network
-url = "http://converter:8090"
+[converter]                    # MarkItDown, optional: PDF and the old binary Office formats. The service
+                               # reads Markdown, text, HTML, Word, spreadsheets and PowerPoint itself.
+# url = "http://converter:8090"  # with `docker compose --profile markitdown up -d --build`
 timeout_secs = 120
 
 [search]
@@ -57,8 +62,10 @@ vector_graph_rows = 100000     # (M9) from this many page vectors on, meaning se
 enabled = true
 retention_days = 30            # 0 keeps them forever
 
-[embedding]                    # local; downloaded into /data/models on first start, in the background
-model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: no vectors, semantic modes answer 503
+[embedding]                    # (M5) local, runs inside the process; files go to /data/models
+enabled = false                # off: keyword search only, nothing downloaded. On (console or here):
+                               # the model (about 640 MB) is downloaded once and pages embedded, no restart
+model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: embeddings can't be turned on
 
 [graph]
 backend = "sqlite"             # graph.sqlite in each tenant folder; or "neo4j" (see [neo4j])

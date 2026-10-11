@@ -30,8 +30,9 @@ const MAX_DOCUMENT: usize = 200_000;
 const MAX_ENTITIES: usize = 20;
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
-struct ExperienceIn {
+pub(crate) struct ExperienceIn {
     /// The task type, such as "partial refund after shipment".
     task: String,
     /// What happened.
@@ -52,8 +53,9 @@ struct ExperienceIn {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
-struct DecisionIn {
+pub(crate) struct DecisionIn {
     topic: String,
     decision: String,
     #[serde(default)]
@@ -70,8 +72,9 @@ struct DecisionIn {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
-struct ExpertiseIn {
+pub(crate) struct ExpertiseIn {
     title: String,
     content: String,
     /// The id the service gave this document when it was first filed (`result.document` of
@@ -88,8 +91,9 @@ struct ExpertiseIn {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
-struct PreferenceIn {
+pub(crate) struct PreferenceIn {
     statement: String,
     /// An observed habit rather than something the user said. Only read by the librarian,
     /// from the saved record.

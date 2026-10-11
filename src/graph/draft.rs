@@ -22,6 +22,7 @@ pub const MAX_DRAFT: usize = 5_000;
 /// One change, as a caller sends it. Node types, relation types and keys are the space's
 /// schema's; edge ends are `type/key` in the space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
     /// Adds a node, or changes one. What it leaves out stays as the node has it (in the
@@ -60,6 +61,7 @@ pub enum Change {
 
 /// One call that changed the draft.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DraftNote {
     pub at: String,
     /// The calling user's folder, when there was one.
@@ -71,6 +73,7 @@ pub struct DraftNote {
 
 /// The pending draft of one space: its net change from the stored graph.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct GraphDraft {
     pub space: String,
     /// Nodes it adds or changes, as they would be.

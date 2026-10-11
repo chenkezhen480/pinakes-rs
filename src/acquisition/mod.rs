@@ -69,6 +69,7 @@ const CRAWL_KEY: &str = "acquisition.crawl";
 
 /// A tenant's own switch and the sites it trusts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "AcquisitionSettings"))]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     #[serde(default)]
@@ -80,6 +81,7 @@ pub struct Settings {
 /// One trusted site: a domain (its subdomains included), the license its content comes under,
 /// whether the tenant may keep copies of it, and addresses to start reading it from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct AllowedSource {
     pub domain: String,
@@ -196,6 +198,7 @@ pub struct State {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Note {
     pub at: String,
     pub url: String,
@@ -212,6 +215,7 @@ fn tenant() -> String {
 
 /// What a run did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RunReport {
     pub at: String,
     /// Gaps found in the last lint run, and how many were taken this run.
@@ -232,6 +236,7 @@ pub struct RunReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Matched {
     pub gap: String,
     /// Pages of the index that matched it (at most the few shown to the librarian).
@@ -242,6 +247,7 @@ pub struct Matched {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Skipped {
     pub gap: String,
     pub reason: String,
@@ -251,6 +257,7 @@ pub struct Skipped {
 
 /// A gap: a weak keyword or a stale claim from lint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Gap {
     /// Whose searches or pages it came from (the finding's audience): usually the audience
     /// its answer is filed for, but a personal deployment's user's gaps are filed for the
@@ -302,6 +309,7 @@ pub struct Found {
 
 /// A page found outside and proposed as a source, held in the review queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Candidate {
     pub gap: Gap,
     pub url: String,

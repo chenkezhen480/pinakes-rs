@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Which edges a walk follows, seen from the node it stands on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     Out,

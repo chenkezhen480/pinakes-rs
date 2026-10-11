@@ -276,15 +276,15 @@ async fn a_real_model_reads_a_transcript_without_headings() {
     );
 }
 
-/// A Word file end to end: the converter (`PINAKES_TEST_CONVERTER`) turns it into Markdown,
-/// table included, and the model reads and files it; the table's numbers reach the pages.
+/// A Word file end to end: the service's own converter turns it into Markdown, table
+/// included, and the model reads and files it; the table's numbers reach the pages.
 #[tokio::test]
 async fn a_real_model_files_a_word_file() {
-    let (Some(llm), Ok(url)) = (live_llm(), std::env::var("PINAKES_TEST_CONVERTER")) else {
-        eprintln!("PINAKES_TEST_LLM or PINAKES_TEST_CONVERTER is not set; skipping");
+    let Some(llm) = live_llm() else {
+        eprintln!("PINAKES_TEST_LLM is not set; skipping the live librarian test");
         return;
     };
-    let app = TestApp::with_llm_and_config(llm, &format!("[converter]\nurl = \"{url}\"\n"));
+    let app = TestApp::with_llm(llm);
     let key = app.create_tenant("acme").await;
     let c = Caller::new(&key);
     let docx = include_bytes!("fixtures/member-benefits.docx");
@@ -300,6 +300,12 @@ async fn a_real_model_files_a_word_file() {
     let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
     eprintln!("{}", serde_json::to_string_pretty(&job).unwrap());
     assert_eq!(job["status"], "done", "{job}");
+    let source = job["result"]["source"].as_str().unwrap();
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(app.tenant_dir("acme").join(source)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["file"]["converter"], "builtin");
     let mut all = String::new();
     for page in job["result"]["pages_created"].as_array().unwrap() {
         let (_, p) = app

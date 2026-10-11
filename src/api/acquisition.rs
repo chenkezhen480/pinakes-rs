@@ -15,6 +15,7 @@ use crate::error::ApiError;
 use crate::identity::{Admin, Scope};
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "AcquisitionStatus"))]
 pub struct Status {
     /// Whether the deployment has acquisition on.
     pub available: bool,
@@ -32,6 +33,7 @@ pub struct Status {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Budget {
     pub day: String,
     pub daily_tokens: u64,

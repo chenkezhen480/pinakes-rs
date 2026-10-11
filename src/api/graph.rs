@@ -31,6 +31,7 @@ const MAX_PATH_HOPS: usize = 6;
 const MAX_RELATIONS: usize = 50;
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct GraphRequest {
     pub node: String,
@@ -48,6 +49,7 @@ pub struct GraphRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NodeOut {
     pub id: String,
     pub space: String,
@@ -57,7 +59,7 @@ pub struct NodeOut {
     pub name: String,
     pub aliases: Vec<String>,
     /// Values of the properties its type declares.
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
     /// Edges from the node the walk started at.
     pub depth: usize,
@@ -65,6 +67,7 @@ pub struct NodeOut {
 
 /// A page anchored to a walked node, or to the start node's type.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct AnchoredPage {
     pub page: String,
     pub kind: Kind,
@@ -76,6 +79,7 @@ pub struct AnchoredPage {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct GraphResponse {
     pub node: NodeOut,
     /// Every node reached, the start first.
@@ -86,7 +90,7 @@ pub struct GraphResponse {
     pub truncated: bool,
 }
 
-fn node_out(g: &GraphSnapshot, n: NodeIndex, depth: usize) -> NodeOut {
+pub(crate) fn node_out(g: &GraphSnapshot, n: NodeIndex, depth: usize) -> NodeOut {
     let d = &g.graph[n];
     NodeOut {
         id: d.id.clone(),
@@ -254,6 +258,7 @@ pub async fn graph(
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct PathRequest {
     pub from: String,
@@ -265,6 +270,7 @@ pub struct PathRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct PathResponse {
     /// A chain of at most `MAX_PATH_HOPS` edges exists. Nodes of two spaces are never joined.
     pub found: bool,

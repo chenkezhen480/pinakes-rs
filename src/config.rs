@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -38,12 +38,16 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub acquisition: AcquisitionConfig,
+    /// The file this was loaded from, which settings changed at run time are written back to;
+    /// `None` for a config not read from a file (defaults, tests).
+    #[serde(skip)]
+    pub file: Option<PathBuf>,
 }
 
 /// Filling gaps from outside (design, "Filling gaps from outside, with approval"). Off unless
 /// turned on here and, for each tenant, by the admin (`PUT /admin/tenants/{id}/acquisition`).
 /// Only the tenant's trusted sites are read; nothing else is asked.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcquisitionConfig {
     #[serde(default)]
@@ -66,7 +70,7 @@ pub struct AcquisitionConfig {
     pub allow_private_hosts: bool,
     /// Read and ignored: the search providers of the configs shipped before M9 (`providers =
     /// []`), so they still start; no search engine is used.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub providers: Option<serde::de::IgnoredAny>,
 }
 
@@ -98,7 +102,7 @@ fn default_daily_token_budget() -> u64 {
 }
 
 /// Open tenants in memory (design, "How it stays fast").
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     /// A tenant no request used for this long gives up its search snapshot and graph; the next
@@ -120,18 +124,24 @@ fn default_idle_minutes() -> u64 {
 }
 
 /// The local embedding model for meaning-based search (design, "Search signals").
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingConfig {
-    /// `jina-embeddings-v2-base-zh`, the one model the service runs. Unset, pages get no
-    /// vectors and searches in `semantic` or `both` mode answer 503. Its files are downloaded
-    /// into `<data>/models` on first start.
+    /// Whether page vectors are computed and meaning-based search can run. Off by default, so
+    /// a first start downloads nothing; turned on here or from the console, which applies at
+    /// once (the model is downloaded and loaded in the background) and writes it back here.
+    /// (A config from before this line existed, with a model and a meaning-based default
+    /// mode, is read as on, as it was then.)
+    #[serde(default)]
+    pub enabled: bool,
+    /// `jina-embeddings-v2-base-zh`, the one model the service runs. Unset, embeddings can't
+    /// be turned on. Its files are downloaded into `<data>/models` the first time it is on.
     #[serde(default)]
     pub model: Option<String>,
 }
 
 /// The document converter (design, "Files are turned into Markdown first").
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConverterConfig {
     /// Where it answers `POST /convert`, such as `http://127.0.0.1:8090`. Unset, only Markdown
@@ -157,7 +167,8 @@ fn default_convert_timeout() -> u64 {
 }
 
 /// Which LLM API the librarian calls (design, "The librarian: how new content is filed").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
     #[default]
@@ -239,7 +250,7 @@ impl ModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibrarianConfig {
     /// The model file, relative to the config file's folder.
@@ -292,7 +303,7 @@ impl Default for LibrarianConfig {
 }
 
 /// The per-tenant write queue.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobsConfig {
     /// Finished jobs stay visible at `/jobs/{id}` this long.
@@ -309,7 +320,7 @@ impl Default for JobsConfig {
 }
 
 /// Where graph data lives, and the caps on walks (design, "The business graph").
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphConfig {
     #[serde(default)]
@@ -332,7 +343,7 @@ impl Default for GraphConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphBackendKind {
     /// `graph.sqlite` in each tenant's folder, the default: nothing to run beside the service.
@@ -342,7 +353,7 @@ pub enum GraphBackendKind {
     Neo4j,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Neo4jConfig {
     #[serde(default = "default_neo4j_uri")]
@@ -369,7 +380,7 @@ impl Default for Neo4jConfig {
 }
 
 /// Search traces (design, "Search traces and replay").
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TraceConfig {
     #[serde(default = "yes")]
@@ -388,7 +399,7 @@ impl Default for TraceConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct SearchConfig {
     /// Hits per slot when a search doesn't say.
     #[serde(default)]
@@ -456,7 +467,7 @@ impl Default for SearchConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -478,7 +489,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct DataConfig {
     /// Root data folder; tenants live in `<dir>/tenants/`.
     #[serde(default = "default_data_dir")]
@@ -493,7 +504,8 @@ impl Default for DataConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityMode {
     #[default]
@@ -502,7 +514,8 @@ pub enum IdentityMode {
 }
 
 /// Who the service is set up for (design, "Personal deployments").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Deployment {
     /// Shared by many tenants; callers name their user in a header.
@@ -513,7 +526,7 @@ pub enum Deployment {
     Personal,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct IdentityConfig {
     #[serde(default)]
     pub mode: IdentityMode,
@@ -591,7 +604,7 @@ impl Default for IdentityConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct StoreConfig {
     #[serde(default = "default_store_file")]
     pub file_name: String,
@@ -698,9 +711,104 @@ fn default_keep_finished() -> u64 {
     60
 }
 
+/// Sets `key` in `[table]` of the config file at `path`; see [`write_values`].
+pub fn write_value(
+    path: &Path,
+    table: &str,
+    key: &str,
+    value: toml_edit::Value,
+) -> anyhow::Result<()> {
+    write_values(path, &[(format!("{table}.{key}"), Some(value))])
+}
+
+/// Sets fields (`section.key` or `section.table.key`) of the config file at `path`, keeping
+/// its comments and layout: a value replaced keeps the comment after it, a missing line or
+/// section is added, and `None` removes the line (the field goes back to its default). The
+/// result must still load as a config, or the file is left as it was; it is replaced whole,
+/// never half written.
+pub fn write_values(
+    path: &Path,
+    changes: &[(String, Option<toml_edit::Value>)],
+) -> anyhow::Result<()> {
+    // One write at a time: two at once would each read the file before the other wrote it.
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    for (field, value) in changes {
+        let parts: Vec<&str> = field.split('.').collect();
+        let (key, tables) = parts.split_last().context("an empty field name")?;
+        let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+        // Unsetting a field whose table isn't there leaves nothing to do.
+        if value.is_none()
+            && tables
+                .iter()
+                .try_fold(&*table, |t, name| {
+                    t.get(name).and_then(toml_edit::Item::as_table_like)
+                })
+                .is_none()
+        {
+            continue;
+        }
+        for t in tables {
+            if table.get(t).is_none() {
+                table.insert(t, toml_edit::table());
+            }
+            table = table
+                .get_mut(t)
+                .and_then(toml_edit::Item::as_table_like_mut)
+                .with_context(|| format!("{field}: {t} in {} is not a table", path.display()))?;
+        }
+        match (value, table.get_mut(key)) {
+            (None, _) => {
+                table.remove(key);
+            }
+            // The value is replaced; the comment after it stays.
+            (Some(value), Some(toml_edit::Item::Value(old))) => {
+                let decor = old.decor().clone();
+                *old = value.clone();
+                *old.decor_mut() = decor;
+            }
+            (Some(value), _) => {
+                table.insert(key, toml_edit::Item::Value(value.clone()));
+            }
+        }
+    }
+    let text = doc.to_string();
+    let tmp = path.with_extension("toml.new");
+    std::fs::write(&tmp, &text).with_context(|| format!("writing {}", tmp.display()))?;
+    // Loaded as the service starts would load it (the model file, a JWT key too), beside the
+    // real file so relative paths mean the same: a change that would stop the next start is
+    // refused, and the file stays as it was.
+    if let Err(e) = Config::load(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.context("the changed config doesn't load"));
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+}
+
 impl Config {
     pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
-        let cfg: Config = toml::from_str(text).context("parsing config")?;
+        let mut cfg: Config = toml::from_str(text).context("parsing config")?;
+        // Before the switch existed (M10), a named model meant embeddings on. A config from
+        // then whose default_mode needs meaning (and has no `enabled` line) keeps starting as it
+        // did, with them on; otherwise no line means off.
+        if cfg.embedding.model.is_some()
+            && cfg.search.default_mode.needs_meaning()
+            && !cfg.embedding.enabled
+        {
+            let raw: toml::Table = toml::from_str(text).context("parsing config")?;
+            let says = raw
+                .get("embedding")
+                .and_then(|e| e.get("enabled"))
+                .is_some();
+            if !says {
+                cfg.embedding.enabled = true;
+            }
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -710,6 +818,7 @@ impl Config {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;
         let mut cfg = Self::from_toml_str(&text)?;
+        cfg.file = Some(path.to_path_buf());
         let base = path.parent().unwrap_or(Path::new("."));
         cfg.load_model_file(base)?;
         cfg.load_jwt_key(base)?;
@@ -777,9 +886,12 @@ impl Config {
                 crate::embed::MODEL
             );
         }
-        if self.search.default_mode.needs_meaning() && self.embedding.model.is_none() {
+        if self.embedding.enabled && self.embedding.model.is_none() {
+            anyhow::bail!("embedding.enabled needs an [embedding] model");
+        }
+        if self.search.default_mode.needs_meaning() && !self.embedding.enabled {
             anyhow::bail!(
-                "search.default_mode {:?} needs an [embedding] model",
+                "search.default_mode {:?} needs embeddings on ([embedding] enabled = true)",
                 self.search.default_mode
             );
         }
@@ -914,18 +1026,62 @@ search_url = \"x\"
     }
 
     #[test]
-    fn a_meaning_based_default_mode_needs_the_model() {
+    fn a_meaning_based_default_mode_needs_embeddings_on() {
         let err = Config::from_toml_str("[search]\ndefault_mode = \"semantic\"\n").unwrap_err();
         assert!(
-            format!("{err:#}").contains("needs an [embedding] model"),
+            format!("{err:#}").contains("needs embeddings on"),
             "{err:#}"
         );
         Config::from_toml_str("[search]\ndefault_mode = \"auto\"\n").unwrap();
-        Config::from_toml_str(
-            "[search]\ndefault_mode = \"both\"\n[embedding]\nmodel = \"jina-embeddings-v2-base-zh\"\n",
-        )
-        .unwrap();
+        let model = "[embedding]\nmodel = \"jina-embeddings-v2-base-zh\"\n";
+        let both = "[search]\ndefault_mode = \"both\"\n";
+        // A config from before the switch (a model, no `enabled` line) starts with them on.
+        assert!(
+            Config::from_toml_str(&format!("{both}{model}"))
+                .unwrap()
+                .embedding
+                .enabled
+        );
+        assert!(!Config::from_toml_str(model).unwrap().embedding.enabled);
+        assert!(Config::from_toml_str(&format!("{both}{model}enabled = false\n")).is_err());
+        Config::from_toml_str(&format!("{both}{model}enabled = true\n")).unwrap();
+        assert!(Config::from_toml_str("[embedding]\nenabled = true\n").is_err());
         assert!(Config::from_toml_str("[embedding]\nmodel = \"multilingual-e5-small\"\n").is_err());
+    }
+
+    #[test]
+    fn a_value_written_back_keeps_the_file_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "# top\n[embedding]   # local\nenabled = false   # off: keywords only\nmodel = \"jina-embeddings-v2-base-zh\"\n";
+        std::fs::write(&path, text).unwrap();
+        write_value(&path, "embedding", "enabled", true.into()).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, text.replace("enabled = false", "enabled = true"));
+        assert!(Config::load(&path).unwrap().embedding.enabled);
+
+        // A missing line or section is added.
+        write_value(&path, "cache", "idle_minutes", 5i64.into()).unwrap();
+        assert_eq!(Config::load(&path).unwrap().cache.idle_minutes, 5);
+        // A value the config refuses leaves the file as it was.
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(write_value(&path, "search", "default_mode", "nonsense".into()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // So does one that would stop the next start: a JWT key file that isn't there.
+        let err = write_values(
+            &path,
+            &[
+                ("identity.mode".into(), Some("jwt".into())),
+                (
+                    "identity.public_key_file".into(),
+                    Some("missing.pem".into()),
+                ),
+            ],
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("missing.pem"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(!path.with_extension("toml.new").exists());
     }
 
     #[test]

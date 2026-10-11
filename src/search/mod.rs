@@ -259,6 +259,7 @@ impl SearchSnapshot {
 
 /// How the memories and knowledge channels rank pages. Names are matched in every mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// BM25 over the keywords.
@@ -281,6 +282,7 @@ impl Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Intent {
     Relation,
@@ -289,6 +291,7 @@ pub enum Intent {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct SlotRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +321,7 @@ impl Default for SlotSizes {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequest {
     pub query: String,
@@ -397,6 +401,7 @@ pub fn validate_session(s: &str) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Coverage {
     Strong,
@@ -404,6 +409,7 @@ pub enum Coverage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum MatchedBy {
     /// A title or alias of the page is in the query.
@@ -418,6 +424,7 @@ pub enum MatchedBy {
 
 /// How a hit got into its slot other than by matching the request itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
     /// A top memory is anchored to it (the memory-to-knowledge hop).
@@ -425,6 +432,7 @@ pub enum Via {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct HitLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heading: Option<String>,
@@ -432,6 +440,7 @@ pub struct HitLine {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Route {
     pub read: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -439,6 +448,7 @@ pub struct Route {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Hit {
     pub page: String,
     pub kind: Kind,
@@ -454,19 +464,21 @@ pub struct Hit {
     /// The raw records the page cites, as `/read` ids (`sources/<name>`).
     pub sources: Vec<String>,
     /// The page was written from a page found outside (`crate::acquisition`): lower trust.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub external: bool,
     pub route: Route,
     pub read: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct PageSlot {
     pub coverage: Coverage,
     pub hits: Vec<Hit>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RelationSlot {
     pub coverage: Coverage,
     /// Relation types the request names, as `schema:relation`.
@@ -479,6 +491,7 @@ pub struct RelationSlot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct GraphRoute {
     pub graph: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -486,12 +499,14 @@ pub struct GraphRoute {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct PathRoute {
     pub from: String,
     pub to: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SearchResponse {
     /// The mode the search ran in: the request's, or the default.
     pub mode: Mode,
@@ -502,6 +517,10 @@ pub struct SearchResponse {
     pub knowledge: PageSlot,
     pub relations: RelationSlot,
     pub unmatched_keywords: Vec<String>,
+    /// Set when the search ran by keywords alone though its mode would rank by meaning too
+    /// (`auto` while semantic search is off), saying so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
     /// Keywords that named nodes only as part of a node's name, with those nodes. For traces,
     /// so lint (M8) can ask the host for the missing aliases; not part of the response body.
     #[serde(skip)]
@@ -868,6 +887,14 @@ impl Default for Ablation {
     }
 }
 
+/// The note on an `auto` search that ran by keywords alone.
+pub const KEYWORDS_ONLY: &str =
+    "searched by keywords only: semantic search is off (embeddings are off or not loaded yet)";
+
+/// Why a meaning-based search can't run while the model is in: this tenant's vectors are
+/// missing.
+pub const NO_VECTORS: &str = "semantic search is off for this tenant: its page vectors could not be built (see the service log); they are built again with the next write";
+
 /// Why a search in a meaning-based mode can't run.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -887,9 +914,11 @@ pub fn check_meaning(
     embedder: Option<&dyn Embedder>,
 ) -> Result<(), NoMeaning> {
     if mode.needs_meaning() && !has_meaning(snap, embedder) {
-        return Err(NoMeaning(
-            "semantic search is off: no embedding model is loaded (it loads in the background after the service starts), or this tenant's page vectors could not be built ([embedding] model; see the service log)",
-        ));
+        return Err(NoMeaning(if embedder.is_some_and(|e| e.ready()) {
+            NO_VECTORS
+        } else {
+            "semantic search is off: the embedding model is off or not loaded yet"
+        }));
     }
     Ok(())
 }
@@ -1262,7 +1291,9 @@ pub fn search(
         Ok(cands)
     };
     // `auto` searches a slot that comes back weak again with both rankings, when meaning is
-    // available.
+    // available. If the model goes away meanwhile (turned off mid-search), keywords answer, as
+    // they do without one.
+    let meaning_lost = std::cell::Cell::new(false);
     let mut run_slot = |slot: Slot,
                         timings: &mut Vec<(&'static str, u64)>|
      -> anyhow::Result<(Vec<Candidate>, Coverage)> {
@@ -1274,7 +1305,13 @@ pub fn search(
         let mut cands = run_channel(slot, first, timings)?;
         if mode == Mode::Auto && meaning.is_some() && !cands.first().is_some_and(Candidate::strong)
         {
-            cands = run_channel(slot, Mode::Both, timings)?;
+            match run_channel(slot, Mode::Both, timings) {
+                Ok(both) => cands = both,
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "meaning went away mid-search; keywords answer");
+                    meaning_lost.set(true);
+                }
+            }
         }
         // A keyword counts as matched only through a page that is good enough to show.
         for c in &cands {
@@ -1441,6 +1478,8 @@ pub fn search(
         knowledge,
         relations: relation_slot,
         unmatched_keywords,
+        note: (mode == Mode::Auto && (meaning.is_none() || meaning_lost.get()))
+            .then_some(KEYWORDS_ONLY),
         partial_names,
         timings_us,
     })

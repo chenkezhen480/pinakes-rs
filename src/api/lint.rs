@@ -38,6 +38,7 @@ pub async fn run(
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct LintReport {
     /// The last run; absent before the first.
     #[serde(skip_serializing_if = "Option::is_none")]

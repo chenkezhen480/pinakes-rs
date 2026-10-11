@@ -12,6 +12,10 @@ pub enum ApiError {
     BadRequest(String),
     #[error("missing or invalid credentials")]
     Unauthorized,
+    #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
+    TooManyRequests(String),
     #[error("not found")]
     NotFound,
     #[error("{0}")]
@@ -35,6 +39,8 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            ApiError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable"),

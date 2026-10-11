@@ -242,6 +242,11 @@ impl Tenant {
         released
     }
 
+    /// Whether its search snapshot is in memory.
+    pub fn in_memory(&self) -> bool {
+        self.current_snapshot().is_some()
+    }
+
     fn current_snapshot(&self) -> Option<Arc<SearchSnapshot>> {
         self.search
             .read()
@@ -1045,6 +1050,72 @@ impl Tenants {
             .then_some(tenant))
     }
 
+    /// Every tenant, by its folders (each opened to read its id).
+    pub async fn list(&self) -> anyhow::Result<Vec<Listed>> {
+        let mut dirs = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&self.root).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(e) = entries.next_entry().await? {
+            if let Some(name) = e.file_name().to_str() {
+                dirs.push(name.to_owned());
+            }
+        }
+        let mut out = Vec::new();
+        for d in dirs {
+            // An open tenant answers from memory; another only has its id read, and isn't
+            // opened (nor kept) for a listing.
+            if let Some(t) = self.open.read().await.get(&d) {
+                if !t.is_deleted() {
+                    out.push(Listed {
+                        id: t.id.clone(),
+                        dir_name: d,
+                        in_memory: t.in_memory(),
+                    });
+                }
+                continue;
+            }
+            // One whose id can't be read (a damaged file) doesn't hide the others; why is in
+            // the log.
+            match self.read_id(&d).await {
+                Ok(Some(id)) => out.push(Listed {
+                    id,
+                    dir_name: d,
+                    in_memory: false,
+                }),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(tenant = %d, error = %format!("{e:#}"), "tenant can't be read; left out of the list")
+                }
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    /// A tenant folder's id, read from its store without opening the tenant; `None` for a
+    /// folder that isn't a tenant's.
+    async fn read_id(&self, dir_name: &str) -> anyhow::Result<Option<String>> {
+        // Only a tenant's folder: never one being created (`.tmp-…`) or deleted (`.deleted-…`),
+        // whose files a reader would hold open while they are renamed or removed.
+        let well_formed = dir_name.strip_prefix("t_").is_some_and(|h| {
+            h.len() == 16
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        let file = self.root.join(dir_name).join(&self.store_file);
+        if !well_formed || !tokio::fs::metadata(&file).await.is_ok_and(|m| m.is_file()) {
+            return Ok(None);
+        }
+        // Read only, no migration: a listing writes nothing.
+        let id = tokio::task::spawn_blocking(move || crate::store::read_tenant_id(&file))
+            .await
+            .context("reading the tenant id panicked")??;
+        Ok(id.filter(|id| tenant_dir_name(id) == dir_name))
+    }
+
     /// The tenant with this id, if the service has it (JWT mode names tenants by id).
     pub async fn by_id(&self, tenant_id: &str) -> anyhow::Result<Option<Arc<Tenant>>> {
         if validate_id("tenant", tenant_id).is_err() {
@@ -1138,6 +1209,15 @@ impl Tenants {
             deleted: AtomicBool::new(false),
         })
     }
+}
+
+/// A tenant as the admin's list shows it.
+#[derive(Debug, Clone)]
+pub struct Listed {
+    pub id: String,
+    pub dir_name: String,
+    /// Whether its search snapshot is in memory now.
+    pub in_memory: bool,
 }
 
 /// Removes a folder, trying again up to three times (a file a reader still had open may keep

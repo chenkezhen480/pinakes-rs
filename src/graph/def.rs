@@ -77,6 +77,7 @@ fn validate_opt(what: &str, text: &Option<String>) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct NodeTypeDef {
     /// The field that identifies a node of this type, such as `order_id`.
@@ -95,6 +96,7 @@ pub struct NodeTypeDef {
 
 /// A property a node type declares: the kind of value it holds, and what it means.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct PropertyDef {
     #[serde(rename = "type")]
@@ -107,6 +109,7 @@ pub struct PropertyDef {
 
 /// The kinds of property values: text, a number, a date (`YYYY-MM-DD`) or true/false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum PropertyType {
     Text,
@@ -142,6 +145,7 @@ impl PropertyType {
 pub const MAX_PROPERTIES: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct RelationDef {
     pub from: String,
@@ -159,6 +163,7 @@ pub struct RelationDef {
 
 /// A graph schema: node types and relation types. Its stored copy is authoritative.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct SchemaDef {
     pub schema: String,
@@ -324,6 +329,7 @@ fn fill(now: &mut Option<String>, before: &Option<String>) {
 
 /// Who can see a graph space.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
     /// Everyone in the tenant.
@@ -337,6 +343,7 @@ pub enum Visibility {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Members {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -353,6 +360,7 @@ impl Members {
 
 /// What a caller sends to create a space. The owner is never in the body: it is the caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct SpaceRequest {
     pub space: String,
@@ -371,6 +379,7 @@ pub struct SpaceRequest {
 /// A registered graph space. Its owner and members are raw ids, kept only in the tenant's
 /// store; everywhere else they are compared as folder names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SpaceDef {
     pub space: String,
     pub schema: String,
@@ -432,6 +441,7 @@ impl SpaceRequest {
 
 /// One node of a space, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NodeRecord {
     pub space: String,
     #[serde(rename = "type")]
@@ -447,6 +457,7 @@ pub struct NodeRecord {
 
 /// One edge of a space, as stored. Both ends are in the same space.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct EdgeRecord {
     pub space: String,
     #[serde(rename = "type")]
@@ -459,6 +470,7 @@ pub struct EdgeRecord {
 
 /// Which node: its space, type and key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NodeKey {
     pub space: String,
     #[serde(rename = "type")]
@@ -475,6 +487,7 @@ pub struct GraphData {
 
 /// A node as a caller writes it; its space comes from the request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct NodeIn {
     #[serde(rename = "type")]
@@ -492,6 +505,7 @@ pub struct NodeIn {
 
 /// An edge as a caller writes it: ends as `type/key` inside the request's space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct EdgeIn {
     pub from: String,
@@ -505,6 +519,7 @@ pub const MAX_BATCH: usize = 10_000;
 
 /// `POST /ingest/graph/data`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct DataRequest {
     pub space: String,

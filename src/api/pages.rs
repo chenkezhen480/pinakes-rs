@@ -12,11 +12,13 @@ use crate::search::visible_anchors;
 use crate::wiki::{FrontMatter, PagePath, PageSummary};
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ListQuery {
     pub kind: Option<Kind>,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ListResponse {
     pub pages: Vec<PageSummary>,
 }
@@ -41,8 +43,10 @@ pub async fn list(
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct PageResponse {
     #[serde(rename = "page")]
+    #[cfg_attr(test, ts(type = "string"))]
     pub path: PagePath,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,
@@ -50,13 +54,36 @@ pub struct PageResponse {
     pub version: String,
     pub front_matter: FrontMatter,
     pub body: String,
+    /// The body as safe HTML, when asked for (`?html=true`): raw HTML shown as text, only
+    /// web and mail links, no images, wiki links as console routes (`wiki::render`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    /// Written from a page found outside (it cites an external source): lower trust.
+    pub external: bool,
+}
+
+fn cites_external(front: &FrontMatter) -> bool {
+    front
+        .sources
+        .iter()
+        .any(|s| crate::librarian::sources::is_external(s))
+}
+
+/// Other query parameters are ignored, as they were before `html` existed (a proxy's
+/// cache-buster, say).
+#[derive(Debug, Deserialize)]
+pub struct GetQuery {
+    #[serde(default)]
+    pub html: bool,
 }
 
 #[tracing::instrument(name = "get_page", skip_all, fields(path = tracing::field::Empty))]
 pub async fn get(
     scope: Scope,
     raw: Result<Path<String>, PathRejection>,
+    query: Result<Query<GetQuery>, QueryRejection>,
 ) -> Result<Json<PageResponse>, ApiError> {
+    let Query(q) = query?;
     let Path(raw) = raw?;
     tracing::Span::current().record("path", raw.as_str());
     let path = PagePath::parse(&raw)?;
@@ -82,12 +109,89 @@ pub async fn get(
         kind: page.path.kind(),
         path: page.path,
         version,
+        external: cites_external(&page.front),
         front_matter: page.front,
+        html: q.html.then(|| crate::wiki::render::html(&page.body)),
         body: page.body,
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryQuery {
+    /// A version `GET /history/{path}` listed: answers with the page as it was then.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HistoryResponse {
+    pub page: String,
+    /// Each text the page had, oldest first, while the search traces that name its versions
+    /// are kept (`[trace] retention_days`).
+    pub versions: Vec<crate::wiki::PageVersion>,
+}
+
+/// `GET /history/{path}`: the versions of a page the service keeps (for replays), or with
+/// `?version=` the page as it was in one of them, its body as HTML too.
+#[tracing::instrument(name = "page_history", skip_all, fields(path = tracing::field::Empty))]
+pub async fn history(
+    scope: Scope,
+    raw: Result<Path<String>, PathRejection>,
+    query: Result<Query<HistoryQuery>, QueryRejection>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    let Query(q) = query?;
+    let Path(raw) = raw?;
+    tracing::Span::current().record("path", raw.as_str());
+    let path = PagePath::parse(&raw)?;
+    if !scope.can_see(&path) {
+        return Err(ApiError::NotFound);
+    }
+    let history = crate::wiki::History::new(&scope.tenant().dir);
+    let key = path.to_string();
+    match q.version {
+        None => {
+            let versions = tokio::task::spawn_blocking(move || history.page_versions(&key))
+                .await
+                .map_err(anyhow::Error::from)??;
+            Ok(Json(HistoryResponse {
+                page: path.to_string(),
+                versions,
+            })
+            .into_response())
+        }
+        Some(v) => {
+            let text = tokio::task::spawn_blocking(move || history.page_text(&v, &key))
+                .await
+                .map_err(anyhow::Error::from)??
+                .ok_or(ApiError::NotFound)?;
+            let mut page = crate::wiki::Page::parse(path, &text)?;
+            // As for the page today: anchors the caller can't see are dropped.
+            if !page.front.about.is_empty() {
+                let graph = scope.tenant().graph_or_empty().await;
+                let vis = graph.visible(&scope);
+                let snapshot = scope.tenant().snapshot().await?;
+                page.front.about =
+                    visible_anchors(&scope, &snapshot.catalog, &graph, &vis, &page.front.about);
+            }
+            Ok(Json(PageResponse {
+                kind: page.path.kind(),
+                version: page.version(),
+                html: Some(crate::wiki::render::html(&page.body)),
+                external: cites_external(&page.front),
+                path: page.path,
+                front_matter: page.front,
+                body: page.body,
+            })
+            .into_response())
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct PutPage {
     /// The `version` `GET` returned; none (or absent) for a new page.
@@ -99,6 +203,14 @@ pub struct PutPage {
     pub _page: Option<serde_json::Value>,
     #[serde(default, rename = "kind")]
     pub _kind: Option<serde_json::Value>,
+    /// Also what `GET` returns, ignored: whether the page cites an outside source, and its
+    /// rendered body.
+    #[serde(default, rename = "external")]
+    #[cfg_attr(test, ts(skip))]
+    pub _external: Option<serde_json::Value>,
+    #[serde(default, rename = "html")]
+    #[cfg_attr(test, ts(skip))]
+    pub _html: Option<serde_json::Value>,
     pub front_matter: FrontMatter,
     pub body: String,
 }

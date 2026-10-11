@@ -271,7 +271,7 @@ fn groups_claim(claims: &Claims, name: &str) -> Result<Vec<Group>, ApiError> {
 
 /// The API key from the configured header. For `Authorization`, the `Bearer` scheme is required
 /// (case-insensitive, as RFC 7235 says) and removed.
-fn api_key<'a>(headers: &'a HeaderMap, header: &str) -> Option<&'a str> {
+pub(crate) fn api_key<'a>(headers: &'a HeaderMap, header: &str) -> Option<&'a str> {
     let value = headers.get(header)?.to_str().ok()?.trim();
     let key = if header.eq_ignore_ascii_case("authorization") {
         let (scheme, rest) = value.split_once(' ')?;
@@ -285,6 +285,34 @@ fn api_key<'a>(headers: &'a HeaderMap, header: &str) -> Option<&'a str> {
     (!key.is_empty()).then_some(key)
 }
 
+/// The header naming the tenant the console's admin looks at (multi-tenant deployments; a
+/// personal one has its own), percent-encoded (UTF-8), so any tenant id fits. Read only with a
+/// console session.
+pub const TENANT_HEADER: &str = "X-Pinakes-Tenant";
+
+/// `%XX` escapes decoded as UTF-8; `None` for text that isn't UTF-8 once decoded.
+fn percent_decode(s: &str) -> Option<String> {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8()
+        .ok()
+        .map(|t| t.into_owned())
+}
+
+/// Constant-time equality of two SHA-256 digests.
+pub(crate) fn same_digest(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// The user header's value, checked.
+fn user_header(parts: &Parts, name: &str) -> Result<Option<User>, ApiError> {
+    match parts.headers.get(name) {
+        None => Ok(None),
+        Some(v) => Ok(Some(user(v.to_str().map_err(|_| {
+            ApiError::BadRequest("user id header is not valid text".into())
+        })?)?)),
+    }
+}
+
 impl FromRequestParts<AppState> for Scope {
     type Rejection = ApiError;
 
@@ -292,40 +320,64 @@ impl FromRequestParts<AppState> for Scope {
     async fn from_request_parts(parts: &mut Parts, app: &AppState) -> Result<Self, ApiError> {
         let cfg = &app.config.identity;
         let credential = api_key(&parts.headers, &cfg.key_header).ok_or(ApiError::Unauthorized)?;
-        let (tenant, user, groups) = match cfg.mode {
-            IdentityMode::ApiKey => {
-                let tenant = app
-                    .tenants
-                    .authenticate(credential)
-                    .await?
-                    .ok_or(ApiError::Unauthorized)?;
-                let user = match parts.headers.get(cfg.user_header.as_str()) {
-                    None => None,
-                    Some(v) => Some(user(v.to_str().map_err(|_| {
-                        ApiError::BadRequest("user id header is not valid text".into())
-                    })?)?),
-                };
-                let groups = parse_groups(parts.headers.get(cfg.group_header.as_str()))?;
-                (tenant, user, groups)
+        let (tenant, user, groups) = if credential.starts_with(crate::login::TOKEN_PREFIX) {
+            // The console's admin, looking at a tenant as the user and groups named in the
+            // headers would see it: the tenant is the personal one, or the one named.
+            if !app.login.check(credential) {
+                return Err(ApiError::Unauthorized);
             }
-            IdentityMode::Jwt => {
-                // `Config::load` reads the key; a config made another way may lack it.
-                let key = cfg.jwt.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("JWT mode without a key: load the config with Config::load")
-                })?;
-                let claims = key.claims(credential, cfg)?;
-                let tenant_id =
-                    string_claim(&claims, &cfg.tenant_claim)?.ok_or(ApiError::Unauthorized)?;
-                // A tenant the token names but the service doesn't have is a stranger too.
-                let tenant = app
-                    .tenants
-                    .by_id(tenant_id)
-                    .await?
-                    .ok_or(ApiError::Unauthorized)?;
-                let user = string_claim(&claims, &cfg.user_claim)?
-                    .map(user)
-                    .transpose()?;
-                (tenant, user, groups_claim(&claims, &cfg.groups_claim)?)
+            let named = match parts.headers.get(TENANT_HEADER) {
+                None => None,
+                Some(v) => Some(v.to_str().map_err(|_| {
+                    ApiError::BadRequest(format!("{TENANT_HEADER} is not valid text"))
+                })?),
+            };
+            let id = match named {
+                Some(id) => percent_decode(id.trim()).ok_or_else(|| {
+                    ApiError::BadRequest(format!("{TENANT_HEADER} isn't percent-encoded UTF-8"))
+                })?,
+                None if cfg.deployment == Deployment::Personal => cfg.default_tenant.clone(),
+                None => {
+                    return Err(ApiError::BadRequest(format!(
+                        "choose a tenant to look at: the {TENANT_HEADER} header names it"
+                    )));
+                }
+            };
+            let tenant = app.tenants.by_id(&id).await?.ok_or(ApiError::NotFound)?;
+            let user = user_header(parts, &cfg.user_header)?;
+            let groups = parse_groups(parts.headers.get(cfg.group_header.as_str()))?;
+            (tenant, user, groups)
+        } else {
+            match cfg.mode {
+                IdentityMode::ApiKey => {
+                    let tenant = app
+                        .tenants
+                        .authenticate(credential)
+                        .await?
+                        .ok_or(ApiError::Unauthorized)?;
+                    let user = user_header(parts, &cfg.user_header)?;
+                    let groups = parse_groups(parts.headers.get(cfg.group_header.as_str()))?;
+                    (tenant, user, groups)
+                }
+                IdentityMode::Jwt => {
+                    // `Config::load` reads the key; a config made another way may lack it.
+                    let key = cfg.jwt.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("JWT mode without a key: load the config with Config::load")
+                    })?;
+                    let claims = key.claims(credential, cfg)?;
+                    let tenant_id =
+                        string_claim(&claims, &cfg.tenant_claim)?.ok_or(ApiError::Unauthorized)?;
+                    // A tenant the token names but the service doesn't have is a stranger too.
+                    let tenant = app
+                        .tenants
+                        .by_id(tenant_id)
+                        .await?
+                        .ok_or(ApiError::Unauthorized)?;
+                    let user = string_claim(&claims, &cfg.user_claim)?
+                        .map(user)
+                        .transpose()?;
+                    (tenant, user, groups_claim(&claims, &cfg.groups_claim)?)
+                }
             }
         };
         // A personal deployment has one person, so no user means that person.
@@ -350,7 +402,14 @@ impl FromRequestParts<AppState> for Scope {
     }
 }
 
-/// Proof that the caller holds the service admin key. Admin routes take this instead of a Scope.
+/// Whether a request carries the admin's credential: a console session, or the admin key.
+pub fn is_admin(headers: &HeaderMap, app: &AppState) -> bool {
+    api_key(headers, &app.config.identity.key_header)
+        .is_some_and(|k| app.login.check(k) || app.admin_key.as_ref().is_some_and(|a| a.matches(k)))
+}
+
+/// Proof that the caller is the service's admin: it holds the admin key, or a console session.
+/// Admin routes take this instead of a Scope.
 #[derive(Debug, Clone, Copy)]
 pub struct Admin;
 
@@ -367,12 +426,7 @@ impl AdminKey {
 
     fn matches(&self, candidate: &str) -> bool {
         let other: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
-        // Constant-time comparison.
-        self.0
-            .iter()
-            .zip(other)
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
+        same_digest(&self.0, &other)
     }
 }
 
@@ -380,10 +434,7 @@ impl FromRequestParts<AppState> for Admin {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, app: &AppState) -> Result<Self, ApiError> {
-        let admin = app.admin_key.as_ref().ok_or(ApiError::Unauthorized)?;
-        let key = api_key(&parts.headers, &app.config.identity.key_header)
-            .ok_or(ApiError::Unauthorized)?;
-        if admin.matches(key) {
+        if is_admin(&parts.headers, app) {
             Ok(Admin)
         } else {
             Err(ApiError::Unauthorized)
@@ -395,6 +446,16 @@ impl FromRequestParts<AppState> for Admin {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn the_tenant_header_is_percent_decoded() {
+        assert_eq!(percent_decode("acme").as_deref(), Some("acme"));
+        assert_eq!(
+            percent_decode("%E5%AE%A2%E6%88%B7%20A").as_deref(),
+            Some("客户 A")
+        );
+        assert_eq!(percent_decode("%E5%AE"), None);
+    }
 
     #[test]
     fn bearer_prefix_is_required_for_authorization() {

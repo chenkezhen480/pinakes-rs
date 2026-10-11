@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 
 /// What a job did.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct JobResult {
     pub pages_created: Vec<String>,
     pub pages_updated: Vec<String>,
@@ -49,12 +50,14 @@ pub struct JobResult {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Rejected {
     pub page: String,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum JobState {
     Queued,
@@ -65,6 +68,7 @@ pub enum JobState {
 
 /// A job as `/jobs/{id}` shows it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct JobInfo {
     pub job: String,
     pub kind: String,
@@ -264,6 +268,27 @@ impl Jobs {
         let e = inner.jobs.get(id)?;
         let mine = e.tenant == tenant && (e.owner.is_none() || e.owner.as_deref() == user);
         mine.then(|| e.info.clone())
+    }
+
+    /// The jobs of this tenant listed to this caller, the newest first: queued, running, and
+    /// finished ones still kept. Only the caller's own (a job queued without a user is a
+    /// caller's own only for callers without one), and the tenant's lint runs, whose results
+    /// are counts. A job queued without a user may name a group's pages; listing it to every
+    /// user would show those pages exist, so it stays reachable only by its id.
+    pub fn list(&self, tenant: &str, user: Option<&str>) -> Vec<JobInfo> {
+        let mut inner = self.lock();
+        self.prune(&mut inner);
+        let mut out: Vec<JobInfo> = inner
+            .jobs
+            .values()
+            .filter(|e| {
+                e.tenant == tenant
+                    && (e.owner.as_deref() == user || (e.owner.is_none() && e.info.kind == "lint"))
+            })
+            .map(|e| e.info.clone())
+            .collect();
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.job.cmp(&a.job)));
+        out
     }
 
     fn prune(&self, inner: &mut Inner) {

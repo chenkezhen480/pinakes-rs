@@ -1,14 +1,17 @@
-# The whole service: `docker compose up -d --build` starts Pinakes and the document converter;
-# graph data is kept in SQLite in each tenant's folder. Neo4j is optional: set
-# `backend = "neo4j"` in docker/config.toml and start with
-# `NEO4J_PASSWORD=... docker compose --profile neo4j up -d --build`.
+# The whole service: `docker compose up -d --build` starts Pinakes, which reads Markdown, text,
+# HTML, Word, spreadsheets and PowerPoint itself; graph data is kept in SQLite in each tenant's
+# folder. Two parts are optional. The MarkItDown converter, for PDF and the old binary Office
+# formats: set `[converter] url = "http://converter:8090"` in docker/config.toml and start with
+# `docker compose --profile markitdown up -d --build`. Neo4j: set `backend = "neo4j"` there
+# and start with `NEO4J_PASSWORD=... docker compose --profile neo4j up -d --build`.
 # Before the first start, copy model.conf.example to model.conf (the
-# librarian's model and key; mounted, never built into the image). The admin key comes from
-# PINAKES_ADMIN_KEY. All of Pinakes' own data sits in the pinakes-data volume.
+# librarian's model and key; mounted, never built into the image). The console signs in as
+# root / 1234 (or PINAKES_ADMIN_PASSWORD from .env); change it before exposing the port. Scripts
+# calling the admin routes use PINAKES_ADMIN_KEY. All of Pinakes' own data sits in the pinakes-data volume.
 #
-# For development on the host (`cargo run`, `cargo test`), start only what the service needs:
-# `docker compose --profile dev up -d --build converter-dev` (and, for the Neo4j backend's tests,
-# `NEO4J_PASSWORD=... docker compose --profile neo4j up -d neo4j`).
+# For development on the host (`cargo run`, `cargo test`), start only what is needed: MarkItDown
+# on 127.0.0.1:8090 with `docker compose --profile dev up -d --build converter-dev`, and for the
+# Neo4j backend's tests `NEO4J_PASSWORD=... docker compose --profile neo4j up -d neo4j`.
 # Published ports are bound to 127.0.0.1 only; set PINAKES_PORT (such as 8080) to expose the
 # service on every interface. Search traces name the code that answered: build with
 # `PINAKES_GIT_COMMIT=$(git rev-parse --short=12 HEAD)`, or they say `unknown`.
@@ -37,14 +40,18 @@ services:
     environment:
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
       PINAKES_ADMIN_KEY: ${PINAKES_ADMIN_KEY:-}
+      PINAKES_ADMIN_USER: ${PINAKES_ADMIN_USER:-}
+      PINAKES_ADMIN_PASSWORD: ${PINAKES_ADMIN_PASSWORD:-}
       # A Hugging Face mirror for the embedding model's first download, if needed.
       HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
-      # Started once the converter answers (its image's healthcheck): an upload right after
-      # `up` would otherwise find it still loading.
+      # With the markitdown profile, started once the converter answers (its image's
+      # healthcheck): an upload right after `up` would otherwise find it still loading.
+      # Without the profile there is no converter, and Pinakes starts alone.
       converter:
         condition: service_healthy
+        required: false
     networks: [default, internal]
     restart: unless-stopped
 
@@ -70,8 +77,9 @@ services:
     restart: unless-stopped
 
   converter:
-    # Uploads are untrusted: no root, nothing writable but a small /tmp, no capabilities,
+    # Optional (profile markitdown): PDF and the old binary Office formats. Uploads are untrusted: no root, nothing writable but a small /tmp, no capabilities,
     # bounded memory and processes, and no way out: the internal network reaches only Pinakes.
+    profiles: [markitdown]
     container_name: pinakes-converter
     image: pinakes-converter:latest
     build: ./converter

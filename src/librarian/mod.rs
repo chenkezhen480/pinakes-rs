@@ -88,6 +88,7 @@ pub struct Description {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum ProposalStatus {
     Held,
@@ -107,6 +108,7 @@ impl ProposalStatus {
 
 /// An edit held for review, with why the verifier objected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct HeldEdit {
     pub edit: Edit,
     pub reason: String,
@@ -116,6 +118,7 @@ pub struct HeldEdit {
 /// held edits and, from M9, external candidates). Approving one applies its edits through the
 /// same code checks; the verifier is not asked again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Proposal {
     #[serde(rename = "proposal")]
     pub id: String,
@@ -131,7 +134,7 @@ pub struct Proposal {
     /// The writer's user and group folders, for checking anchors on approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
     /// A page found outside, proposed as a source to file (`crate::acquisition`); its record
     /// is `source`, and it has no edits.

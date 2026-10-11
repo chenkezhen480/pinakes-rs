@@ -28,7 +28,7 @@ pub async fn search(
     let reads = scope.read_state(req.session.as_deref());
     let mode = req.mode.unwrap_or(app.config.search.default_mode);
     crate::search::check_meaning(mode, &snapshot, app.embedder.as_deref())
-        .map_err(|e| ApiError::Unavailable(e.0.into()))?;
+        .map_err(|_| ApiError::Unavailable(app.meaning_off()))?;
     // Only a search that may embed its query leaves the async threads: `auto` without the
     // model runs on keywords alone.
     let embeds = mode != crate::search::Mode::Keyword
@@ -72,7 +72,7 @@ pub async fn search(
     let mut record = scope.trace_record(Endpoint::Search);
     record.snapshot = Some(snapshot.version.clone());
     record.graph = Some(graph.version.clone());
-    record.search_config = app.search_fingerprint.clone();
+    record.search_config = app.search_fingerprint().to_owned();
     record.request = serde_json::to_value(&req).unwrap_or_default();
     record.result = response.trace_summary();
     // A step that ran once per slot (a graph walk) counts with both.

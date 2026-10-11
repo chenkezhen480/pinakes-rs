@@ -1,5 +1,6 @@
 # Service configuration. Secrets stay in environment variables, never in this file:
-# PINAKES_ADMIN_KEY (admin routes), and NEO4J_PASSWORD with the Neo4j backend. The librarian's model and key are in
+# PINAKES_ADMIN_PASSWORD (the console's sign-in as root; 1234 when unset),
+# PINAKES_ADMIN_KEY (scripts calling the admin routes), and NEO4J_PASSWORD with the Neo4j backend. The librarian's model and key are in
 # model.conf (see model.conf.example), which is not in git.
 # Sections marked (Mx) are read from that milestone on; until then they are ignored.
 
@@ -44,8 +45,9 @@ timeout_secs = 300             # per call
 related_pages = 8              # related pages the librarian is shown (5 to 10 in the design)
 read_window_tokens = 20000     # how much of a document one read sees; grows for a long concept
 
-[converter]                    # files to Markdown: `docker compose up -d --build converter`
-url = "http://127.0.0.1:8090"  # unset: only Markdown and text files can be uploaded
+[converter]                    # MarkItDown, optional: PDF and the old binary Office formats. The service
+                               # reads Markdown, text, HTML, Word, spreadsheets and PowerPoint itself.
+# url = "http://127.0.0.1:8090"  # with `docker compose --profile dev up -d --build converter-dev`
 timeout_secs = 120
 
 [search]                       # (M2)
@@ -61,7 +63,9 @@ enabled = true
 retention_days = 30            # 0 keeps them forever
 
 [embedding]                    # (M5) local, runs inside the process; files go to <data>/models
-model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: no vectors, semantic modes answer 503
+enabled = false                # off: keyword search only, nothing downloaded. On (console or here):
+                               # the model (about 640 MB) is downloaded once and pages embedded, no restart
+model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: embeddings can't be turned on
 
 [graph]                        # (M3)
 backend = "sqlite"             # graph.sqlite in each tenant folder; or "neo4j" (see [neo4j])

@@ -392,7 +392,8 @@ async fn hostile_tenant_ids_stay_inside_the_data_folder() {
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(names, vec!["tenants"]);
+    // The service's own audit log names the ids as data, inside the data folder.
+    assert_eq!(names, vec!["audit.jsonl", "tenants"]);
     for e in std::fs::read_dir(app.data.path().join("tenants")).unwrap() {
         let name = e.unwrap().file_name().into_string().unwrap();
         assert!(name.starts_with("t_") && name.len() == 18, "{name}");

@@ -31,6 +31,7 @@ const GONE: &str = "the proposal is gone";
 const ALREADY: &str = "the proposal is already decided";
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct DraftRequest {
     pub space: String,
@@ -45,6 +46,7 @@ pub struct DraftRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct DraftQuery {
     pub space: String,
@@ -52,6 +54,7 @@ pub struct DraftQuery {
 
 /// A space's pending draft: its proposal (none when nothing is pending) and its net change.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DraftView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal: Option<String>,
@@ -61,6 +64,7 @@ pub struct DraftView {
 
 /// What approving a draft applied.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct GraphApplied {
     pub space: String,
     pub nodes_put: usize,

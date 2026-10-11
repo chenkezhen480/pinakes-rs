@@ -24,8 +24,11 @@ COPY --from=build /usr/local/bin/pinakes /usr/local/bin/pinakes
 WORKDIR /app
 COPY docker/config.toml ./config.toml
 USER pinakes
-# Wiki files, SQLite, indexes, history and the embedding model (downloaded on first start).
+# Wiki files, SQLite, indexes, history, the embedding model (when turned on) and the service's
+# config: the image's config.toml is copied there on first start, and settings changed from the
+# console are written to that copy, so they outlive the container.
 VOLUME ["/data"]
 EXPOSE 8080
-ENV PINAKES_CONFIG=/app/config.toml
+ENV PINAKES_CONFIG=/data/config.toml
+ENV PINAKES_CONFIG_DEFAULT=/app/config.toml
 CMD ["pinakes"]

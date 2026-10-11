@@ -142,6 +142,22 @@ pub struct SqliteStore {
     other_models_cleared: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// A tenant store's id, read with a read-only connection: no migration, no journal change,
+/// nothing written (for listing tenants without opening them).
+pub fn read_tenant_id(path: &Path) -> anyhow::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let c = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    Ok(
+        c.query_row("SELECT value FROM meta WHERE key = 'tenant_id'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()?,
+    )
+}
+
 impl SqliteStore {
     /// Creates a new database file. Fails if it already exists.
     pub fn create(path: &Path) -> anyhow::Result<Self> {

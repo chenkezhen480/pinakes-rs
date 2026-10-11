@@ -3,8 +3,9 @@
 mod history;
 mod page;
 mod path;
+pub mod render;
 
-pub use history::{History, object_name};
+pub use history::{History, PageVersion, object_name};
 pub use page::{FrontMatter, Page};
 pub use path::{Audience, PagePath};
 
@@ -30,6 +31,7 @@ pub enum WikiError {
 
 /// What `/pages` lists for each page: enough to pick one, not its body.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct PageSummary {
     /// The page id, as search hits and `/read` name it.
     #[serde(rename = "page")]

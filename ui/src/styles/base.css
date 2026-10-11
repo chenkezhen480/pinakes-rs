@@ -1,0 +1,323 @@
+/* Elements and the few shared classes (buttons, fields, chips); components style the rest in
+   their own scoped styles, from the tokens. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: var(--step-0) / var(--leading) var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--serif);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+code,
+kbd,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: var(--accent-wash);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--step--1);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background var(--fast) var(--ease),
+    border-color var(--fast) var(--ease),
+    transform var(--fast) var(--ease);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.btn:hover {
+  border-color: var(--ink-2);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn.primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn.danger {
+  color: var(--seal);
+  border-color: color-mix(in srgb, var(--seal) 45%, var(--rule-2));
+}
+
+.btn.danger.solid {
+  background: var(--seal);
+  border-color: var(--seal);
+  color: var(--accent-ink);
+}
+
+.btn.quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.btn.quiet:hover {
+  background: var(--paper-2);
+}
+
+/* A button placed straight in a grid (a form, a panel) keeps its own width. */
+:where(form, section, div, fieldset, aside) > .btn {
+  justify-self: start;
+}
+
+.btn.small {
+  min-height: 28px;
+  padding: 0 var(--space-3);
+}
+
+/* Fields */
+.field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.field > span:first-child,
+.label {
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.field .hint {
+  font-size: var(--step--1);
+  color: var(--muted);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+input[type="search"],
+input[type="url"],
+input[type="date"],
+select,
+textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  transition: border-color var(--fast) var(--ease);
+}
+
+textarea {
+  min-height: 96px;
+  resize: vertical;
+  line-height: var(--leading);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  border-color: var(--accent);
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+
+/* Chips: ids, keys and small facts, in mono */
+.chip {
+  display: inline-block;
+  vertical-align: middle;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--paper-2);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: var(--step--2);
+  line-height: 1.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+
+.chip svg {
+  vertical-align: -2px;
+  margin-right: 2px;
+}
+
+a.chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Rendered pages: the service's sanitized HTML (SafeHtml) */
+.prose {
+  max-width: var(--measure);
+  font-size: var(--step-0);
+  line-height: var(--leading-read);
+  overflow-wrap: anywhere;
+}
+
+.prose > * + * {
+  margin-top: 0.85em;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  margin-top: 1.4em;
+}
+
+.prose h1 {
+  font-size: var(--step-2);
+}
+
+.prose h2 {
+  font-size: var(--step-1);
+}
+
+.prose h3,
+.prose h4 {
+  font-size: var(--step-0);
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.4em;
+}
+
+.prose li + li {
+  margin-top: 0.25em;
+}
+
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  display: block;
+  overflow-x: auto;
+  font-size: var(--step--1);
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--rule);
+  padding: var(--space-1) var(--space-3);
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  background: var(--paper-2);
+}
+
+.prose blockquote {
+  margin: 0;
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--rule-2);
+  color: var(--ink-2);
+}
+
+.prose pre {
+  padding: var(--space-3);
+  background: var(--paper-2);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+.prose a.wikilink {
+  text-decoration-style: dotted;
+}
+
+.prose a[href^="http"]::after {
+  content: " ↗";
+  font-size: 0.8em;
+  color: var(--muted);
+}
