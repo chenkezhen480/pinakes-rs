@@ -126,7 +126,7 @@ test.describe("signed in", () => {
 
   test("a format the service can't read is refused with what to do", async ({ page }) => {
     await page.goto("/ui/#/knowledge");
-    await page.locator("input[type=file]").setInputFiles({ name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7") });
+    await page.locator("input[type=file]").setInputFiles({ name: "report.doc", mimeType: "application/msword", buffer: Buffer.from("not a Word 97 file") });
     await expect(page.locator(".sent li").first()).toContainText("docker compose --profile markitdown up -d converter");
   });
 
@@ -142,6 +142,35 @@ test.describe("signed in", () => {
     await expect(page).toHaveURL(/graph\/node\/mainland:customer\/c1/);
     await expect(page.locator(".detail h2")).toHaveText("林晓");
     expect(problems).toEqual([]);
+  });
+
+  test("who sees a space is changed on its card", async ({ page }) => {
+    await page.goto("/ui/#/graph/spaces");
+    const card = page.locator("article.space").filter({ hasText: "国内商城" });
+    await card.getByRole("button", { name: "更改谁能看到" }).click();
+    await card.getByRole("radio", { name: /^受限/ }).check();
+    await card.getByLabel("成员用户").fill("jin, ana");
+    await card.getByRole("button", { name: "保存" }).click();
+    await expect(card.locator(".vis")).toHaveText("受限");
+    await expect(card.locator(".chip")).toHaveText(["jin", "ana"]);
+    // Shared again, as the tests after this one expect.
+    await card.getByRole("button", { name: "更改谁能看到" }).click();
+    await card.getByRole("radio", { name: /^共享/ }).check();
+    await card.getByRole("button", { name: "保存" }).click();
+    await expect(card.locator(".vis")).toHaveText("共享");
+  });
+
+  test("a space is deleted from its card after a second click", async ({ page }) => {
+    await page.goto("/ui/#/graph/spaces");
+    await page.getByLabel("空间 id").fill("scratch");
+    await page.getByLabel("显示名称（可选）").fill("临时空间");
+    await page.getByRole("button", { name: "创建" }).click();
+    const card = page.locator("article.space").filter({ hasText: "临时空间" });
+    await expect(card).toBeVisible();
+    await card.getByRole("button", { name: "删除空间" }).click();
+    await expect(card).toContainText("永久删除 临时空间：0 个节点、0 条关系");
+    await card.getByRole("button", { name: "确认删除" }).click();
+    await expect(card).toHaveCount(0);
   });
 
   test("a graph draft, a held edit and an external source are approved", async ({ page }) => {

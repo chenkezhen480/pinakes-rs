@@ -37,18 +37,14 @@ pub(crate) const INSTRUCTIONS: &str = include_str!("../prompts/tools/instruction
 const SESSION_HEADER: &str = "mcp-session-id";
 
 /// The tools, in the order clients list them: the entry, the follow-ups, then the records.
-pub(crate) const TOOLS: [(&str, &str); 8] = [
+pub(crate) const TOOLS: [(&str, &str); 7] = [
     ("search", include_str!("../prompts/tools/search.md")),
     ("read", include_str!("../prompts/tools/read.md")),
     ("graph", include_str!("../prompts/tools/graph.md")),
     ("path", include_str!("../prompts/tools/path.md")),
     (
-        "record_experience",
-        include_str!("../prompts/tools/record_experience.md"),
-    ),
-    (
-        "record_decision",
-        include_str!("../prompts/tools/record_decision.md"),
+        "record_decision_or_lesson",
+        include_str!("../prompts/tools/record_decision_or_lesson.md"),
     ),
     (
         "record_preference",
@@ -114,29 +110,19 @@ pub(crate) fn schema(tool: &str) -> Value {
             }),
             vec!["from", "to"],
         ),
-        "record_experience" => (
+        "record_decision_or_lesson" => (
             json!({
-                "task": text("The kind of task, short and general."),
-                "outcome": text("What happened, what worked or didn't, with exact numbers and \
+                "topic": text("What it is about, short and general."),
+                "content": text("What was decided and what was learned, with exact numbers and \
                     conditions."),
-                "details": text("Steps, pitfalls and the reasons behind them."),
+                "context": text("The situation that led to it, and what came of it."),
                 "entities": entities,
             }),
-            vec!["task", "outcome"],
-        ),
-        "record_decision" => (
-            json!({
-                "topic": text("What the decision is about, short."),
-                "decision": text("What the user decided, with exact numbers and conditions."),
-                "context": text("The situation that led to it."),
-                "outcome": text("What came of it, if known."),
-                "entities": entities,
-            }),
-            vec!["topic", "decision"],
+            vec!["topic", "content"],
         ),
         "record_preference" => (
             json!({
-                "statement": text("The preference, in one or two sentences."),
+                "statement": text("The preference or standing fact, in one or two sentences."),
                 "entities": entities,
             }),
             vec!["statement"],
@@ -153,7 +139,7 @@ pub(crate) fn schema(tool: &str) -> Value {
                         "type": "object",
                         "properties": {
                             "op": { "type": "string",
-                                    "enum": ["put_node", "remove_node", "add_edge", "remove_edge"] },
+                                    "enum": ["put_node", "remove_node", "add_edge", "remove_edge", "delete_space"] },
                             "type": text("The node type (put_node, remove_node) or relation \
                                 type (add_edge, remove_edge), from the space's schema."),
                             "key": text("The node's key (put_node, remove_node)."),
@@ -169,7 +155,7 @@ pub(crate) fn schema(tool: &str) -> Value {
                             "from": text("The edge's start as type/key (add_edge, remove_edge)."),
                             "to": text("The edge's end as type/key (add_edge, remove_edge)."),
                         },
-                        "required": ["op", "type"],
+                        "required": ["op"],
                         "additionalProperties": false,
                     },
                 },
@@ -360,11 +346,8 @@ pub(crate) async fn run(
                     let record = Ok(Json(Value::Object(args)));
                     let headers = headers.clone();
                     let (_, Json(job)) = match name {
-                        "record_experience" => {
-                            insert::experience(State(app), scope, headers, record).await?
-                        }
-                        "record_decision" => {
-                            insert::decision(State(app), scope, headers, record).await?
+                        "record_decision_or_lesson" => {
+                            insert::note(State(app), scope, headers, record).await?
                         }
                         _ => insert::preference(State(app), scope, headers, record).await?,
                     };

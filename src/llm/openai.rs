@@ -38,12 +38,26 @@ impl LlmClient for OpenAiCompatible {
     }
 
     async fn complete_counted(&self, prompt: &Prompt) -> anyhow::Result<(String, u64)> {
+        let user = if prompt.images.is_empty() {
+            json!(prompt.user)
+        } else {
+            let mut parts: Vec<Value> = prompt
+                .images
+                .iter()
+                .map(|i| {
+                    json!({ "type": "image_url", "image_url": {
+                        "url": format!("data:{};base64,{}", i.media_type, i.base64()) } })
+                })
+                .collect();
+            parts.push(json!({ "type": "text", "text": prompt.user }));
+            Value::Array(parts)
+        };
         let body = json!({
             "model": self.model,
             "max_tokens": prompt.max_tokens,
             "messages": [
                 { "role": "system", "content": prompt.system },
-                { "role": "user", "content": prompt.user },
+                { "role": "user", "content": user },
             ],
             "response_format": {
                 "type": "json_schema",

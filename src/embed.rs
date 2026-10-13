@@ -7,22 +7,32 @@
 //! caught and re-embedded. A search embeds only its query. The model runs inside the process
 //! (fastembed on ONNX Runtime): jina-embeddings-v2-base-zh, a Chinese–English model, chosen on
 //! the test set (design, "As built in M5"). It takes queries and stored text as they are, with
-//! no prefixes.
+//! no prefixes. It runs with 8-bit weights, quantized by the service after the download
+//! ([`quantize`]): a query embeds in half the time, with the test set's answers unchanged
+//! (design, "As built in M10" → "An 8-bit model").
+
+mod quantize;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
+use sha2::Digest;
 
 /// The one model the service runs, as `[embedding] model` names it.
 pub const MODEL: &str = "jina-embeddings-v2-base-zh";
 /// Where its files come from: the Hugging Face repository, at a fixed revision.
 const REPO: &str = "jinaai/jina-embeddings-v2-base-zh";
 const REVISION: &str = "c1ff9086a89a1123d7b5eff58055a665db4fb4b9";
-/// The name stored with every vector and recorded in search fingerprints: the model and its
-/// revision, so vectors from other weights are never compared with a query. Change it with
-/// `REVISION`.
-const MODEL_ID: &str = "jina-embeddings-v2-base-zh@c1ff9086";
+/// The name stored with every vector and recorded in search fingerprints: the model, its
+/// revision and its 8-bit weights, so vectors from other weights are never compared with a
+/// query. Change it with `REVISION` or the quantization.
+const MODEL_ID: &str = "jina-embeddings-v2-base-zh@c1ff9086-q8";
+/// The quantized weights, kept next to the downloaded files, and their SHA-256: quantizing is
+/// deterministic, so anything else is a damaged file (made again) or a changed quantizer (an
+/// error until this hash, and `MODEL_ID`, are changed with it).
+const QUANTIZED_FILE: &str = "pinakes/model-c1ff9086-q8.onnx";
+const QUANTIZED_SHA256: &str = "00e0bfa30d2506170bdbc95adee34b0da3163ae92d65c0119409a39a70ae5ee1";
 /// Tokens of one text the model reads: all it can take (8,192), so a section is never cut
 /// short of the model's limit. Pages are the librarian's condensed account, so sections that
 /// long are rare; one costs a few seconds and some memory to embed, at write time only.
@@ -371,6 +381,58 @@ pub fn files_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join(format!("models--{}", REPO.replace('/', "--")))
 }
 
+/// The quantized weights in `cache_dir`, when they are there and whole.
+fn read_quantized(cache_dir: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(files_dir(cache_dir).join(QUANTIZED_FILE)).ok()?;
+    (hex::encode(sha2::Sha256::digest(&bytes)) == QUANTIZED_SHA256).then_some(bytes)
+}
+
+/// Quantizes the downloaded weights, checks the result and keeps it in `cache_dir` (written
+/// whole or not at all).
+fn make_quantized(cache_dir: &Path, full: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let bytes = quantize::quantize(full).context("quantizing the embedding model")?;
+    let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    if hash != QUANTIZED_SHA256 {
+        anyhow::bail!(
+            "the quantized embedding model has SHA-256 {hash}, not the expected {QUANTIZED_SHA256}"
+        );
+    }
+    let path = files_dir(cache_dir).join(QUANTIZED_FILE);
+    let dir = path.parent().expect("a folder");
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = path.with_extension("onnx.new");
+    std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(bytes)
+}
+
+/// Removes full-precision weights `cache_dir` still holds next to a good 8-bit copy: a removal
+/// that failed once (the file was open elsewhere), or a cache copied from one made before the
+/// 8-bit copy existed. Run at every load, so they never stay.
+fn remove_full_weights(cache_dir: &Path) {
+    use hf_hub::{Cache, Repo, RepoType};
+    let id = Repo::with_revision(REPO.to_owned(), RepoType::Model, REVISION.to_owned());
+    if let Some(path) = Cache::new(cache_dir.to_path_buf()).repo(id).get(FILES[4]) {
+        tracing::info!(file = %path.display(), "removing the full-precision model weights the 8-bit copy replaced");
+        remove_download(&path);
+    }
+}
+
+/// Removes the downloaded full-precision weights once the 8-bit copy is kept: only that copy
+/// is ever loaded, and if it goes missing or is damaged, they are downloaded again. hf-hub may
+/// keep the file as a link to a blob: both go. A failure only leaves the file behind.
+fn remove_download(path: &Path) {
+    let blob = std::fs::symlink_metadata(path)
+        .is_ok_and(|m| m.file_type().is_symlink())
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten();
+    for file in blob.iter().map(PathBuf::as_path).chain([path]) {
+        if let Err(e) = std::fs::remove_file(file) {
+            tracing::warn!(file = %file.display(), error = %e, "the downloaded model weights were not removed");
+        }
+    }
+}
+
 /// Reports a file's download to the switch.
 struct DownloadProgress<'a> {
     report: &'a dyn Fn(Status) -> bool,
@@ -420,8 +482,10 @@ pub struct FastEmbedder {
 
 impl FastEmbedder {
     /// Loads the model, downloading its files (about 640 MB) into `cache_dir` the first time,
-    /// from Hugging Face or the mirror `HF_ENDPOINT` names; a broken download resumes, up to
-    /// three tries per file. Slow: call it off the async threads.
+    /// from Hugging Face or the mirror `HF_ENDPOINT` names, and quantizing them (about a second;
+    /// 316 MB kept, the full weights removed);
+    /// a broken download resumes, up to three tries per file. Slow: call it off the async
+    /// threads.
     pub fn load(cache_dir: &Path) -> anyhow::Result<Self> {
         Self::load_with(cache_dir, &|_| true)
     }
@@ -470,7 +534,24 @@ impl FastEmbedder {
             special_tokens_map_file: read(special_tokens)?,
             tokenizer_config_file: read(tokenizer_config)?,
         };
-        let weights = read(weights)?;
+        let weights = match read_quantized(cache_dir) {
+            Some(bytes) => {
+                remove_full_weights(cache_dir);
+                bytes
+            }
+            None => {
+                let full = read(weights)?;
+                if !progress(Status::Loading) {
+                    anyhow::bail!("the embedding model was turned off");
+                }
+                let bytes = make_quantized(cache_dir, &full)?;
+                drop(full);
+                if let Some(path) = cached.get(weights) {
+                    remove_download(&path);
+                }
+                bytes
+            }
+        };
         progress(Status::Loading);
         let model = fastembed::UserDefinedEmbeddingModel::new(weights, tokenizer)
             .with_pooling(fastembed::Pooling::Mean);
@@ -518,6 +599,25 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{OnceLock, Weak};
+
+    /// Full weights left in a cache (as hf-hub lays it out) go; the tokenizer stays.
+    #[test]
+    fn leftover_full_weights_are_removed() {
+        let cache = tempfile::tempdir().unwrap();
+        let repo = files_dir(cache.path());
+        let snapshot = repo.join("snapshots").join(REVISION);
+        std::fs::create_dir_all(snapshot.join("onnx")).unwrap();
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::write(repo.join("refs").join(REVISION), REVISION).unwrap();
+        std::fs::write(snapshot.join(FILES[4]), b"full weights").unwrap();
+        std::fs::write(snapshot.join(FILES[0]), b"{}").unwrap();
+        remove_full_weights(cache.path());
+        assert!(!snapshot.join(FILES[4]).exists());
+        assert!(snapshot.join(FILES[0]).exists());
+        // Nothing to remove is no error.
+        remove_full_weights(cache.path());
+        remove_full_weights(&cache.path().join("missing"));
+    }
 
     struct Stub;
 

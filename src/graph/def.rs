@@ -402,31 +402,12 @@ impl SpaceRequest {
         validate_name("schema", &self.schema)?;
         validate_opt("the space name", &self.name)?;
         validate_aliases("the space", &self.aliases)?;
-        let m = &self.members;
-        if m.users.len() + m.groups.len() > MAX_MEMBERS {
-            return Err(format!("a space has at most {MAX_MEMBERS} members"));
-        }
-        for u in &m.users {
-            validate_id("member user", u)?;
-        }
-        for g in &m.groups {
-            validate_id("member group", g)?;
-        }
-        match self.visibility {
-            Visibility::Shared if !m.is_empty() => {
-                return Err("a shared space has no member list".into());
-            }
-            Visibility::Private if owner.is_none() => {
-                return Err("a private space needs a user: send the user id header".into());
-            }
-            Visibility::Private if !m.is_empty() => {
-                return Err("a private space has no member list; only its owner sees it".into());
-            }
-            Visibility::Restricted if m.is_empty() => {
-                return Err("a restricted space needs member users or groups".into());
-            }
-            _ => {}
-        }
+        check_access(
+            self.visibility,
+            &self.members,
+            owner,
+            "send the user id header",
+        )?;
         Ok(SpaceDef {
             space: self.space,
             schema: self.schema,
@@ -435,6 +416,67 @@ impl SpaceRequest {
             visibility: self.visibility,
             owner: owner.map(str::to_owned),
             members: self.members,
+        })
+    }
+}
+
+/// Checks who a space would be visible to: a shared space has no member list, a private one
+/// an owner and no member list, a restricted one members. `no_owner` says what to do when a
+/// private space has no owner.
+fn check_access(
+    visibility: Visibility,
+    m: &Members,
+    owner: Option<&str>,
+    no_owner: &str,
+) -> Result<(), String> {
+    if m.users.len() + m.groups.len() > MAX_MEMBERS {
+        return Err(format!("a space has at most {MAX_MEMBERS} members"));
+    }
+    for u in &m.users {
+        validate_id("member user", u)?;
+    }
+    for g in &m.groups {
+        validate_id("member group", g)?;
+    }
+    match visibility {
+        Visibility::Shared if !m.is_empty() => Err("a shared space has no member list".into()),
+        Visibility::Private if owner.is_none() => {
+            Err(format!("a private space needs a user: {no_owner}"))
+        }
+        Visibility::Private if !m.is_empty() => {
+            Err("a private space has no member list; only its owner sees it".into())
+        }
+        Visibility::Restricted if m.is_empty() => {
+            Err("a restricted space needs member users or groups".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A change of who sees a space (`PUT /graph/spaces/{space}`): its visibility and members, set
+/// whole. The owner stays the user who created it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct SpaceAccess {
+    pub visibility: Visibility,
+    #[serde(default)]
+    pub members: Members,
+}
+
+impl SpaceAccess {
+    /// The space with this access, checked as a new space's is.
+    pub fn applied(self, to: &SpaceDef) -> Result<SpaceDef, String> {
+        check_access(
+            self.visibility,
+            &self.members,
+            to.owner.as_deref(),
+            "this space was created without one, so it can't be made private",
+        )?;
+        Ok(SpaceDef {
+            visibility: self.visibility,
+            members: self.members,
+            ..to.clone()
         })
     }
 }

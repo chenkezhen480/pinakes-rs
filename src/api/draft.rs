@@ -63,10 +63,13 @@ pub struct DraftView {
 }
 
 /// What approving a draft applied.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct GraphApplied {
     pub space: String,
+    /// The draft deleted the whole space.
+    #[serde(default)]
+    pub space_deleted: bool,
     pub nodes_put: usize,
     pub nodes_removed: usize,
     pub edges_added: usize,
@@ -273,6 +276,22 @@ pub(crate) async fn approve(
                 if graph.space(&draft.space).is_none() {
                     anyhow::bail!("{NO_LONGER_APPLIES}: space {} is gone", draft.space);
                 }
+                if draft.delete_space {
+                    drop(graph);
+                    super::ingest::remove_space(&t, &draft.space).await?;
+                    p.status = ProposalStatus::Approved;
+                    t.store.put_proposal(&p).await?;
+                    t.store.audit("admin", "proposal.approve", &p.id).await?;
+                    tracing::info!(proposal = %p.id, space = %draft.space, "graph space deleted");
+                    return Ok(JobResult {
+                        graph: Some(GraphApplied {
+                            space: draft.space.clone(),
+                            space_deleted: true,
+                            ..GraphApplied::default()
+                        }),
+                        ..JobResult::default()
+                    });
+                }
                 let conflicts = draft.conflicts(&graph);
                 if !conflicts.is_empty() {
                     anyhow::bail!("{NO_LONGER_APPLIES}: {}", conflicts.join("; "));
@@ -299,6 +318,7 @@ pub(crate) async fn approve(
                 Ok(JobResult {
                     graph: Some(GraphApplied {
                         space: draft.space.clone(),
+                        space_deleted: false,
                         nodes_put: draft.put_nodes.len(),
                         nodes_removed: draft.remove_nodes.len(),
                         edges_added: draft.add_edges.len(),

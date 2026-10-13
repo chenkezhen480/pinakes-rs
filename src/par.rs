@@ -52,6 +52,18 @@ pub fn run<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     pool().install(f)
 }
 
+/// Runs `a` and `b` on the compute pool, at the same time when a thread of it is free (`a` on
+/// the thread that takes the call, `b` on another), and waits for both.
+pub fn join<A: Send, B: Send>(
+    a: impl FnOnce() -> A + Send,
+    b: impl FnOnce() -> B + Send,
+) -> (A, B) {
+    if threads() < 2 {
+        return (a(), b());
+    }
+    run(|| rayon::join(a, b))
+}
+
 /// `f` over every item, in order, on the compute pool.
 pub fn map<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync + Send) -> Vec<U> {
     if items.len() < MIN_PARALLEL || threads() < 2 {

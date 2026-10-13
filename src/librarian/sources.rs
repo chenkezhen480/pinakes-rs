@@ -18,6 +18,15 @@ pub fn new_name(kind: Kind, today: &str) -> String {
     )
 }
 
+/// A new name for a note an agent recorded (`/ingest/note`), such as
+/// `2026-10-13-note-3fa91c0b.json`: the librarian splits it into records of their own.
+pub fn new_note_name(today: &str) -> String {
+    format!(
+        "{today}-note-{}.json",
+        hex::encode(rand::random::<[u8; 4]>())
+    )
+}
+
 /// A new name for a page fetched from outside (`crate::acquisition`), such as
 /// `2026-10-10-external-3fa91c0b.json`: pages citing it are marked as lower trust.
 pub fn new_external_name(today: &str) -> String {

@@ -158,6 +158,7 @@ async fn converse(
             user,
             max_tokens: app.config.librarian.max_tokens,
             schema: step_schema(),
+            images: Vec::new(),
         };
         // A stopping service doesn't wait for the model.
         let reply = tokio::select! {

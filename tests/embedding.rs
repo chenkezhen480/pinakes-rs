@@ -138,6 +138,21 @@ async fn off_at_start_then_turned_on_and_off_without_a_restart() {
     assert_eq!(body["status"]["state"], "off");
     let (status, _) = search(&app, &key, "semantic").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // The open tenant's page vectors leave memory at once; keyword search carries on.
+    let tenant = app.state.tenants.by_id("acme").await.unwrap().unwrap();
+    let mut released = false;
+    for _ in 0..100 {
+        let snap = tenant.snapshot().await.unwrap();
+        if snap.vectors.is_none() {
+            released = true;
+            break;
+        }
+        drop(snap);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(released, "the vectors are still in memory");
+    let (status, _) = search(&app, &key, "keyword").await;
+    assert_eq!(status, StatusCode::OK);
     wiki.write(&page(
         "expertise/shipping",
         "Shipping times",

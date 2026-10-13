@@ -1,12 +1,13 @@
 //! Files uploaded to `/ingest/expertise` are turned into Markdown first (design, "Files are
 //! turned into Markdown first" and "M10"): Markdown and text as they are, HTML, Word,
-//! spreadsheets and PowerPoint by the service itself, other formats by the optional MarkItDown
-//! converter. The original file is kept next to its record, which says what converted it.
+//! spreadsheets, PowerPoint and PDF by the service itself (PDF in its `pinakes-pdf` process),
+//! a scanned PDF by the model in the job, the old binary Office formats by the optional
+//! MarkItDown converter. The original file is kept next to its record, which says what
+//! converted it.
 //!
 //! With `PINAKES_TEST_CONVERTER` set to the real converter's URL (`docker compose --profile
-//! dev up -d --build converter-dev`, then `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090`), a
-//! PDF also goes through MarkItDown itself, and every fixture is converted by both and
-//! compared.
+//! dev up -d --build converter-dev`, then `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090`),
+//! every fixture is converted by both and compared.
 
 use crate::common;
 
@@ -14,8 +15,8 @@ use std::sync::Arc;
 
 use crate::common::app::{Caller, TestApp};
 use crate::common::llm::{
-    FakeLlm, NOT_THE_SAME, OK, Step, all_ok, create, describe_from_definition, folder, read_reply,
-    read_step, read_steps, record_of, shown,
+    FAILS, FakeLlm, NOT_THE_SAME, OK, Step, all_ok, create, describe_from_definition, folder,
+    read_reply, read_step, read_steps, record_of, shown,
 };
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
@@ -218,9 +219,9 @@ async fn uploaded_files_are_filed_as_markdown() {
     }
 }
 
-/// Without MarkItDown, Word, spreadsheets, PowerPoint and HTML are converted by the service
-/// itself; a damaged file is a 422 saying why, and a format it can't read (PDF, `.doc`) a 415
-/// that says what to do.
+/// Without MarkItDown, Word, spreadsheets, PowerPoint, HTML and PDF are converted by the
+/// service itself; a damaged file is a 422 saying why, and a format it can't read (`.doc`,
+/// `.ppt`) a 415 that says what to do.
 #[tokio::test]
 async fn without_markitdown_the_service_converts_office_files_itself() {
     let llm = librarian();
@@ -257,13 +258,37 @@ async fn without_markitdown_the_service_converts_office_files_itself() {
             .contains("not a valid Office file"),
         "{resp}"
     );
+    // A PDF, read in the PDF reader's own process: its table and list come back.
+    let (status, queued) = app
+        .post_form(
+            c,
+            "/ingest/expertise",
+            &[],
+            Some(("仓库作业规范.pdf", &fixture("policy-zh.pdf"))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "done", "{job}");
+    let (rec, dir) = record(&app, &job["result"]);
+    let md = rec["content"].as_str().unwrap();
+    assert!(md.contains("| B 类 | 0.5% | 3 个工作日 | 主管 |"), "{md}");
+    assert!(md.contains("- 外包装破损的箱子单独拍照"), "{md}");
+    assert_eq!(rec["file"]["converter"], "builtin");
+    let original = dir.join(rec["file"]["original"].as_str().unwrap());
+    assert_eq!(std::fs::read(original).unwrap(), fixture("policy-zh.pdf"));
+    // A damaged PDF can't be read, and says so.
+    let mut damaged = fixture("policy-zh.pdf");
+    damaged.truncate(damaged.len() / 3);
+    let (status, resp) = app
+        .post_form(c, "/ingest/expertise", &[], Some(("broken.pdf", &damaged)))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{resp}");
+    let message = resp["error"]["message"].as_str().unwrap();
+    assert!(message.contains("couldn't be read"), "{message}");
     for (name, says) in [
         ("old.doc", "Save the file as .docx"),
         ("old.ppt", "Save the file as .pptx"),
-        (
-            "report.pdf",
-            "PDF files can't be converted by the service itself",
-        ),
         ("photo.png", "it reads Markdown, text, HTML, Word"),
     ] {
         let (status, resp) = app
@@ -287,6 +312,274 @@ async fn without_markitdown_the_service_converts_office_files_itself() {
         )
         .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{resp}");
+}
+
+/// A one-page PDF whose content stream shows `lines` text lines (uncompressed): the PDF reader
+/// takes about 7 KB a line, so 300,000 would take 2 GB.
+fn pdf_of_lines(lines: usize) -> Vec<u8> {
+    let mut content = String::from("BT /F1 6 Tf ");
+    for i in 0..lines {
+        content.push_str(&format!(
+            "1 0 0 1 10 {} Tm (line {i} of a crafted page) Tj ",
+            i % 780
+        ));
+    }
+    content.push_str("ET");
+    pdf_of_pages(1, &content)
+}
+
+/// A PDF of `pages` pages, each drawn by the same content stream (Helvetica as `/F1`).
+fn pdf_of_pages(pages: usize, content: &str) -> Vec<u8> {
+    let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", i + 5)).collect();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
+    ];
+    for _ in 0..pages {
+        objects.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 3 0 R >> >> >>".to_owned());
+    }
+    let mut out = String::from("%PDF-1.7\n");
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
+    }
+    let xref = out.len();
+    out.push_str(&format!(
+        "xref\n0 {}\n0000000000 65535 f \n",
+        objects.len() + 1
+    ));
+    for o in offsets {
+        out.push_str(&format!("{o:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objects.len() + 1
+    ));
+    out.into_bytes()
+}
+
+/// A crafted PDF that would take gigabytes stops the PDF reader's own process at its memory cap,
+/// and one that takes longer than the converter's time limit is killed; either is refused,
+/// and the service goes on reading PDFs.
+#[tokio::test]
+async fn a_pdf_past_the_readers_memory_or_time_is_refused() {
+    let app = TestApp::with_llm_and_config(librarian().llm(), "[converter]\ntimeout_secs = 2\n");
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let started = std::time::Instant::now();
+    let (status, resp) = app
+        .post_form(
+            c,
+            "/ingest/expertise",
+            &[],
+            Some(("huge.pdf", &pdf_of_lines(300_000))),
+        )
+        .await;
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        (status == StatusCode::UNPROCESSABLE_ENTITY
+            && message.contains("more memory than allowed"))
+            || (status == StatusCode::PAYLOAD_TOO_LARGE
+                && message.contains("took longer than 2 s")),
+        "{status} {resp}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let (status, queued) = app
+        .post_form(
+            c,
+            "/ingest/expertise",
+            &[],
+            Some(("仓库作业规范.pdf", &fixture("policy-zh.pdf"))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+}
+
+/// The reader's own process stops at its memory cap (not killed by the deadline): a page that
+/// would take 2 GB is refused for its memory.
+#[test]
+fn the_pdf_readers_memory_is_capped() {
+    use std::io::Write;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_pinakes-pdf"))
+        .args([
+            "text".to_owned(),
+            (256u64 << 20).to_string(),
+            (10u64 << 20).to_string(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = pdf_of_lines(300_000);
+    let mut stdin = child.stdin.take().unwrap();
+    let feed = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let out = child.wait_with_output().unwrap();
+    feed.join().unwrap();
+    assert!(!out.status.success());
+    let says = String::from_utf8_lossy(&out.stderr);
+    assert!(says.contains("memory allocation"), "{says}");
+}
+
+/// A scan as a scanner makes it, as far as text goes: `pages` pages with a box drawn on each,
+/// and, with `stamp`, a page number stamped in text (too little to be a text layer).
+fn scan_pdf(pages: usize, stamp: bool) -> Vec<u8> {
+    let mut content = String::from("0.5 g 72 500 468 200 re f ");
+    if stamp {
+        content.push_str("BT /F1 9 Tf 300 30 Td (- 1 -) Tj ET");
+    }
+    pdf_of_pages(pages, &content)
+}
+
+/// What the model writes for each of a scan's pages: a header every page repeats, a heading,
+/// and the page's own sentence.
+fn transcribed_page(msg: &str) -> String {
+    let n: usize = msg
+        .strip_prefix("Page ")
+        .and_then(|m| m.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    let said = [
+        "冷链货物到货温度须在 2℃ 至 8℃ 之间。",
+        "外包装破损的箱子单独拍照。",
+        "危险品须放入隔离区。",
+    ];
+    format!(
+        "华东仓储有限公司 内部资料\n\n## 第{n}节\n\n{}",
+        said[(n - 1) % 3]
+    )
+}
+
+/// A scanned PDF (no text layer, or only a stamped page number) is read by the model in the
+/// job: each page drawn as a picture by the PDF reader's process and transcribed, in order; a
+/// header on every page is left out, and the record keeps the transcription and says the model
+/// made it. The real scan fixture is one page.
+#[tokio::test]
+async fn a_scan_is_read_by_the_model() {
+    let llm = librarian();
+    llm.transcribe_with(transcribed_page);
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    for (name, bytes, pages) in [
+        ("仓库扫描件.pdf", scan_pdf(3, false), 3),
+        ("stamped.pdf", scan_pdf(2, true), 2),
+        ("scanned-zh.pdf", fixture("scanned-zh.pdf"), 1),
+    ] {
+        llm.clear();
+        let before = llm.transcribed().len();
+        let (status, queued) = app
+            .post_form(c, "/ingest/expertise", &[], Some((name, &bytes)))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{name}: {queued}");
+        let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
+        assert_eq!(job["status"], "done", "{name}: {job}");
+        let mut asked = llm.transcribed()[before..].to_vec();
+        asked.sort();
+        let want: Vec<String> = (1..=pages)
+            .map(|n| format!("Page {n} of {pages}."))
+            .collect();
+        assert_eq!(asked, want, "{name}: every page once");
+        let (rec, dir) = record(&app, &job["result"]);
+        let md = rec["content"].as_str().unwrap();
+        if pages > 1 {
+            assert!(
+                !md.contains("内部资料"),
+                "{name}: the running header is left out: {md}"
+            );
+        }
+        let expected: Vec<String> = (1..=pages)
+            .map(|n| {
+                let page = transcribed_page(&format!("Page {n} of {pages}."));
+                if pages > 1 {
+                    page.split_once("\n\n").unwrap().1.to_owned()
+                } else {
+                    page
+                }
+            })
+            .collect();
+        assert_eq!(md, expected.join("\n\n"), "{name}: the pages in order");
+        assert_eq!(rec["file"]["converter"], "model", "{name}");
+        let original = dir.join(rec["file"]["original"].as_str().unwrap());
+        assert_eq!(std::fs::read(original).unwrap(), bytes, "{name}");
+        // The librarian reads the transcription as any document.
+        let plan = record_of(&llm.calls(Step::Plan)[0]);
+        assert!(
+            plan["extract"].as_str().unwrap().contains("第1节"),
+            "{name}: {plan}"
+        );
+    }
+}
+
+/// A model that doesn't take pictures fails the scan's job at once, with its own answer and
+/// what to do; so does a model that sees no text on any page. Nothing of the scan is kept.
+#[tokio::test]
+async fn a_model_that_reads_no_pictures_fails_the_scan_with_its_answer() {
+    let llm = librarian();
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let refusal = "anthropic: HTTP 400 Bad Request: {\"error\":{\"message\":\"unknown variant `image`, expected `text`\"}}";
+    for (reply, says) in [
+        (format!("{FAILS}{refusal}"), "unknown variant `image`"),
+        (String::new(), "found no text"),
+    ] {
+        llm.transcribe_with(move |_| reply.clone());
+        let started = std::time::Instant::now();
+        let (status, queued) = app
+            .post_form(
+                c,
+                "/ingest/expertise",
+                &[],
+                Some(("scan.pdf", &scan_pdf(6, false))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+        let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
+        assert_eq!(job["status"], "failed", "{job}");
+        let error = job["error"].as_str().unwrap();
+        assert!(error.contains(says), "{error}");
+        assert!(error.contains("a model that takes images"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+    assert!(llm.calls(Step::Read).is_empty(), "nothing was read");
+    let sources = app.wiki_dir("acme").parent().unwrap().join("sources");
+    let kept = std::fs::read_dir(&sources).map_or(0, |d| d.count());
+    assert_eq!(kept, 0, "nothing of the scans is kept");
+}
+
+/// A scan of more pages than the model reads is refused at once, with how many it reads.
+#[tokio::test]
+async fn a_scan_past_the_page_limit_is_refused() {
+    let llm = librarian();
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let (status, resp) = app
+        .post_form(
+            c,
+            "/ingest/expertise",
+            &[],
+            Some(("long.pdf", &scan_pdf(201, false))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{resp}");
+    let message = resp["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("201 pages") && message.contains("at most 200"),
+        "{message}"
+    );
 }
 
 /// The built-in converter's limits, each against a crafted file: a zip bomb is refused before
@@ -330,10 +623,10 @@ async fn crafted_files_are_refused_at_the_limits() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{resp}");
 }
 
-/// The real converter, when it runs: a PDF (which the service doesn't read itself) comes back
-/// as Markdown with its headings and table, and the record names MarkItDown and its version.
+/// With the real converter set up, a PDF is still read by the service itself, its table
+/// included; MarkItDown is only asked for what the service can't read.
 #[tokio::test]
-async fn a_pdf_through_markitdown() {
+async fn with_markitdown_a_pdf_is_still_read_by_the_service() {
     let Ok(url) = std::env::var("PINAKES_TEST_CONVERTER") else {
         eprintln!("PINAKES_TEST_CONVERTER is not set; skipping the converter test");
         return;
@@ -357,11 +650,9 @@ async fn a_pdf_through_markitdown() {
     assert_eq!(job["status"], "done", "{job}");
     let (rec, _) = record(&app, &job["result"]);
     let md = rec["content"].as_str().unwrap();
-    eprintln!("{md}");
     assert!(md.contains("二、盘点责任人"), "{md}");
-    assert!(md.contains("赵磊"), "{md}");
-    assert_eq!(rec["file"]["converter"], "markitdown");
-    assert_eq!(rec["file"]["version"], "0.1.8");
+    assert!(md.contains("| 冷库 | 赵磊 | 周敏 |"), "{md}");
+    assert_eq!(rec["file"]["converter"], "builtin");
 }
 
 /// The fixtures the built-in converter reads, Chinese and English, with what each must come
@@ -455,6 +746,48 @@ const FIXTURES: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+/// PDFs the built-in reader reads (in-process here; the service runs it in its own process),
+/// with what each must come back with.
+const PDF_FIXTURES: &[(&str, &[&str])] = &[
+    (
+        "policy-zh.pdf",
+        &[
+            "# 仓库作业规范（2026 年版）",
+            "| 货物类别 | 允许差异 | 处理时限 | 审批人 |\n| --- | --- | --- | --- |",
+            "| 30 至 70 公斤 | 重货通 | 45 |",
+            "- 冷链货物到货温度须在 2℃ 至 8℃ 之间，超出范围一律拒收。",
+            "1. 拣货完成后须二次复核，复核人与拣货人不得为同一人。",
+        ],
+    ),
+    (
+        "returns-policy.pdf",
+        &[
+            "Returns policy",
+            "| Card | 5 days | to the same card |",
+            "- Unopened goods",
+            "Fresh food cannot be returned.",
+        ],
+    ),
+    (
+        "warehouse-rules-zh.pdf",
+        &[
+            "二、盘点责任人",
+            "| 冷库 | 赵磊 | 周敏 |",
+            "1. 核对送货单与采购单",
+        ],
+    ),
+];
+
+#[test]
+fn the_service_reads_every_pdf_fixture_itself() {
+    for (name, wanted) in PDF_FIXTURES {
+        let md = builtin(name);
+        for w in *wanted {
+            assert!(md.contains(w), "{name} lacks {w:?}:\n{md}");
+        }
+    }
+}
 
 fn fixture(name: &str) -> Vec<u8> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -555,7 +888,11 @@ async fn the_builtin_converter_keeps_what_markitdown_keeps() {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let mut missing = Vec::new();
     let mut compared = 0;
-    for (name, _) in FIXTURES {
+    // MarkItDown splits the Chinese lines of a PDF Word made into broken tables (numbers in
+    // cells of their own), which the comparison would count as items; the PDFs PyMuPDF made
+    // it reads well.
+    let pdfs = PDF_FIXTURES.iter().filter(|(n, _)| *n != "policy-zh.pdf");
+    for (name, _) in FIXTURES.iter().chain(pdfs) {
         let ext = name.rsplit_once('.').unwrap().1;
         if ext == "csv" {
             continue; // MarkItDown's container doesn't take CSV

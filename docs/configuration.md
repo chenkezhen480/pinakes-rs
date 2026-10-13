@@ -65,12 +65,13 @@ The librarian, the one LLM the service calls (writes only). Which model and its 
 
 ## [converter]
 
-The optional MarkItDown converter, for PDF and the old binary Office formats. The service reads Markdown, text, HTML, Word, spreadsheets and PowerPoint itself.
+Converting files. The service reads Markdown, text, HTML, Word, spreadsheets, PowerPoint and PDF itself; the optional MarkItDown converter reads the old binary Office formats.
 
 | Field | Kind | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `url` | text, or null to unset it | unset | after a restart | Where the MarkItDown converter answers, such as http://127.0.0.1:8090. Unset, PDF, .doc and .ppt files are refused with what to do. |
+| `url` | text, or null to unset it | unset | after a restart | Where the MarkItDown converter answers, such as http://127.0.0.1:8090. Unset, .doc, .xls and .ppt files are refused with what to do. |
 | `timeout_secs` | a whole number, 0 or more | `120` | after a restart | How long converting one file may take, in seconds, by the service or by MarkItDown. |
+| `pdf_reader` | text | unset | after a restart | The pinakes-pdf binary, which reads PDFs (and draws a scan's pages for the model) in a process of its own with its memory capped. Unset, the one next to the service's executable. |
 
 ## [search]
 
@@ -104,7 +105,7 @@ Meaning-based search: a local embedding model, off by default.
 
 | Field | Kind | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `enabled` | true or false | `false` | at once | Whether meaning-based search is on. Turning it on downloads the model (about 640 MB, once) and embeds every page once, without a restart; turning it off keeps the stored vectors. |
+| `enabled` | true or false | `false` | at once | Whether meaning-based search is on. Turning it on downloads the model (about 640 MB, once), keeps an 8-bit copy of it in its place (316 MB) and embeds every page once, without a restart; turning it off keeps the stored vectors. |
 | `model` | text, or null to unset it | unset | after a restart | The embedding model: jina-embeddings-v2-base-zh, the one the service runs. Unset, embeddings can't be turned on. |
 
 ## [graph]

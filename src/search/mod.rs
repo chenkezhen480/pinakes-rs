@@ -1164,6 +1164,54 @@ pub fn search(
     let mut query_vector: Option<Vec<f32>> = None;
     let mut by_meaning: HashMap<Slot, Vec<(usize, f32)>> = HashMap::new();
     let mut by_keywords: HashMap<Slot, Vec<(f32, usize)>> = HashMap::new();
+    let keyword_hits = |slot: Slot| -> anyhow::Result<Vec<(f32, usize)>> {
+        let span = tracing::info_span!("keyword_search", slot = slot.as_str());
+        let _enter = span.enter();
+        let queries = keywords
+            .iter()
+            .map(|k| {
+                let words: &[Tok] = if ablation.words { &k.words } else { &[] };
+                let bigrams: &[Tok] = if ablation.bigrams { &k.bigrams } else { &[] };
+                snap.index.keyword_query(words, bigrams, k.weight)
+            })
+            .collect();
+        snap.index
+            .search(queries, &audiences, slot, CANDIDATES, &snap.catalog)
+    };
+    // The query's vector and how long embedding it took.
+    let embed_query = |embedder: &dyn Embedder| -> anyhow::Result<(Vec<f32>, u64)> {
+        let started = std::time::Instant::now();
+        let v = tracing::info_span!("embed_query")
+            .in_scope(|| embedder.embed(&[req.query.trim().to_owned()]))?;
+        Ok((v.into_iter().next().unwrap_or_default(), micros(started)))
+    };
+    // In `both` mode the query is embedded while the keywords are searched, side by side on
+    // the compute pool when a thread of it is free, so the search costs the longer of the two
+    // rather than both. `auto` embeds only once a slot comes back weak, and `semantic` has no
+    // keyword search to overlap.
+    if mode == Mode::Both
+        && let Some((_, embedder)) = meaning
+    {
+        let parent = tracing::Span::current();
+        let (embedded, keyword) = crate::par::join(
+            || parent.in_scope(|| embed_query(embedder)),
+            || {
+                parent.in_scope(|| {
+                    let started = std::time::Instant::now();
+                    let hits = [Slot::Memories, Slot::Knowledge].map(|s| (s, keyword_hits(s)));
+                    (hits, micros(started))
+                })
+            },
+        );
+        let (v, spent) = embedded?;
+        timings_us.push(("embed_query", spent));
+        query_vector = Some(v);
+        let (hits, spent) = keyword;
+        for (slot, hits) in hits {
+            by_keywords.insert(slot, hits?);
+        }
+        timings_us.push(("keyword_search", spent));
+    }
     let mut run_channel = |slot: Slot,
                            mode: Mode,
                            timings: &mut Vec<(&'static str, u64)>|
@@ -1172,23 +1220,7 @@ pub fn search(
         if matches!(mode, Mode::Keyword | Mode::Both) {
             // A slot `auto` searches again with both rankings reuses its keyword hits.
             if let Entry::Vacant(e) = by_keywords.entry(slot) {
-                let span = tracing::info_span!("keyword_search", slot = slot.as_str());
-                let _enter = span.enter();
-                let queries = keywords
-                    .iter()
-                    .map(|k| {
-                        let words: &[Tok] = if ablation.words { &k.words } else { &[] };
-                        let bigrams: &[Tok] = if ablation.bigrams { &k.bigrams } else { &[] };
-                        snap.index.keyword_query(words, bigrams, k.weight)
-                    })
-                    .collect();
-                e.insert(snap.index.search(
-                    queries,
-                    &audiences,
-                    slot,
-                    CANDIDATES,
-                    &snap.catalog,
-                )?);
+                e.insert(keyword_hits(slot)?);
             }
             for &(score, ord) in &by_keywords[&slot] {
                 by_ord.entry(ord).or_default().0 = Some(score);
@@ -1198,11 +1230,9 @@ pub fn search(
             && let Some((vectors, embedder)) = meaning
         {
             if query_vector.is_none() {
-                let started = std::time::Instant::now();
-                let v = tracing::info_span!("embed_query")
-                    .in_scope(|| embedder.embed(&[req.query.trim().to_owned()]))?;
-                timings.push(("embed_query", micros(started)));
-                query_vector = Some(v.into_iter().next().unwrap_or_default());
+                let (v, spent) = embed_query(embedder)?;
+                timings.push(("embed_query", spent));
+                query_vector = Some(v);
             }
             let q = query_vector.as_deref().unwrap_or_default();
             if !by_meaning.contains_key(&slot) {

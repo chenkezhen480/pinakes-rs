@@ -4,8 +4,9 @@
 //! applied) and merged into the draft, so it can build on what the draft adds, change it or
 //! take it back. The draft keeps the net change: nodes put (new or changed), nodes removed
 //! (with their edges), edges added and edges removed; removals are applied first, so a node
-//! removed and put again comes back without its old edges. Approving applies it whole, in one
-//! transaction; nothing is applied before. Graph data never touches the wiki.
+//! removed and put again comes back without its old edges. A draft may instead delete the whole
+//! space. Approving applies it whole, in one transaction; nothing is applied before. Graph data
+//! never touches the wiki.
 
 use std::collections::BTreeMap;
 
@@ -57,7 +58,13 @@ pub enum Change {
         ty: String,
         to: String,
     },
+    /// Deletes the whole space, with every node and edge in it, once approved. The draft then
+    /// holds only that: the changes it had are dropped, and no other change is taken.
+    DeleteSpace,
 }
+
+const DELETES: &str =
+    "the draft deletes the space; once that is approved or rejected, propose other changes";
 
 /// One call that changed the draft.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +96,9 @@ pub struct GraphDraft {
     /// deletes the draft.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
+    /// Approving it deletes the whole space instead.
+    #[serde(default)]
+    pub delete_space: bool,
 }
 
 impl GraphDraft {
@@ -110,7 +120,8 @@ impl GraphDraft {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.put_nodes.is_empty()
+        !self.delete_space
+            && self.put_nodes.is_empty()
             && self.remove_nodes.is_empty()
             && self.add_edges.is_empty()
             && self.remove_edges.is_empty()
@@ -219,7 +230,17 @@ impl GraphDraft {
         schema: &SchemaDef,
         change: Change,
     ) -> Result<(), String> {
+        if self.delete_space {
+            return Err(DELETES.into());
+        }
         match change {
+            Change::DeleteSpace => {
+                self.delete_space = true;
+                self.put_nodes.clear();
+                self.remove_nodes.clear();
+                self.add_edges.clear();
+                self.remove_edges.clear();
+            }
             Change::PutNode {
                 ty,
                 key,

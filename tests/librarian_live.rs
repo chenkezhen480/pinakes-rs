@@ -321,6 +321,57 @@ async fn a_real_model_files_a_word_file() {
     assert!(all.contains("5000"), "a threshold from the table");
 }
 
+/// A scanned PDF (no text layer) is read by the real model from its page drawn as a picture:
+/// the record holds the transcription, the table's rows and numbers included, and the document
+/// is filed from it. Needs a model that takes images (DeepSeek's `deepseek-flash` does).
+#[tokio::test]
+async fn a_real_model_reads_a_scan() {
+    let Some(llm) = live_llm() else {
+        eprintln!("PINAKES_TEST_LLM is not set; skipping the live librarian test");
+        return;
+    };
+    let app = TestApp::with_llm(llm);
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let scan = include_bytes!("fixtures/scanned-zh.pdf");
+    let (status, queued) = app
+        .post_form(
+            c,
+            "/ingest/expertise",
+            &[],
+            Some(("仓库作业规范.pdf", scan)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let job = app.wait_job(c, queued["job"].as_str().unwrap()).await;
+    eprintln!("{}", serde_json::to_string_pretty(&job).unwrap());
+    assert_eq!(job["status"], "done", "{job}");
+    let source = job["result"]["source"].as_str().unwrap();
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(app.tenant_dir("acme").join(source)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["file"]["converter"], "model");
+    let md = record["content"].as_str().unwrap();
+    eprintln!("--- transcription\n{md}");
+    let squeezed: String = md.chars().filter(|c| !c.is_whitespace()).collect();
+    for said in [
+        "#仓库作业规范（2026年版）",
+        "冷链货物到货温度须在2℃至8℃之间，超出范围一律拒收。",
+        "|B类|0.5%|3个工作日|主管|",
+        "连续90天无出库的货物视为呆滞库存",
+        "单个SKU金额超过5万元的，须报区域总监审批。",
+    ] {
+        assert!(squeezed.contains(said), "{said} in:\n{md}");
+    }
+    assert!(
+        !job["result"]["pages_created"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// A memory recorded with the session its task read with: the real model is offered the
 /// knowledge page the session read, should anchor the new playbook to it, and a later search
 /// brings that page along. The same record without a session runs in a second tenant, for

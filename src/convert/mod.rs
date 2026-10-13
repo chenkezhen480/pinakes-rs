@@ -1,7 +1,7 @@
 //! Uploaded files and fetched pages to Markdown (design, "Files are turned into Markdown
 //! first" and "M10"). Markdown and plain text are taken as they are. HTML, Word (`.docx`),
-//! spreadsheets (`.xlsx`, `.xlsm`, `.csv`) and PowerPoint (`.pptx`) are
-//! converted by the service itself, in pure Rust. Other formats (PDF, `.doc`, `.xls`, `.ppt`) go to the
+//! spreadsheets (`.xlsx`, `.xlsm`, `.csv`), PowerPoint (`.pptx`) and PDF are converted by the
+//! service itself, in pure Rust. The old binary Office formats (`.doc`, `.xls`, `.ppt`) go to the
 //! optional MarkItDown converter (`converter/`, `POST /convert`) when `[converter] url` names
 //! it, and are refused with what to do otherwise.
 //!
@@ -9,16 +9,21 @@
 //! one is bounded: the file's size, a zip archive's entries, unpacked size and compression
 //! ratio checked before anything is read (zip bombs), XML read without entities or external
 //! references, nesting and cell caps, the Markdown's length, and a time limit. Bytes in,
-//! Markdown out: no paths, no network.
+//! Markdown out: no paths, no network. PDF, whose reader isn't ours, is read in a process of
+//! its own with its memory capped (see [`pdf`]). A scanned PDF has no text here: an upload's
+//! scan is read by the model, page by page, from its pages drawn in that process
+//! ([`Read::Scan`], `librarian::transcribe`).
 
 mod docx;
 mod html;
 mod md;
 mod package;
+pub mod pdf;
 mod pptx;
 mod sheet;
 mod xml;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -30,13 +35,23 @@ use crate::error::ApiError;
 /// Extensions taken as they are, as UTF-8 text.
 const TEXT: &[&str] = &["md", "markdown", "txt"];
 
-/// Extensions the service converts itself.
+/// Extensions the service converts itself (PDF in a process of its own).
 pub const BUILTIN: &[&str] = &[
-    "html", "htm", "xhtml", "docx", "xlsx", "xlsm", "csv", "pptx",
+    "html", "htm", "xhtml", "docx", "xlsx", "xlsm", "csv", "pptx", "pdf",
 ];
+
+/// The PDF reader's binary, next to the service's own unless `[converter] pdf_reader` names
+/// another.
+pub const PDF_READER: &str = "pinakes-pdf";
 
 /// The converter name recorded with what the service converted itself.
 pub const BUILTIN_NAME: &str = "builtin";
+
+/// The converter name recorded with a scan the model transcribed (its version: the model).
+pub const MODEL_NAME: &str = "model";
+
+/// The most pages of a scan the model transcribes.
+pub const SCAN_PAGES: usize = 200;
 
 /// What a built-in conversion may take and make.
 #[derive(Debug, Clone)]
@@ -99,6 +114,9 @@ pub enum Refused {
     /// A damaged file, or not what its extension says.
     #[error("{0}")]
     Unreadable(String),
+    /// A PDF with no text layer, such as a scan.
+    #[error("{0}")]
+    NoText(String),
 }
 
 /// A file as Markdown, and what made it so.
@@ -112,6 +130,16 @@ pub struct Converted {
     /// leaves out), for the acquisition crawl. Empty for other formats.
     #[serde(default)]
     pub links: Vec<String>,
+}
+
+/// What a file holds, as the service reads it.
+#[derive(Debug)]
+pub enum Read {
+    Text(Converted),
+    /// A PDF without a text layer, of this many pages: only the model can read it.
+    Scan {
+        pages: usize,
+    },
 }
 
 /// Converts a file the service reads itself. Blocking.
@@ -131,6 +159,7 @@ pub fn builtin(ext: &str, bytes: &[u8], limits: &Limits) -> Result<Converted, Re
         }
         "docx" => docx::convert(bytes, limits)?,
         "pptx" => pptx::convert(bytes, limits)?,
+        "pdf" => pdf::markdown(bytes, limits)?,
         "xlsx" | "xlsm" => sheet::workbook(bytes, limits)?,
         "csv" => sheet::csv(bytes, limits)?,
         other => return Err(Refused::Unreadable(format!(".{other} is not read here"))),
@@ -176,17 +205,16 @@ fn refusal(ext: &str) -> String {
         "ppt" => format!(
             ".ppt files (PowerPoint 97-2003) can't be converted by the service itself. Save the file as .pptx, {markitdown}."
         ),
-        "pdf" => format!(
-            "PDF files can't be converted by the service itself. Save the document as .docx or HTML, {markitdown}."
-        ),
         other => format!(
-            ".{other} files can't be converted by the service itself: it reads Markdown, text, HTML, Word (.docx), spreadsheets (.xlsx, .csv) and PowerPoint (.pptx). Save the file in one of those formats, {markitdown}."
+            ".{other} files can't be converted by the service itself: it reads Markdown, text, HTML, Word (.docx), spreadsheets (.xlsx, .csv), PowerPoint (.pptx) and PDF. Save the file in one of those formats, {markitdown}."
         ),
     }
 }
 
 pub struct Converter {
     url: Option<String>,
+    /// The `pinakes-pdf` binary.
+    pdf_reader: PathBuf,
     /// MarkItDown's last health check and when, so the overview doesn't ask it every time.
     health: std::sync::Mutex<Option<(std::time::Instant, Result<String, String>)>>,
     timeout: Duration,
@@ -202,11 +230,20 @@ impl Converter {
             // A sidecar on the same host or network: never through a proxy.
             .no_proxy()
             .build()?;
+        let pdf_reader = match &cfg.pdf_reader {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_exe()
+                .map(|exe| {
+                    exe.with_file_name(format!("{PDF_READER}{}", std::env::consts::EXE_SUFFIX))
+                })
+                .unwrap_or_else(|_| PathBuf::from(PDF_READER)),
+        };
         Ok(Self {
             url: cfg
                 .url
                 .as_deref()
                 .map(|u| u.trim_end_matches('/').to_owned()),
+            pdf_reader,
             timeout,
             limits: Limits::default(),
             health: std::sync::Mutex::new(None),
@@ -254,27 +291,71 @@ impl Converter {
             .map_err(|_| "answered, but not as a converter".to_owned())
     }
 
-    /// The file as Markdown. `ext` is the file name's extension, lowercase.
+    /// The file as Markdown. `ext` is the file name's extension, lowercase. A scanned PDF is
+    /// refused (422): only an upload's scan is read, by the model ([`Converter::read`]).
     pub async fn convert(&self, ext: &str, bytes: Bytes) -> Result<Converted, ApiError> {
+        match self.read(ext, bytes).await? {
+            Read::Text(converted) => Ok(converted),
+            Read::Scan { .. } => Err(ApiError::Unprocessable(
+                "the .pdf file can't be converted: it has no text layer (a scanned document?)"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Page `n` (from 1) of a PDF, drawn as a PNG by the PDF reader in a process of its own.
+    pub async fn pdf_page(&self, bytes: &[u8], n: usize) -> Result<Vec<u8>, Refused> {
+        pdf::page(&self.pdf_reader, bytes, n, &self.limits, self.timeout).await
+    }
+
+    /// The file as Markdown, or, for a scanned PDF, its number of pages (at most
+    /// [`SCAN_PAGES`]). `ext` is the file name's extension, lowercase.
+    pub async fn read(&self, ext: &str, bytes: Bytes) -> Result<Read, ApiError> {
         if TEXT.contains(&ext) {
             let text = String::from_utf8(bytes.to_vec())
                 .map_err(|_| ApiError::BadRequest(format!("the .{ext} file is not UTF-8 text")))?;
-            return Ok(Converted {
+            return Ok(Read::Text(Converted {
                 markdown: text.trim_start_matches('\u{feff}').to_owned(),
                 converter: "none".into(),
                 version: String::new(),
                 links: Vec::new(),
-            });
+            }));
         }
-        if BUILTIN.contains(&ext) {
+        if ext == "pdf" {
+            let why = match pdf::convert(&self.pdf_reader, &bytes, &self.limits, self.timeout).await
+            {
+                Ok(markdown) => {
+                    return Ok(Read::Text(Converted {
+                        markdown,
+                        converter: BUILTIN_NAME.into(),
+                        version: env!("CARGO_PKG_VERSION").into(),
+                        links: Vec::new(),
+                    }));
+                }
+                Err(Refused::TooLarge(why)) => return Err(ApiError::TooLarge(why)),
+                // MarkItDown reads no scan either.
+                Err(Refused::NoText(_)) => return self.scan(&bytes).await,
+                Err(Refused::Unreadable(why)) => why,
+            };
+            // MarkItDown may read a PDF the service's reader can't.
+            if self.url.is_none() {
+                return Err(ApiError::Unprocessable(format!(
+                    "the .pdf file can't be converted: {why}"
+                )));
+            }
+            tracing::info!(
+                why,
+                "not read by the built-in PDF reader; trying MarkItDown"
+            );
+        } else if BUILTIN.contains(&ext) {
             let (ext_owned, input, mut limits) =
                 (ext.to_owned(), bytes.clone(), self.limits.clone());
             limits.until = Some(std::time::Instant::now() + self.timeout);
             let job = tokio::task::spawn_blocking(move || builtin(&ext_owned, &input, &limits));
             let why = match tokio::time::timeout(self.timeout, job).await {
-                Ok(Ok(Ok(converted))) => return Ok(converted),
+                Ok(Ok(Ok(converted))) => return Ok(Read::Text(converted)),
                 Ok(Ok(Err(Refused::TooLarge(why)))) => return Err(ApiError::TooLarge(why)),
-                Ok(Ok(Err(Refused::Unreadable(why)))) => why,
+                Ok(Ok(Err(Refused::Unreadable(why) | Refused::NoText(why)))) => why,
                 Ok(Err(e)) => {
                     tracing::error!(ext, error = %e, "the built-in converter panicked");
                     "the file couldn't be read".to_owned()
@@ -328,6 +409,7 @@ impl Converter {
             return resp
                 .json::<Converted>()
                 .await
+                .map(Read::Text)
                 .map_err(|e| ApiError::BadGateway(format!("the converter's answer: {e}")));
         }
         #[derive(Deserialize, Default)]
@@ -341,5 +423,23 @@ impl Converter {
             422 | 504 => ApiError::Unprocessable(why),
             _ => ApiError::BadGateway(format!("the converter answered {status}: {why}")),
         })
+    }
+
+    /// A scanned PDF: its pages counted, at most [`SCAN_PAGES`].
+    async fn scan(&self, bytes: &[u8]) -> Result<Read, ApiError> {
+        let pages = pdf::pages(&self.pdf_reader, bytes, &self.limits, self.timeout)
+            .await
+            .map_err(|e| match e {
+                Refused::TooLarge(why) => ApiError::TooLarge(why),
+                Refused::Unreadable(why) | Refused::NoText(why) => {
+                    ApiError::Unprocessable(format!("the .pdf file can't be read: {why}"))
+                }
+            })?;
+        if pages > SCAN_PAGES {
+            return Err(ApiError::TooLarge(format!(
+                "the PDF is a scan (no text layer) of {pages} pages; the model reads scans of at most {SCAN_PAGES}"
+            )));
+        }
+        Ok(Read::Scan { pages })
     }
 }

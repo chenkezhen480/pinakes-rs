@@ -64,7 +64,8 @@ retention_days = 30            # 0 keeps them forever
 
 [embedding]                    # (M5) local, runs inside the process; files go to /data/models
 enabled = false                # off: keyword search only, nothing downloaded. On (console or here):
-                               # the model (about 640 MB) is downloaded once and pages embedded, no restart
+                               # the model (about 640 MB) is downloaded once, kept as an 8-bit copy (316 MB)
+                               # and pages embedded, no restart
 model = "jina-embeddings-v2-base-zh"   # Chinese and English; unset: embeddings can't be turned on
 
 [graph]
@@ -89,5 +90,5 @@ crawl_delay_ms = 1000          # pause between two requests to the sites
 [cache]                        # tenants in memory
 idle_minutes = 30              # a tenant unused this long frees its search snapshot and graph; 0 never
 
-[jobs]                         # the per-tenant write queue; job status lives in memory
+[jobs]                         # the per-tenant write queue; job status kept in the tenant's SQLite
 keep_finished_minutes = 60     # finished jobs stay visible at /jobs/{id} this long

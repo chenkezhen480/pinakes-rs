@@ -9,7 +9,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
-use super::{AuditEntry, Store, StoredVector};
+use super::{AuditEntry, Store, StoredJob, StoredVector};
 use crate::graph::{SchemaDef, SpaceDef};
 use crate::librarian::documents::{Reading, ReadingState};
 use crate::librarian::lint::{LintRun, Stored};
@@ -128,6 +128,16 @@ const MIGRATIONS: &[&str] = &[
         url  TEXT PRIMARY KEY,
         site TEXT NOT NULL,
         page TEXT NOT NULL
+    );
+"#,
+    r#"
+    -- Job status, kept across restarts (JSON of jobs::JobInfo); finished jobs are removed
+    -- once they expire ([jobs] keep_finished_minutes).
+    CREATE TABLE jobs (
+        id       TEXT PRIMARY KEY,
+        owner    TEXT,      -- the user folder that queued it, if any
+        info     TEXT NOT NULL,
+        finished INTEGER    -- Unix seconds; NULL while queued or running
     );
 "#,
 ];
@@ -749,12 +759,62 @@ impl Store for SqliteStore {
             )?;
             // A user's own actions, whose details can hold names they chose.
             tx.execute("DELETE FROM audit_log WHERE actor = ?1", params![audience])?;
+            // The jobs it queued, and any whose results name it (its pages, or gaps an
+            // acquisition run found for it; an approval of its proposal runs without a user).
+            tx.execute(
+                "DELETE FROM jobs WHERE owner = ?1 OR instr(info, ?1) > 0",
+                params![audience],
+            )?;
             tx.commit()?;
             // Old copies of the rows also leave the write-ahead log.
             checkpoint(c)?;
             Ok(())
         })
         .await
+    }
+
+    async fn put_job(&self, job: &StoredJob) -> anyhow::Result<()> {
+        let (id, owner, finished) = (job.info.job.clone(), job.owner.clone(), job.finished);
+        let info = serde_json::to_string(&job.info)?;
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO jobs (id, owner, info, finished) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (id) DO UPDATE SET info = excluded.info, finished = excluded.finished",
+                params![id, owner, info, finished],
+            )
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn jobs(&self) -> anyhow::Result<Vec<StoredJob>> {
+        let rows: Vec<(Option<String>, String, Option<i64>)> = self
+            .with_conn(|c| {
+                let mut stmt = c.prepare("SELECT owner, info, finished FROM jobs")?;
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect()
+            })
+            .await?;
+        rows.into_iter()
+            .map(|(owner, info, finished)| {
+                Ok(StoredJob {
+                    owner,
+                    info: serde_json::from_str(&info).context("a stored job")?,
+                    finished,
+                })
+            })
+            .collect()
+    }
+
+    async fn prune_jobs(&self, before: i64) -> anyhow::Result<()> {
+        self.with_conn(move |c| {
+            c.execute(
+                "DELETE FROM jobs WHERE finished IS NOT NULL AND finished < ?1",
+                params![before],
+            )
+        })
+        .await?;
+        Ok(())
     }
 
     async fn put_graph_space(&self, def: &SpaceDef) -> anyhow::Result<()> {

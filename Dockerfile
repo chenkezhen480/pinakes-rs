@@ -12,15 +12,16 @@ ENV PINAKES_GIT_COMMIT=${PINAKES_GIT_COMMIT}
 ARG CARGO_BUILD_JOBS
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked --bin pinakes \
-    && cp target/release/pinakes /usr/local/bin/pinakes
+    cargo build --release --locked --bin pinakes --bin pinakes-pdf \
+    && cp target/release/pinakes target/release/pinakes-pdf /usr/local/bin/
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home /app pinakes \
     && mkdir /data && chown pinakes /data
-COPY --from=build /usr/local/bin/pinakes /usr/local/bin/pinakes
+# The service and its PDF reader, which it runs beside itself for every PDF.
+COPY --from=build /usr/local/bin/pinakes /usr/local/bin/pinakes-pdf /usr/local/bin/
 WORKDIR /app
 COPY docker/config.toml ./config.toml
 USER pinakes

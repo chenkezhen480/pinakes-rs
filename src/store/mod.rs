@@ -26,6 +26,16 @@ pub struct AuditEntry {
 }
 
 /// The vector of one part of a page (`search::vectors::Unit`), as stored.
+/// A job's status as the tenant's store keeps it, so it outlives a restart.
+#[derive(Debug, Clone)]
+pub struct StoredJob {
+    /// The user folder of the caller who queued it, if any.
+    pub owner: Option<String>,
+    pub info: crate::jobs::JobInfo,
+    /// When it finished, in seconds since the Unix epoch; `None` while queued or running.
+    pub finished: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredVector {
     pub page: String,
@@ -133,7 +143,8 @@ pub trait Store: Send + Sync {
 
     /// Removes everything stored for a group or user folder, in one transaction: its held and
     /// approved proposals, its records' entries, its documents with their versions and
-    /// readings, its pages' vectors and its lint findings and review notes. Deleted rows are overwritten, also in the WAL.
+    /// readings, its pages' vectors, its lint findings and review notes, and the jobs it
+    /// queued or whose results name its folder. Deleted rows are overwritten, also in the WAL.
     async fn delete_audience(&self, audience: &str) -> anyhow::Result<()>;
 
     /// Replaces a registered space's definition (its owner and members).
@@ -163,6 +174,15 @@ pub trait Store: Send + Sync {
         findings: &[crate::librarian::lint::Stored],
         reviewed: &[(String, String)],
     ) -> anyhow::Result<()>;
+
+    /// Saves a job's status, replacing what was saved for it.
+    async fn put_job(&self, job: &StoredJob) -> anyhow::Result<()>;
+
+    /// Every saved job.
+    async fn jobs(&self) -> anyhow::Result<Vec<StoredJob>>;
+
+    /// Removes the jobs that finished before `before` (seconds since the Unix epoch).
+    async fn prune_jobs(&self, before: i64) -> anyhow::Result<()>;
 
     /// Closes the store for good (the tenant is being deleted); every later call fails.
     fn close(&self);

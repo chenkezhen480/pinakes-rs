@@ -512,6 +512,110 @@ async fn hidden_spaces_never_appear() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Who sees a space is changed by its owner: visibility and members set whole, kept across
+/// restarts; anyone else who sees it is refused, and a space they can't see is not found.
+#[tokio::test]
+async fn a_space_owner_changes_who_sees_it() {
+    let w = world().await;
+    let jin = w.caller().user(Some("jin"));
+    let ana = w.caller().user(Some("ana"));
+    let marco = w.caller().user(Some("marco"));
+    let risk = vec!["risk".to_string()];
+    let zoe = w.caller().user(Some("zoe")).groups(&risk);
+    let hidden = "Which orders did Hidden Buyer place?";
+    let vault = "Which orders did Vault Buyer place?";
+
+    // Jin shares the private space: Ana sees its edges now.
+    let (status, r) = w
+        .app
+        .put(
+            jin,
+            "/graph/spaces/secret",
+            json!({ "visibility": "shared" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["visibility"], "shared");
+    assert_eq!(
+        edges(&ask(&w, ana, hidden).await),
+        vec!["secret:order/7 placed_by secret:customer/h1"]
+    );
+    // Ana sees it but doesn't own it; a space she can't see is not found.
+    for (space, want) in [
+        ("secret", StatusCode::FORBIDDEN),
+        ("mainland", StatusCode::FORBIDDEN),
+        ("vault", StatusCode::NOT_FOUND),
+        ("nowhere", StatusCode::NOT_FOUND),
+    ] {
+        let (status, r) = w
+            .app
+            .put(
+                ana,
+                &format!("/graph/spaces/{space}"),
+                json!({ "visibility": "shared" }),
+            )
+            .await;
+        assert_eq!(status, want, "{space}: {r}");
+    }
+    // Checked as a new space is.
+    for bad in [
+        json!({ "visibility": "restricted" }),
+        json!({ "visibility": "shared", "members": { "users": ["ana"] } }),
+        json!({ "visibility": "private", "members": { "groups": ["risk"] } }),
+        json!({ "visibility": "public" }),
+    ] {
+        let (status, r) = w.app.put(jin, "/graph/spaces/secret", bad.clone()).await;
+        assert!(status.is_client_error(), "{bad}: {status} {r}");
+    }
+
+    // Marco takes the risk group off the vault: Zoe, in it, no longer sees it.
+    assert_eq!(edges(&ask(&w, zoe, vault).await).len(), 1);
+    let (status, r) = w
+        .app
+        .put(
+            marco,
+            "/graph/spaces/vault",
+            json!({ "visibility": "restricted", "members": { "users": ["marco", "ana"] } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["members"], json!({ "users": ["marco", "ana"] }));
+    assert!(edges(&ask(&w, zoe, vault).await).is_empty());
+    assert_eq!(edges(&ask(&w, ana, vault).await).len(), 1);
+
+    // Jin makes it private again; it stays so after a restart.
+    let (status, _) = w
+        .app
+        .put(
+            jin,
+            "/graph/spaces/secret",
+            json!({ "visibility": "private" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut app = w.app;
+    app.restart();
+    let w = World { app, key: w.key };
+    let ana = w.caller().user(Some("ana"));
+    let zoe = w.caller().user(Some("zoe")).groups(&risk);
+    assert!(edges(&ask(&w, ana, hidden).await).is_empty());
+    assert!(edges(&ask(&w, zoe, vault).await).is_empty());
+    assert_eq!(edges(&ask(&w, ana, vault).await).len(), 1);
+    let (_, spaces) = w
+        .app
+        .get(w.caller().user(Some("jin")), "/graph/spaces")
+        .await;
+    let secret = spaces["spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["space"] == "secret")
+        .unwrap()
+        .clone();
+    assert_eq!(secret["visibility"], "private");
+    assert_eq!(secret["mine"], true);
+}
+
 #[tokio::test]
 async fn walks_and_paths() {
     let w = world().await;

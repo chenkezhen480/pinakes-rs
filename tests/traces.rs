@@ -1,5 +1,5 @@
-//! Search traces and replay (design, "Search traces and replay"): every `/search` and `/read`
-//! leaves one line in the tenant's trace file, with folder names instead of raw ids, and a
+//! Search traces and replay (design, "Search traces and replay"): every `/search`, `/read`,
+//! `/graph` and `/graph/path` leaves one line in the tenant's trace file, with folder names instead of raw ids, and a
 //! replay reruns the recorded searches and reports what changed.
 
 use std::collections::HashMap;
@@ -86,6 +86,78 @@ async fn searches_and_reads_leave_one_line_each() {
     assert!(
         !text.contains("\"lily\"") && !text.contains("\"ops\""),
         "{text}"
+    );
+}
+
+/// The graph follow-ups leave a line each too, with the graph they ran on and what they
+/// returned; a node that isn't found leaves none.
+#[tokio::test]
+async fn graph_follow_ups_leave_one_line_each() {
+    let app = TestApp::new();
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key).user(Some("lily"));
+    for (uri, body) in [
+        (
+            "/ingest/graph/schema",
+            json!({ "schema": "commerce", "summary": "Orders.",
+                    "nodes": { "order": { "key": "order_id" }, "customer": { "key": "customer_id" } },
+                    "relations": { "placed_by": { "from": "order", "to": "customer" } } }),
+        ),
+        (
+            "/ingest/graph/space",
+            json!({ "space": "mainland", "schema": "commerce" }),
+        ),
+        (
+            "/ingest/graph/data",
+            json!({ "space": "mainland",
+                    "nodes": [{ "type": "order", "key": "1042", "name": "Order 1042" },
+                              { "type": "customer", "key": "c1", "name": "林晓" }],
+                    "edges": [{ "from": "order/1042", "type": "placed_by", "to": "customer/c1" }] }),
+        ),
+    ] {
+        let (status, r) = app.post(c, uri, body).await;
+        assert!(status.is_success(), "{uri}: {r}");
+    }
+    let (status, _) = app
+        .post(
+            c,
+            "/graph",
+            json!({ "node": "mainland:order/1042", "session": "s1" }),
+        )
+        .await;
+    assert!(status.is_success());
+    let (status, _) = app
+        .post(
+            c,
+            "/graph/path",
+            json!({ "from": "mainland:order/1042", "to": "mainland:customer/c1" }),
+        )
+        .await;
+    assert!(status.is_success());
+    let (status, _) = app
+        .post(c, "/graph", json!({ "node": "mainland:order/9999" }))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+    let records = traces(&app);
+    assert_eq!(records.len(), 2, "{records:?}");
+    let (walk, path) = (&records[0], &records[1]);
+    assert_eq!(walk.endpoint, Endpoint::Graph);
+    assert_eq!(walk.user, Some(user_dir_name("lily")));
+    assert_eq!(walk.request["node"], "mainland:order/1042");
+    assert_eq!(walk.request["session"], "s1");
+    assert_eq!(
+        walk.result["nodes"],
+        json!(["mainland:order/1042", "mainland:customer/c1"])
+    );
+    assert_eq!(walk.result["edges"], 1);
+    assert!(walk.graph.is_some() && walk.snapshot.is_some());
+    assert!(walk.timings_us.contains_key("total"));
+    assert_eq!(path.endpoint, Endpoint::Path);
+    assert_eq!(path.result["found"], true);
+    assert_eq!(
+        path.result["nodes"],
+        json!(["mainland:order/1042", "mainland:customer/c1"])
     );
 }
 

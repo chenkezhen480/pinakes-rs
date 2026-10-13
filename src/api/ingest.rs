@@ -5,16 +5,18 @@
 //! in-memory graph until the new one is swapped in.
 
 use axum::Json;
-use axum::extract::State;
-use axum::extract::rejection::JsonRejection;
-use axum::http::StatusCode;
+use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
 use serde::Serialize;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::graph::def::{self, DataRequest, SchemaDef, SpaceRequest, Visibility};
+use crate::graph::def::{
+    self, DataRequest, Members, SchemaDef, SpaceAccess, SpaceDef, SpaceRequest, Visibility,
+};
 use crate::graph::{GraphSnapshot, describe};
-use crate::identity::Scope;
+use crate::identity::{Scope, is_admin};
 use crate::librarian::DescribeError;
 use crate::wiki::WikiError;
 
@@ -169,6 +171,21 @@ pub struct SpaceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub visibility: Visibility,
+    /// Who else sees a restricted space.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub members: Option<Members>,
+}
+
+impl From<SpaceDef> for SpaceResponse {
+    fn from(def: SpaceDef) -> Self {
+        Self {
+            members: (def.visibility == Visibility::Restricted).then_some(def.members),
+            space: def.space,
+            schema: def.schema,
+            name: def.name,
+            visibility: def.visibility,
+        }
+    }
 }
 
 /// `POST /ingest/graph/space`: register a space under a schema with its visibility. The owner
@@ -216,15 +233,150 @@ pub async fn space(
         .audit(&scope.actor(), "graph.space.create", &def.space)
         .await?;
     tracing::info!(space = %def.space, schema = %def.schema, "graph space created");
-    Ok((
-        StatusCode::CREATED,
-        Json(SpaceResponse {
-            space: def.space,
-            schema: def.schema,
-            name: def.name,
-            visibility: def.visibility,
-        }),
-    ))
+    Ok((StatusCode::CREATED, Json(def.into())))
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SpaceDeleted {
+    pub space: String,
+    pub nodes: usize,
+    pub edges: usize,
+}
+
+/// `DELETE /graph/spaces/{space}`: the admin (the console) deletes a space with every node and
+/// edge in it, and its pending draft. Anyone else proposes it (`delete_space` in a graph draft)
+/// for review; a space they see is forbidden here, one they don't is not found. Pages anchored
+/// to its nodes are left as they are: the read path drops anchors to nodes that are gone, and
+/// lint reports them.
+#[tracing::instrument(name = "graph_space_delete", skip_all)]
+pub async fn delete_space(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    scope: Scope,
+    name: Result<Path<String>, PathRejection>,
+) -> Result<Json<SpaceDeleted>, ApiError> {
+    let Path(name) = name?;
+    let admin = is_admin(&headers, &app);
+    let tenant = scope.tenant();
+    let _writer = tenant.lock_graph().await?;
+    let graph = tenant.graph().await?;
+    let Some(space) = graph.space(&name).filter(|s| admin || s.visible_to(&scope)) else {
+        return Err(ApiError::NotFound);
+    };
+    if !admin {
+        return Err(ApiError::Forbidden(
+            "only the admin deletes a space; propose it (delete_space in a graph draft) for review"
+                .into(),
+        ));
+    }
+    let index = graph
+        .spaces
+        .iter()
+        .position(|s| s.def.space == space.def.space)
+        .unwrap_or(usize::MAX);
+    let nodes = graph
+        .graph
+        .node_weights()
+        .filter(|n| n.space == index)
+        .count();
+    let edges = graph
+        .graph
+        .edge_indices()
+        .filter(|&e| {
+            graph
+                .graph
+                .edge_endpoints(e)
+                .is_some_and(|(a, _)| graph.graph[a].space == index)
+        })
+        .count();
+    drop(graph);
+    for p in tenant.store.held_proposals().await? {
+        if p.graph.as_ref().is_some_and(|g| g.space == name) {
+            tenant.store.delete_proposal(&p.id).await?;
+        }
+    }
+    remove_space(tenant, &name).await?;
+    tenant
+        .store
+        .audit(&scope.actor(), "graph.space.delete", &name)
+        .await?;
+    Ok(Json(SpaceDeleted {
+        space: name,
+        nodes,
+        edges,
+    }))
+}
+
+/// Deletes a space from the graph store and the registry, and the in-memory graph follows
+/// (dropped, to be loaded again, if it can't be rebuilt). Callers hold the graph writer.
+pub(crate) async fn remove_space(
+    tenant: &crate::tenants::Tenant,
+    name: &str,
+) -> anyhow::Result<()> {
+    tenant.graph_store.delete_space(name).await?;
+    tenant.store.remove_graph_space(name).await?;
+    if tenant.graph_after_deletion().await.is_err() {
+        tenant.forget_graph().await;
+    }
+    tracing::info!(space = name, "graph space deleted");
+    Ok(())
+}
+
+/// `PUT /graph/spaces/{space}`: change who sees a space, its visibility and members set whole.
+/// Only its owner may, or the admin (the console), who may change any space of the tenant. A
+/// space the caller can't see is not found; one it sees but doesn't own is forbidden. Pages
+/// anchored to its nodes stay as they are: the read path drops anchors their readers can no
+/// longer see, and lint reports the ones that break their page's audience.
+#[tracing::instrument(name = "graph_space_access", skip_all)]
+pub async fn space_access(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    scope: Scope,
+    name: Result<Path<String>, PathRejection>,
+    body: Result<Json<SpaceAccess>, JsonRejection>,
+) -> Result<Json<SpaceResponse>, ApiError> {
+    let Path(name) = name?;
+    let Json(access) = body?;
+    let admin = is_admin(&headers, &app);
+    let tenant = scope.tenant();
+    let _writer = tenant.lock_graph().await?;
+    let graph = tenant.graph().await?;
+    let Some(space) = graph.space(&name).filter(|s| admin || s.visible_to(&scope)) else {
+        return Err(ApiError::NotFound);
+    };
+    let me = scope.user().map(|u| u.id.as_str());
+    if !admin && (me.is_none() || space.def.owner.as_deref() != me) {
+        return Err(ApiError::Forbidden(
+            "only the space's owner, or the admin, changes who sees it".into(),
+        ));
+    }
+    let next = access.applied(&space.def).map_err(ApiError::BadRequest)?;
+    tenant.store.put_graph_space(&next).await?;
+    let schemas = graph.schemas.values().cloned().collect();
+    let spaces: Vec<_> = graph
+        .spaces
+        .iter()
+        .map(|s| {
+            if s.def.space == next.space {
+                next.clone()
+            } else {
+                s.def.clone()
+            }
+        })
+        .collect();
+    let built = GraphSnapshot::build_blocking(graph, move |g| g.with_meta(schemas, spaces)).await?;
+    tenant.set_graph(built);
+    tenant
+        .store
+        .audit(
+            &scope.actor(),
+            "graph.space.access",
+            &format!("{} {:?}", next.space, next.visibility),
+        )
+        .await?;
+    tracing::info!(space = %next.space, visibility = ?next.visibility, "graph space access changed");
+    Ok(Json(next.into()))
 }
 
 #[derive(Debug, Serialize)]

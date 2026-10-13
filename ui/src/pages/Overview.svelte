@@ -3,8 +3,8 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import { api } from "../api/client";
-  import type { EmbeddingState } from "../api/types";
-  import { Resource } from "../lib/resource.svelte";
+  import type { EmbeddingState, ModelTest } from "../api/types";
+  import { Resource, Action } from "../lib/resource.svelte";
   import { t } from "../lib/i18n.svelte";
   import { href } from "../lib/router.svelte";
   import { ago, bytes } from "../lib/format";
@@ -17,6 +17,12 @@
   const status = new Resource(() => api.status());
   const lint = new Resource(() => api.lint());
   const acquisition = new Resource(() => api.acquisition());
+  // Whether the model answers is asked only when the admin clicks: each test is a model call.
+  const testing = new Action();
+  let tested = $state<ModelTest | null>(null);
+  async function testModel() {
+    tested = (await testing.run(() => api.testModel({}))) ?? null;
+  }
 
   // While the embedding model is on its way, its progress is followed.
   const timer = window.setInterval(() => {
@@ -73,6 +79,15 @@
       </p>
       {#if s.librarian.model}<p class="mono small">{s.librarian.model}</p>{/if}
       {#if s.librarian.off_because}<p class="small">{s.librarian.off_because}</p>{/if}
+      {#if s.librarian.on}
+        <div class="test">
+          <button class="btn small" disabled={testing.running} onclick={testModel}>{testing.running ? t("settings.model.testing") : t("settings.model.test")}</button>
+          {#if tested}
+            <span class="small" class:ok={tested.ok} class:bad={!tested.ok}>{tested.ok ? t("settings.model.testOk", { ms: tested.ms }) : t("settings.model.testFailed", { error: tested.error ?? "" })}</span>
+          {/if}
+        </div>
+        {#if testing.error}<ErrorNote error={testing.error} />{/if}
+      {/if}
       <a class="more" href={href("/settings/model")}>{t("overview.configureModel")}</a>
     </section>
 
@@ -257,5 +272,11 @@
     padding-top: var(--space-2);
     font-size: var(--step--1);
     font-weight: 600;
+  }
+  .test {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
   }
 </style>

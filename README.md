@@ -31,11 +31,15 @@ Measured on a laptop with 4 compute threads (medians; method and every number in
 
 | Wiki size | Keyword search | Vector search | Semantic search, query embedding included | One page changed (write) |
 |---|---|---|---|---|
-| 10,000 pages | **2.3 ms** | 7 ms (exact) | about 37 ms | 0.16 s |
-| 100,000 pages | **10 ms** | **3 to 5 ms** (HNSW, recall@10 0.983) | about 33 ms | 1.29 s |
+| 10,000 pages | **2.3 ms** | 6 ms (exact) | **20 ms** | 0.16 s |
+| 100,000 pages | **10 ms** | **3 to 5 ms** (HNSW, recall@10 0.983) | about 18 to 20 ms (see below) | 1.29 s |
 
 Graph walks take microseconds, and name matching under 0.3 ms at every size. Most of a semantic
-search is embedding the query on the CPU (about 29 ms). What makes it fast:
+search is embedding the query on the CPU: 14 ms with the model's weights in 8 bits, which the
+service quantizes itself after the download (same answers on the test set as the full model, at
+half the time and memory). At 100,000 pages that adds up to about 18 to 20 ms; the benchmark
+measured 38 ms there, while Windows Defender kept two to three cores busy scanning the files it
+had just written. What makes it fast:
 
 - **Compiled at write time, looked up at read time**: one search returns answer-shaped pages,
   related memories and real graph edges together, in three slots, with routes to follow.
@@ -50,8 +54,8 @@ search is embedding the query on the CPU (about 29 ms). What makes it fast:
 ## 2. Knowledge that hosts and manages itself
 
 **Self-hosted.** Pinakes is one Rust binary, with its web console built in, on your own
-machine or server; it reads Word, Excel, PowerPoint and web pages itself (an optional
-converter container adds PDF). Your knowledge stays in files you can read: the wiki is plain Markdown, each
+machine or server; it reads Word, Excel, PowerPoint, PDF and web pages itself (an optional
+converter container adds the old binary Office formats). Your knowledge stays in files you can read: the wiki is plain Markdown, each
 tenant has one SQLite file, and graph data sits in SQLite or Neo4j. The embedding model runs
 locally. The only outside call is the librarian's model at write time, and that can be any
 Anthropic-compatible or OpenAI-compatible endpoint, a local model too (Ollama, vLLM). Tenants,
@@ -95,8 +99,9 @@ Knowledge comes in through **one entry per kind**, and goes out through **one se
 
 | Kind | Added with | Comes back in |
 |---|---|---|
-| Agent experience: what worked, pitfalls and fixes | `/ingest/experience`, MCP `record_experience` | memories |
-| User decisions and their outcomes | `/ingest/decision`, MCP `record_decision` | memories |
+| Agent experience: what worked, pitfalls and fixes | `/ingest/experience` | memories |
+| User decisions and their outcomes | `/ingest/decision` | memories |
+| A decision, a lesson or both, as an agent recorded it (split by the librarian: decisions for the user, lessons for the team) | `/ingest/note`, MCP `record_decision_or_lesson` | memories |
 | User preferences | `/ingest/preference`, MCP `record_preference` | memories |
 | Vertical expertise: documents and manuals | `/ingest/expertise` (JSON or a file) | knowledge |
 | The business graph: schemas, spaces, nodes, edges | `/ingest/graph/schema`, `/space`, `/data` | knowledge (the schema's description) and relations (the edges) |
@@ -159,15 +164,15 @@ Each is one line of `config.toml` (or the compose profile named); the defaults a
 | **Graph store** (`[graph] backend`) | `sqlite` (default) | `graph.sqlite` in each tenant's folder: nothing else to run |
 | | `neo4j` | The compose profile `neo4j`; move data between the two with `pinakes-migrate-graph` |
 | **Meaning search** (`[embedding] enabled`) | off (default) | Keyword search only: nothing is downloaded; `semantic` and `both` say how to turn it on |
-| | on (the console's switch, or the config line) | Downloads `jina-embeddings-v2-base-zh` (about 640 MB) into `<data>/models` once, in the background, and embeds every page; no restart. `HF_ENDPOINT` names a mirror |
+| | on (the console's switch, or the config line) | Downloads `jina-embeddings-v2-base-zh` (about 640 MB) into `<data>/models` once, in the background, keeps an 8-bit copy of it (316 MB) in its place, and embeds every page; no restart. `HF_ENDPOINT` names a mirror |
 | **Default search mode** (`[search] default_mode`) | `keyword` (default), `semantic`, `both`, `auto` | When a search doesn't say; `auto` tries keywords first and falls back to meaning when coverage is weak |
-| **Document conversion** | built in (default) | Markdown, text, HTML, Word (`.docx`), spreadsheets (`.xlsx`, `.csv`) and PowerPoint (`.pptx`), read by the service itself |
-| | plus MarkItDown (`[converter] url`, compose profile `markitdown`) | PDF and the old binary Office formats (`.doc`, `.xls`, `.ppt`); without it they are refused with what to do |
+| **Document conversion** | built in (default) | Markdown, text, HTML, Word (`.docx`), spreadsheets (`.xlsx`, `.csv`), PowerPoint (`.pptx`) and PDF (its text layer, read in a process of its own; a scan is transcribed page by page by the model, which must take images, such as DeepSeek's `deepseek-flash`), read by the service itself |
+| | plus MarkItDown (`[converter] url`, compose profile `markitdown`) | The old binary Office formats (`.doc`, `.xls`, `.ppt`); without it they are refused with what to do |
 | **Acquisition** (`[acquisition] enabled`) | off (default) | On for the deployment, then per tenant with its allowlist (`PUT /admin/tenants/{id}/acquisition`) |
 | **Test chat** (`PINAKES_DEV=1`) | off (default) | The console's Search page gets a chat tab that answers with the read tools an agent has |
 
 How to run it: **Docker Compose** (`docker compose up -d --build` starts the service alone;
-add `--profile markitdown` for PDF and `--profile neo4j` for Neo4j), or **from source**
+add `--profile markitdown` for the old Office formats and `--profile neo4j` for Neo4j), or **from source**
 (`cargo run --release`). Either way the **web console** is at `http://127.0.0.1:8080/ui`: search,
 the wiki rendered, adding knowledge, the graph drawn, review, lint, acquisition, tenants and
 every setting explained, laid out as a 3D hall of the Library of Alexandria whose sky follows
@@ -209,8 +214,8 @@ tenant on first start and writes its key to `<data>/personal-api-key.txt`. To tr
 
 Point any MCP client that speaks Streamable HTTP at `http://127.0.0.1:8080/mcp` with the
 tenant's key in `Authorization: Bearer <key>` (and the user in `X-User-Id`). The tools:
-`search`, `read`, `graph`, `path`, `record_experience`, `record_decision`, `record_preference`
-and `propose_graph_change`.
+`search`, `read`, `graph`, `path`, `record_decision_or_lesson`, `record_preference` and
+`propose_graph_change`.
 
 ### Search over HTTP
 
@@ -258,7 +263,7 @@ None of them is part of this repository; each keeps its own license.
 |---|---|---|---|
 | [jina-embeddings-v2-base-zh](https://huggingface.co/jinaai/jina-embeddings-v2-base-zh) | page and query vectors | downloaded from Hugging Face on first use into `<data>/models` | Apache-2.0 |
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) | running the embedding model | prebuilt library linked into the binary at build time (through `ort`) | MIT |
-| [MarkItDown](https://github.com/microsoft/markitdown) | converting PDF and old Office files (optional) | the `converter` container image (`markitdown` compose profile) | MIT |
+| [MarkItDown](https://github.com/microsoft/markitdown) | converting old Office files (optional) | the `converter` container image (`markitdown` compose profile) | MIT |
 | [Python](https://www.python.org/) | the optional converter's runtime | the `python:3.12-slim` base image | PSF-2.0 |
 | [Svelte](https://svelte.dev/) and [d3-force](https://github.com/d3/d3-force) | the web console and its graph layout | compiled into `ui/dist`, embedded in the binary | MIT, ISC |
 | [three.js](https://threejs.org/) | the console's 3D hall | compiled into `ui/dist` (its own chunk), embedded in the binary | MIT |

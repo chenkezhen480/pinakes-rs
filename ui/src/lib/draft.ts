@@ -30,7 +30,13 @@ export function draftGraph(d: GraphDraft, existing: Set<string> = new Set()): { 
   return { nodes: [...nodes.values()], edges };
 }
 
-/** How many changes a draft holds. */
+/** How many changes a draft holds (deleting the space counts as one). */
 export function draftSize(d: GraphDraft): number {
-  return d.put_nodes.length + d.remove_nodes.length + d.add_edges.length + d.remove_edges.length;
+  return (d.delete_space ? 1 : 0) + d.put_nodes.length + d.remove_nodes.length + d.add_edges.length + d.remove_edges.length;
+}
+
+/** Nodes (all types) and edges a listed space holds, for saying what deleting it removes. */
+export function spaceCounts(s: { nodes: Record<string, number>; edges: number } | undefined): { nodes: number; edges: number } | null {
+  if (!s) return null;
+  return { nodes: Object.values(s.nodes).reduce((a, b) => a + b, 0), edges: s.edges };
 }

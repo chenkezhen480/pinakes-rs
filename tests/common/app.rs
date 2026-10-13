@@ -193,6 +193,14 @@ impl TestApp {
             Config::from_toml_str(&text).unwrap()
         };
         cfg.load_jwt_key(std::path::Path::new(".")).unwrap();
+        // The test binary isn't the service's, so the PDF reader isn't next to it. A config read
+        // from its file is left as the file says (the settings compare the two); those tests
+        // read no PDF.
+        if !from_file {
+            cfg.converter
+                .pdf_reader
+                .get_or_insert_with(|| env!("CARGO_BIN_EXE_pinakes-pdf").into());
+        }
         std::fs::create_dir_all(cfg.tenants_dir()).unwrap();
         let state = match switch {
             Some(switch) => {

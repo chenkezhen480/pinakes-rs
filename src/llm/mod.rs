@@ -23,6 +23,24 @@ pub struct Prompt {
     /// (Anthropic `output_config.format`, OpenAI `response_format`), so the reply is always one
     /// valid object of that shape.
     pub schema: serde_json::Value,
+    /// Pictures shown with the user message, before it (a scan's page); most prompts have none.
+    pub images: Vec<Image>,
+}
+
+/// A picture in a prompt.
+#[derive(Debug, Clone)]
+pub struct Image {
+    /// Its type, such as `image/png`.
+    pub media_type: &'static str,
+    pub data: Vec<u8>,
+}
+
+impl Image {
+    /// The picture in base64, as the APIs take it inline.
+    pub(crate) fn base64(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&self.data)
+    }
 }
 
 #[async_trait]

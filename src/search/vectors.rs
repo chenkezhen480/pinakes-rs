@@ -506,6 +506,10 @@ pub enum Earlier<'a> {
     Stored(Vec<StoredVector>),
 }
 
+/// The new vectors [`build_keeping`] hands over at a time: a few minutes of embedding a large
+/// wiki on a laptop's CPU at most.
+pub(crate) const KEEP_STEP: usize = 256;
+
 /// The vectors of a catalog's pages: an unchanged page keeps its earlier ones whole; for the
 /// others, earlier rows whose unit text is unchanged (same hash) are kept and the model embeds
 /// the rest. Blocking; runs the model.
@@ -513,6 +517,18 @@ pub fn build(
     catalog: &Catalog,
     earlier: Earlier<'_>,
     embedder: &dyn Embedder,
+) -> anyhow::Result<Built> {
+    build_keeping(catalog, earlier, embedder, &mut |_| {})
+}
+
+/// [`build`], handing each step of new vectors to `keep` as soon as they are made (to store
+/// them), so a build cut short doesn't lose them: the next one finds them stored. They are in
+/// [`Built::put`] too.
+pub fn build_keeping(
+    catalog: &Catalog,
+    earlier: Earlier<'_>,
+    embedder: &dyn Embedder,
+    keep: &mut dyn FnMut(&[StoredVector]),
 ) -> anyhow::Result<Built> {
     let dim = embedder.dim();
     // Earlier rows by page: (page vectors, or stored rows by heading).
@@ -598,29 +614,33 @@ pub fn build(
         drop.extend(rows.into_keys().map(|h| (path.clone(), h)));
     }
 
-    let texts: Vec<String> = missing.iter().map(|(_, u)| u.text.clone()).collect();
-    embedder.will_embed(texts.len());
-    let fresh = embedder.embed(&texts)?;
-    anyhow::ensure!(
-        fresh.len() == missing.len(),
-        "the embedding model returned {} vectors for {} texts",
-        fresh.len(),
-        missing.len()
-    );
+    embedder.will_embed(missing.len());
     let mut put = Vec::with_capacity(missing.len());
     let mut made: HashMap<(usize, String), Row> = HashMap::new();
-    for ((ord, u), v) in missing.into_iter().zip(fresh) {
+    for step in missing.chunks(KEEP_STEP) {
+        let texts: Vec<String> = step.iter().map(|(_, u)| u.text.clone()).collect();
+        let fresh = embedder.embed(&texts)?;
         anyhow::ensure!(
-            v.len() == dim,
-            "the embedding model returned a vector of another length"
+            fresh.len() == step.len(),
+            "the embedding model returned {} vectors for {} texts",
+            fresh.len(),
+            step.len()
         );
-        made.insert((ord, u.heading.clone()), quantize(&v));
-        put.push(StoredVector {
-            page: catalog.pages[ord].path.to_string(),
-            heading: u.heading,
-            hash: u.hash,
-            vector: v,
-        });
+        let from = put.len();
+        for ((ord, u), v) in step.iter().zip(fresh) {
+            anyhow::ensure!(
+                v.len() == dim,
+                "the embedding model returned a vector of another length"
+            );
+            made.insert((*ord, u.heading.clone()), quantize(&v));
+            put.push(StoredVector {
+                page: catalog.pages[*ord].path.to_string(),
+                heading: u.heading.clone(),
+                hash: u.hash.clone(),
+                vector: v,
+            });
+        }
+        keep(&put[from..]);
     }
     for (ord, rows) in partial {
         let mut pv = PageVectors {

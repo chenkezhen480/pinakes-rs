@@ -86,7 +86,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ),
     (
         "converter",
-        "The optional MarkItDown converter, for PDF and the old binary Office formats. The service reads Markdown, text, HTML, Word, spreadsheets and PowerPoint itself.",
+        "Converting files. The service reads Markdown, text, HTML, Word, spreadsheets, PowerPoint and PDF itself; the optional MarkItDown converter reads the old binary Office formats.",
     ),
     (
         "search",
@@ -245,12 +245,17 @@ pub const FIELDS: &[Field] = &[
     f(
         "converter.url",
         OptionalText,
-        "Where the MarkItDown converter answers, such as http://127.0.0.1:8090. Unset, PDF, .doc and .ppt files are refused with what to do.",
+        "Where the MarkItDown converter answers, such as http://127.0.0.1:8090. Unset, .doc, .xls and .ppt files are refused with what to do.",
     ),
     f(
         "converter.timeout_secs",
         Integer,
         "How long converting one file may take, in seconds, by the service or by MarkItDown.",
+    ),
+    f(
+        "converter.pdf_reader",
+        Path,
+        "The pinakes-pdf binary, which reads PDFs (and draws a scan's pages for the model) in a process of its own with its memory capped. Unset, the one next to the service's executable.",
     ),
     f(
         "search.slots.memories",
@@ -317,7 +322,7 @@ pub const FIELDS: &[Field] = &[
         ..f(
             "embedding.enabled",
             Boolean,
-            "Whether meaning-based search is on. Turning it on downloads the model (about 640 MB, once) and embeds every page once, without a restart; turning it off keeps the stored vectors.",
+            "Whether meaning-based search is on. Turning it on downloads the model (about 640 MB, once), keeps an 8-bit copy of it in its place (316 MB) and embeds every page once, without a restart; turning it off keeps the stored vectors.",
         )
     },
     f(
@@ -409,7 +414,7 @@ pub const ZH: &[(&str, &str)] = &[
     ),
     (
         "converter",
-        "可选的 MarkItDown 转换器，用于 PDF 和旧版二进制 Office 文件。Markdown、文本、HTML、Word、表格和 PowerPoint 由服务自行读取。",
+        "文件转换。Markdown、文本、HTML、Word、表格、PowerPoint 和 PDF 由服务自行读取；可选的 MarkItDown 转换器用于旧版二进制 Office 文件。",
     ),
     ("search", "检索如何排序，以及每个抽屉放多少条结果。"),
     ("trace", "检索轨迹，供回放使用。"),
@@ -507,11 +512,15 @@ pub const ZH: &[(&str, &str)] = &[
     ),
     (
         "converter.url",
-        "MarkItDown 转换器的地址，例如 http://127.0.0.1:8090。未设置时，PDF、.doc 和 .ppt 会被拒绝并说明怎么办。",
+        "MarkItDown 转换器的地址，例如 http://127.0.0.1:8090。未设置时，.doc、.xls 和 .ppt 会被拒绝并说明怎么办。",
     ),
     (
         "converter.timeout_secs",
         "转换一个文件的超时（服务自身或 MarkItDown），单位秒。",
+    ),
+    (
+        "converter.pdf_reader",
+        "pinakes-pdf 程序，在单独的进程里读取 PDF（并把扫描件的页面画成图片交给模型）并限制其内存。未设置时用服务程序同目录下的那个。",
     ),
     (
         "search.slots.memories",
@@ -563,7 +572,7 @@ pub const ZH: &[(&str, &str)] = &[
     ),
     (
         "embedding.enabled",
-        "是否开启语义检索。开启时会下载模型（约 640 MB，仅一次）并把每个页面嵌入一次，无需重启；关闭后保留已存的向量。",
+        "是否开启语义检索。开启时会下载模型（约 640 MB，仅一次）、只保留由它生成的 8 位版本（316 MB），并把每个页面嵌入一次，无需重启；关闭后保留已存的向量。",
     ),
     (
         "embedding.model",

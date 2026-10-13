@@ -1,12 +1,14 @@
-//! The four insert entry points the librarian files: `/ingest/experience`, `/decision`,
-//! `/expertise` and `/preference`. Each checks the record, saves it unchanged in `sources/`,
-//! queues a librarian job on the tenant's write queue and answers 202 with the job id
-//! (design, "The librarian: how new content is filed").
+//! The insert entry points the librarian files: `/ingest/experience`, `/decision`, `/expertise`
+//! and `/preference`, and `/ingest/note`, which the librarian splits into decisions and lessons.
+//! Each checks the record, saves it unchanged in `sources/`, queues a librarian job on the
+//! tenant's write queue and answers 202 with the job id (design, "The librarian: how new
+//! content is filed").
 //!
 //! The caller picks the audience in the audience header (`X-Audience`), like its identity and
 //! never in the body: `tenant`, `user` (the calling user) or `group:<id>` (one of the caller's
 //! own groups), among those the kind allows. Without it, experience and expertise are for the
-//! tenant, and decisions and preferences for the calling user.
+//! tenant, and decisions and preferences for the calling user; a note's decisions are the
+//! user's and its lessons the tenant's, unless the header names a group for both.
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -17,10 +19,10 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::AppState;
-use crate::convert::Converted;
+use crate::convert::{Converted, Read};
 use crate::error::ApiError;
 use crate::identity::Scope;
-use crate::jobs::JobInfo;
+use crate::jobs::{JobInfo, JobResult, NoteFiled};
 use crate::kinds::Kind;
 use crate::librarian::{DocumentIn, Ingest, PageAudience, Target, documents, sources};
 
@@ -104,6 +106,28 @@ pub(crate) struct PreferenceIn {
     entities: Vec<String>,
     #[serde(default)]
     date: Option<String>,
+}
+
+/// A note an agent recorded: a decision, a lesson or both, which the librarian splits (MCP
+/// `record_decision_or_lesson`).
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NoteIn {
+    /// What it is about, short: a decision's topic, or the kind of task a lesson is about.
+    topic: String,
+    /// What was decided and what was learned, with the exact numbers and conditions.
+    content: String,
+    /// The situation that led to it, and what came of it.
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    entities: Vec<String>,
+    #[serde(default)]
+    date: Option<String>,
+    /// The session the agent searched and read with (see [`read_pages`]).
+    #[serde(default)]
+    session: Option<String>,
 }
 
 /// What every record gives the job: the text and terms to find related pages with, and the
@@ -330,13 +354,25 @@ fn audience(kind: Kind, scope: &Scope, asked: Option<&str>) -> Result<Target, Ap
     Target::new(kind, audience).map_err(ApiError::BadRequest)
 }
 
-/// An uploaded file, already turned into the record's `content`.
+/// An uploaded file: already turned into the record's `content`, or a scan the model reads in
+/// the job.
 struct Upload {
     /// The name it was sent with, only ever kept as text.
     name: String,
     ext: String,
     bytes: axum::body::Bytes,
-    converted: Converted,
+    read: Read,
+}
+
+/// A record checked, and what its job needs to file it.
+struct Checked {
+    kind: Kind,
+    record: serde_json::Value,
+    parsed: Parsed,
+    target: Target,
+    document: Option<DocumentIn>,
+    /// The document id the caller sent, echoed in the answer.
+    echo: Option<String>,
 }
 
 async fn insert(
@@ -347,22 +383,105 @@ async fn insert(
     body: Result<Json<serde_json::Value>, JsonRejection>,
     upload: Option<Upload>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
-    let Json(mut record) = body?;
+    let Json(record) = body?;
+    let scan = match &upload {
+        Some(Upload {
+            read: Read::Scan { pages },
+            ..
+        }) => Some(*pages),
+        _ => None,
+    };
+    if let Some(pages) = scan {
+        let upload = upload.expect("a scan is an upload");
+        return insert_scan(app, scope, headers, kind, record, upload, pages).await;
+    }
+    let checked = check(&app, &scope, &headers, kind, record).await?;
+    let librarian = app.librarian()?;
+    let echo = checked.echo.clone();
+    let converted = upload.as_ref().and_then(|u| match &u.read {
+        Read::Text(c) => Some(c.clone()),
+        Read::Scan { .. } => None,
+    });
+    let file_of = upload.as_ref().zip(converted.as_ref());
+    let job = file(&scope, checked, file_of).await?;
+    Ok(queue(&app, &scope, librarian, job, echo))
+}
+
+/// A scanned PDF's upload: its fields are checked now, with a stand-in for its text, and the
+/// job has the model read the scan first, then checks the record again with the text, keeps it
+/// and files it as any other. If the model can't read the scan, the job fails with why and
+/// nothing is kept.
+async fn insert_scan(
+    app: AppState,
+    scope: Scope,
+    headers: HeaderMap,
+    kind: Kind,
+    mut record: serde_json::Value,
+    upload: Upload,
+    pages: usize,
+) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
+    let mut stand_in = record.clone();
+    if let Some(o) = stand_in.as_object_mut() {
+        o.insert("content".into(), json!("(a scan, read by the model)"));
+    }
+    let checked = check(&app, &scope, &headers, kind, stand_in).await?;
+    let librarian = app.librarian()?;
+    let echo = checked.echo.clone();
+    let tenant = scope.tenant().clone();
+    let (owner, dir_name) = (scope.user().map(|u| u.dir.clone()), tenant.dir_name.clone());
+    let jobs_app = app.clone();
+    let work: crate::jobs::Work = Box::pin(async move {
+        let markdown = librarian
+            .transcribe(&app.converter, &upload.bytes, pages)
+            .await?;
+        if let Some(o) = record.as_object_mut() {
+            o.insert("content".into(), json!(markdown));
+        }
+        let checked = check(&app, &scope, &headers, kind, record).await?;
+        let converted = Converted {
+            markdown,
+            converter: crate::convert::MODEL_NAME.into(),
+            version: librarian.model_name(),
+            links: Vec::new(),
+        };
+        let job = file(&scope, checked, Some((&upload, &converted))).await?;
+        librarian.ingest(tenant, job).await
+    });
+    let info = jobs_app
+        .jobs
+        .submit(&dir_name, owner.as_deref(), kind.as_str(), work);
+    tracing::info!(job = %info.job, pages, "scan queued for the model to read");
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(JobInfo {
+            document: echo,
+            ..info
+        }),
+    ))
+}
+
+/// The record checked: its fields, its audience, and the document it names.
+async fn check(
+    app: &AppState,
+    scope: &Scope,
+    headers: &HeaderMap,
+    kind: Kind,
+    mut record: serde_json::Value,
+) -> Result<Checked, ApiError> {
     if !record.is_object() {
         return Err(ApiError::BadRequest(
             "the body must be a JSON object".into(),
         ));
     }
-    let parsed = parse_kind(kind, &record)?;
+    let mut parsed = parse_kind(kind, &record)?;
     // The session only says which reads to look at; it is no part of what happened, so it is
     // neither kept with the record nor shown to the librarian.
     if let Some(o) = record.as_object_mut() {
         o.remove("session");
     }
-    let asked = audience_header(&app, &headers)?;
-    let mut target = audience(kind, &scope, asked.as_deref())?;
-    let librarian = app.librarian()?;
-    let tenant = scope.tenant().clone();
+    let asked = audience_header(app, headers)?;
+    let mut target = audience(kind, scope, asked.as_deref())?;
+    let tenant = scope.tenant();
 
     // A document named by its id: one the caller can see. Its pages keep their audience.
     let mut given = None;
@@ -382,25 +501,52 @@ async fn insert(
         given = Some(doc);
     }
     let echo = given.as_ref().map(|d| d.id.clone());
-    let document = parsed.document.map(|(title, content, _)| DocumentIn {
-        given,
-        title,
-        content,
-    });
+    let document = parsed
+        .document
+        .take()
+        .map(|(title, content, _)| DocumentIn {
+            given,
+            title,
+            content,
+        });
+    Ok(Checked {
+        kind,
+        record,
+        parsed,
+        target,
+        document,
+        echo,
+    })
+}
 
-    // Step 1: the raw record is kept unchanged before anything else happens; an uploaded file
-    // is kept too, next to it, and the record says what it was and what converted it.
+/// Step 1: the raw record is kept unchanged before anything else happens; an uploaded file is
+/// kept too, next to it, and the record says what it was and what converted it. Returns the
+/// job that files it.
+async fn file(
+    scope: &Scope,
+    checked: Checked,
+    upload: Option<(&Upload, &Converted)>,
+) -> Result<Ingest, ApiError> {
+    let Checked {
+        kind,
+        mut record,
+        parsed,
+        target,
+        document,
+        ..
+    } = checked;
+    let tenant = scope.tenant();
     let today = crate::trace::now_rfc3339()[..10].to_owned();
     let source = sources::new_name(kind, &today);
-    let original = match &upload {
+    let original = match upload {
         None => None,
-        Some(u) => {
+        Some((u, converted)) => {
             let original = format!("{}.{}", source.trim_end_matches(".json"), u.ext);
             record["file"] = json!({
                 "name": u.name,
                 "original": original,
-                "converter": u.converted.converter,
-                "version": u.converted.version,
+                "converter": converted.converter,
+                "version": converted.version,
             });
             Some((original, u.bytes.clone()))
         }
@@ -422,17 +568,29 @@ async fn insert(
     .map_err(anyhow::Error::from)?
     .map_err(anyhow::Error::from)?;
 
-    let job = Ingest {
+    Ok(Ingest {
         target,
         writer: scope.clone(),
-        read: read_pages(&scope, parsed.session.as_deref()),
+        read: read_pages(scope, parsed.session.as_deref()),
         record,
         source,
         query: parsed.query,
         keywords: parsed.keywords,
         entities: parsed.entities,
         document,
-    };
+    })
+}
+
+/// Queues the job that files a kept record, and answers 202 with it.
+fn queue(
+    app: &AppState,
+    scope: &Scope,
+    librarian: std::sync::Arc<crate::librarian::Librarian>,
+    job: Ingest,
+    echo: Option<String>,
+) -> (StatusCode, Json<JobInfo>) {
+    let tenant = scope.tenant().clone();
+    let kind = job.target.kind;
     let owner = scope.user().map(|u| u.dir.clone());
     let dir_name = tenant.dir_name.clone();
     // A record waits to be filed with the records queued alongside it; a document is read.
@@ -449,7 +607,7 @@ async fn insert(
         ..info
     };
     tracing::info!(job = %info.job, kind = kind.as_str(), "record queued for the librarian");
-    Ok((StatusCode::ACCEPTED, Json(info)))
+    (StatusCode::ACCEPTED, Json(info))
 }
 
 #[tracing::instrument(name = "ingest_experience", skip_all)]
@@ -474,7 +632,8 @@ pub async fn decision(
 
 /// `POST /ingest/expertise`: a document as JSON (`title`, `content`, …), or as a file
 /// (`multipart/form-data`: the `file` and the same fields as text, `entities` repeated; the
-/// title defaults to the file name). A file is turned into Markdown first.
+/// title defaults to the file name). A file is turned into Markdown first; a scanned PDF is
+/// read by the model in the job.
 #[tracing::instrument(name = "ingest_expertise", skip_all)]
 pub async fn expertise(
     State(app): State<AppState>,
@@ -507,7 +666,7 @@ pub async fn expertise(
     .await
 }
 
-/// The record a file upload stands for, and the file, converted.
+/// The record a file upload stands for, and the file, converted (or found to be a scan).
 async fn read_upload(
     app: &AppState,
     mut form: Multipart,
@@ -564,14 +723,17 @@ async fn read_upload(
     if !record.contains_key("title") && !stem.trim().is_empty() {
         record.insert("title".into(), json!(stem.trim()));
     }
-    let converted = app.converter.convert(&ext, bytes.clone()).await?;
-    record.insert("content".into(), json!(converted.markdown));
+    // A scan's text is written by the model, in the job.
+    let read = app.converter.read(&ext, bytes.clone()).await?;
+    if let Read::Text(converted) = &read {
+        record.insert("content".into(), json!(converted.markdown));
+    }
     record.insert("entities".into(), json!(entities));
     let upload = Upload {
         name,
         ext,
         bytes,
-        converted,
+        read,
     };
     Ok((serde_json::Value::Object(record), upload))
 }
@@ -584,4 +746,135 @@ pub async fn preference(
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
     insert(app, scope, headers, Kind::Preference, body, None).await
+}
+
+/// `POST /ingest/note`: a decision, a lesson or both, as an agent recorded it in the turn (MCP
+/// `record_decision_or_lesson`). The note is kept as it came, for the user who sent it, and the
+/// job has the librarian split it: each decision is filed for the user, each lesson for the
+/// tenant, as `/ingest/decision` and `/ingest/experience` would file them (each a record of its
+/// own, citing the note). `X-Audience: group:<id>` files both for that group; no other audience
+/// fits both kinds.
+#[tracing::instrument(name = "ingest_note", skip_all)]
+pub async fn note(
+    State(app): State<AppState>,
+    scope: Scope,
+    headers: HeaderMap,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> Result<(StatusCode, Json<JobInfo>), ApiError> {
+    let Json(mut record) = body?;
+    if !record.is_object() {
+        return Err(ApiError::BadRequest(
+            "the body must be a JSON object".into(),
+        ));
+    }
+    let r: NoteIn = parse(&record)?;
+    date(&r.date)?;
+    let topic = field("topic", &r.topic, 200)?;
+    let content = field("content", &r.content, MAX_FIELD)?;
+    let context = optional("context", &r.context)?;
+    let entities = entities(&r.entities)?;
+    let session = session(&r.session)?;
+    if let Some(o) = record.as_object_mut() {
+        o.remove("session");
+    }
+    let (decisions, lessons) = match audience_header(&app, &headers)?.as_deref() {
+        None => {
+            let user = scope.user().ok_or_else(|| {
+                ApiError::BadRequest(
+                    "a note needs the user header: its decisions are filed for the user".into(),
+                )
+            })?;
+            (PageAudience::User(user.dir.clone()), PageAudience::Tenant)
+        }
+        Some(a) if a.starts_with("group:") => {
+            let group = audience(Kind::Decision, &scope, Some(a))?.audience;
+            (group.clone(), group)
+        }
+        Some(a) => {
+            return Err(ApiError::BadRequest(format!(
+                "a note's decisions are filed for the user and its lessons for the tenant; {} \
+                 may only name one of the caller's groups (group:<id>) for both, not {a:?}",
+                app.config.identity.audience_header
+            )));
+        }
+    };
+    let librarian = app.librarian()?;
+    let tenant = scope.tenant().clone();
+    let today = crate::trace::now_rfc3339()[..10].to_owned();
+    let source = sources::new_note_name(&today);
+    // Kept for whom its decisions are, so deleting the user (or group) deletes it.
+    tenant.store.add_record(&source, decisions.key()).await?;
+    let (dir, name, rec) = (tenant.dir.clone(), source.clone(), record.clone());
+    tokio::task::spawn_blocking(move || sources::save(&dir, &name, &rec))
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(anyhow::Error::from)?;
+
+    let read = read_pages(&scope, session.as_deref());
+    let text = [topic.as_str(), content.as_str(), context.as_str()]
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let owner = scope.user().map(|u| u.dir.clone());
+    let dir_name = tenant.dir_name.clone();
+    let work: crate::jobs::Work = Box::pin(async move {
+        let items = librarian.split_note(&topic, &text).await?;
+        let mut result = JobResult {
+            source: Some(format!("sources/{source}")),
+            ..JobResult::default()
+        };
+        for item in items {
+            let kind = item.kind.kind();
+            let audience = match kind {
+                Kind::Decision => decisions.clone(),
+                _ => lessons.clone(),
+            };
+            let target = Target::new(kind, audience).map_err(anyhow::Error::msg)?;
+            let mut filed = match kind {
+                Kind::Decision => json!({ "topic": item.title, "decision": item.text }),
+                _ => json!({ "task": item.title, "outcome": item.text }),
+            };
+            filed["entities"] = json!(entities);
+            if let Some(d) = &r.date {
+                filed["date"] = json!(d);
+            }
+            filed["note"] = json!(source);
+            let checked = Checked {
+                kind,
+                record: filed,
+                parsed: Parsed {
+                    query: format!("{}\n{}", item.title, item.text),
+                    keywords: vec![item.title.clone()],
+                    entities: entities.clone(),
+                    document: None,
+                    session: None,
+                },
+                target,
+                document: None,
+                echo: None,
+            };
+            let mut job = file(&scope, checked, None).await?;
+            job.read = read.clone();
+            let record_source = job.source.clone();
+            let audience = job.target.audience.key().to_owned();
+            let done = librarian.ingest(tenant.clone(), job).await?;
+            result.pages_created.extend(done.pages_created);
+            result.pages_updated.extend(done.pages_updated);
+            result.rejected.extend(done.rejected);
+            if result.proposal.is_none() {
+                result.proposal = done.proposal.clone();
+            }
+            result.split.push(NoteFiled {
+                kind: kind.as_str().to_owned(),
+                audience,
+                source: format!("sources/{record_source}"),
+                proposal: done.proposal,
+            });
+        }
+        Ok(result)
+    });
+    let info = app.jobs.submit(&dir_name, owner.as_deref(), "note", work);
+    tracing::info!(job = %info.job, "note queued for the librarian");
+    Ok((StatusCode::ACCEPTED, Json(info)))
 }

@@ -1,0 +1,15 @@
+# Everything the comparison makes: environments, stores, runs, logs, keys.
+venv-*/
+stores/
+pi/
+scale/
+results/
+pinakes-data/
+pinakes-scale-data/
+pinakes*.toml
+pinakes*-keys.json
+pinakes*-load.txt
+*.log
+*.jsonl
+__pycache__/
+models/

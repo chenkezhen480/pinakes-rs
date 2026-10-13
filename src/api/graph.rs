@@ -4,6 +4,7 @@
 //! from a visible node only ever reaches its own space. No LLM, no Neo4j.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use axum::Json;
 use axum::extract::State;
@@ -20,6 +21,7 @@ use crate::kinds::Kind;
 use crate::search::relations::{Edge, edge_out};
 use crate::search::tracker::ReadState;
 use crate::search::{SearchSnapshot, validate_session};
+use crate::trace::{Endpoint, TraceRecord};
 
 /// Nodes a walk returns when the caller doesn't say.
 const DEFAULT_MAX_NODES: usize = 25;
@@ -30,7 +32,7 @@ const MAX_PATH_HOPS: usize = 6;
 /// Most relation types a caller may filter on.
 const MAX_RELATIONS: usize = 50;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct GraphRequest {
@@ -204,6 +206,7 @@ pub async fn graph(
     scope: Scope,
     body: Result<Json<GraphRequest>, JsonRejection>,
 ) -> Result<Json<GraphResponse>, ApiError> {
+    let started = Instant::now();
     let Json(req) = body?;
     let cfg = &app.config.graph;
     let depth = req.depth.unwrap_or(1);
@@ -244,7 +247,7 @@ pub async fn graph(
     let snap = tenant.snapshot().await?;
     let reads = scope.read_state(req.session.as_deref());
     let pages = anchored_pages(&snap, &g, &scope, &found.nodes, &reads);
-    Ok(Json(GraphResponse {
+    let response = GraphResponse {
         node: node_out(&g, start, 0),
         nodes: found
             .nodes
@@ -254,10 +257,41 @@ pub async fn graph(
         edges: found.edges.iter().map(|&e| edge_out(&g, e, None)).collect(),
         pages,
         truncated: found.truncated,
-    }))
+    };
+    let mut record = trace_record(&app, &scope, Endpoint::Graph, &g, &req, started);
+    record.snapshot = Some(snap.version.clone());
+    record.result = serde_json::json!({
+        "nodes": response.nodes.iter().map(|n| &n.id).collect::<Vec<_>>(),
+        "edges": response.edges.len(),
+        "pages": response.pages.iter().map(|p| &p.page).collect::<Vec<_>>(),
+        "truncated": response.truncated,
+    });
+    app.traces.record(record);
+    Ok(Json(response))
 }
 
-#[derive(Debug, Deserialize)]
+/// A follow-up's trace line: who asked what, on which graph, and how long it took. Only
+/// answered calls leave one, as with `/read`.
+fn trace_record(
+    app: &AppState,
+    scope: &Scope,
+    endpoint: Endpoint,
+    g: &GraphSnapshot,
+    req: &impl Serialize,
+    started: Instant,
+) -> TraceRecord {
+    let mut record = scope.trace_record(endpoint);
+    record.graph = Some(g.version.clone());
+    record.search_config = app.search_fingerprint().to_owned();
+    record.request = serde_json::to_value(req).unwrap_or_default();
+    record.timings_us.insert(
+        "total".into(),
+        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+    );
+    record
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct PathRequest {
@@ -282,10 +316,11 @@ pub struct PathResponse {
 
 #[tracing::instrument(name = "graph_path", skip_all)]
 pub async fn path(
-    State(_app): State<AppState>,
+    State(app): State<AppState>,
     scope: Scope,
     body: Result<Json<PathRequest>, JsonRejection>,
 ) -> Result<Json<PathResponse>, ApiError> {
+    let started = Instant::now();
     let Json(req) = body?;
     if let Some(s) = &req.session {
         validate_session(s).map_err(ApiError::BadRequest)?;
@@ -301,23 +336,32 @@ pub async fn path(
         }
         walk::shortest_path(&g.graph, from, to, follows(&g, &filter), MAX_PATH_HOPS)
     });
-    let Some(chain) = chain else {
-        return Ok(Json(PathResponse {
+    let response = match chain {
+        None => PathResponse {
             found: false,
             nodes: Vec::new(),
             edges: Vec::new(),
-        }));
+        },
+        Some(chain) => {
+            let mut nodes = vec![node_out(&g, from, 0)];
+            let mut at = from;
+            for (i, &e) in chain.iter().enumerate() {
+                let (a, b) = g.graph.edge_endpoints(e).expect("edge exists");
+                at = if a == at { b } else { a };
+                nodes.push(node_out(&g, at, i + 1));
+            }
+            PathResponse {
+                found: true,
+                nodes,
+                edges: chain.iter().map(|&e| edge_out(&g, e, None)).collect(),
+            }
+        }
     };
-    let mut nodes = vec![node_out(&g, from, 0)];
-    let mut at = from;
-    for (i, &e) in chain.iter().enumerate() {
-        let (a, b) = g.graph.edge_endpoints(e).expect("edge exists");
-        at = if a == at { b } else { a };
-        nodes.push(node_out(&g, at, i + 1));
-    }
-    Ok(Json(PathResponse {
-        found: true,
-        nodes,
-        edges: chain.iter().map(|&e| edge_out(&g, e, None)).collect(),
-    }))
+    let mut record = trace_record(&app, &scope, Endpoint::Path, &g, &req, started);
+    record.result = serde_json::json!({
+        "found": response.found,
+        "nodes": response.nodes.iter().map(|n| &n.id).collect::<Vec<_>>(),
+    });
+    app.traces.record(record);
+    Ok(Json(response))
 }

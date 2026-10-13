@@ -144,13 +144,17 @@ pub struct EmbeddingConfig {
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConverterConfig {
-    /// Where it answers `POST /convert`, such as `http://127.0.0.1:8090`. Unset, only Markdown
-    /// and text files can be uploaded.
+    /// Where MarkItDown answers `POST /convert`, such as `http://127.0.0.1:8090`. Unset, the
+    /// old binary Office formats are refused with what to do.
     #[serde(default)]
     pub url: Option<String>,
     /// Timeout of one conversion.
     #[serde(default = "default_convert_timeout")]
     pub timeout_secs: u64,
+    /// The `pinakes-pdf` binary that reads PDFs in a process of its own; unset, the one next to
+    /// the service's executable.
+    #[serde(default)]
+    pub pdf_reader: Option<PathBuf>,
 }
 
 impl Default for ConverterConfig {
@@ -158,6 +162,7 @@ impl Default for ConverterConfig {
         Self {
             url: None,
             timeout_secs: default_convert_timeout(),
+            pdf_reader: None,
         }
     }
 }

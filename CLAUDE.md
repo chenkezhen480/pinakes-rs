@@ -63,15 +63,21 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   tenant's `wiki_writer` lock; code, never the LLM, writes `kind`, `updated` and `sources`.
 - Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
 - Files are converted by the service itself (`src/convert/`, pure Rust: HTML, DOCX, XLSX/XLSM (read
-  cell by cell), CSV, PPTX; decided 2026-10-10, replacing "the service never parses Word, PDF or HTML itself").
+  cell by cell), CSV, PPTX, PDF; decided 2026-10-10, replacing "the service never parses Word, PDF or HTML itself").
   Every reader is bounded: the file's size, a zip's entries, unpacked size and ratio checked before
   anything is read, XML without entities or external references, nesting and cell caps, the
-  Markdown's length, a time limit; bytes in, Markdown out (no paths, no network). PDF, `.doc`, `.xls`
-  and `.ppt` go to the optional MarkItDown container (`converter/`, compose profile `markitdown`) only
-  when `[converter] url` is set, and are refused (415) with what to do otherwise. On the host:
+  Markdown's length, a time limit; bytes in, Markdown out (no paths, no network). PDF's reader
+  (pdfni) isn't ours, so it never runs in the service's process: the service's second binary
+  `pinakes-pdf` reads each PDF in a process of its own, its memory capped by its allocator and killed
+  past the deadline (`convert::pdf`; decided 2026-10-12). An uploaded scan (no text layer) is read
+  by the model in the job: `pinakes-pdf` draws each page as a PNG (hayro) and the model transcribes
+  it (`librarian::transcribe`); a model that refuses the pictures fails the job at once with its
+  answer. `.doc`, `.xls` and `.ppt`, and PDFs the service can't read, go to the optional
+  MarkItDown container (`converter/`, compose profile `markitdown`) only when `[converter] url` is
+  set, and are refused (415, 422) with what to do otherwise. On the host:
   `docker compose --profile dev up -d --build converter-dev` (127.0.0.1:8090);
   `PINAKES_TEST_CONVERTER=http://127.0.0.1:8090 cargo test --test integration convert::` compares
-  both converters on every fixture and runs a PDF through MarkItDown (skipped without the variable).
+  both converters on every fixture (skipped without the variable).
 - Expertise documents get ids from the service (`d_…`), never from the host. A new version
   finds the pages of earlier ones through the raw records they cite (`sources`), not by
   similarity. Code never interprets a document's structure; the model reads it from the top
@@ -83,11 +89,16 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   `users/u_…`). `Kind::audiences()` and the path layout must agree. A page may anchor only to
   pages and nodes everyone who can read it can see.
 - MCP tools (`src/mcp.rs`) call the HTTP handlers they stand for; their descriptions live in
-  `prompts/tools/` and teach the retrieval strategy. Keep their parameters few; `session` comes
-  back from `search` and is passed on (MCP 2026-07-28 has no protocol sessions; an older
-  client's `Mcp-Session-Id` stands in). Trying them with a real agent: Pi (`pi`, with
-  `pi-mcp-extension`, `.pi/mcp.json` naming `/mcp` and the key/user headers), run with
-  `< /dev/null` in `-p` mode or it waits for stdin.
+  `prompts/tools/` and teach the retrieval strategy, and ask the agent to record preferences,
+  standing facts, decisions and lessons unprompted in the turn (measured by
+  `compare/record_eval.py`; chat transcripts are never taken in). Decisions and lessons share
+  one tool (`record_decision_or_lesson`, `/ingest/note`): the librarian splits the note,
+  decisions for the user and lessons for the tenant, and keeps what it can't tell apart as the
+  user's decision (`librarian::note`). Keep their parameters few;
+  `session` comes back from `search` and is passed on (MCP 2026-07-28 has no protocol sessions;
+  an older client's `Mcp-Session-Id` stands in). Trying them with a real agent: Pi 1.1 (its own
+  MCP client, `.pi/mcp.json` naming `/mcp` and the key/user headers, setup in `compare/`), run
+  with `< /dev/null` in `-p` mode or it waits for stdin.
 - `/search` is the only search entry for agents. `/graph`, `/graph/path` and `/read` only take ids
   that `/search` returns. The browsing endpoints for people and host code (`/pages`, `/history`,
   `/graph/schemas`, `/graph/spaces`, `/graph/nodes`; confirmed 2026-10-10) list what a caller may
@@ -102,7 +113,9 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   `embed::Switch`, written back to the config file); every user asks the switch per use
   (`Embedder::ready`), never caches whether it is on.
 - Languages are Chinese and English only. Embeddings use jina-embeddings-v2-base-zh (`src/embed.rs`,
-  fixed revision, no prefixes), chosen on the test set (design.md "As built in M5"). Page vectors
+  fixed revision, no prefixes), chosen on the test set (design.md "As built in M5"), run with 8-bit
+  weights the service quantizes itself after the download (`embed::quantize`, onnxruntime's
+  `MatMulNBits`, checked against a pinned SHA-256; design.md "An 8-bit model"). Page vectors
   are built when the snapshot is (`search::vectors`) and kept in SQLite by page, heading and text
   hash. Tests use `common::embed::Fake`; the real model runs with
   `PINAKES_TEST_EMBEDDING=1 cargo test --test integration meaning_testset:: -- --nocapture` (downloads it into
@@ -154,6 +167,11 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   over the snapshot's int8 rows; `index/vectors-<slot>.hnsw` holds only lists and 64-bit keys),
   from `[search] vector_graph_rows` rows on; it follows every snapshot update, deletions
   included. `PINAKES_TEST_GRAPH_ROWS=1` forces it in `meaning_testset`.
+
+- The comparison with Mem0, Graphiti, LightRAG and Hindsight through Pi (`compare/`, Python, its own
+  environments; results and method in `docs/comparison.md`): measurement scripts, not part of the
+  service; everything they make stays in `compare/` and is git-ignored. Speed runs need an idle
+  machine.
 
 - The whole stack: `docker compose up -d --build` (needs `model.conf`;
   the image's config is `docker/config.toml`, kept in step with `config.toml`). The test chat

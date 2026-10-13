@@ -125,7 +125,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         shutdown.cancel();
     })
     .await?;
-    // Lines still queued when the server stops are written before exiting.
+    // Job status still being saved, and trace lines still queued, are written before exiting.
+    state.jobs.flush().await;
     tokio::task::spawn_blocking(move || state.traces.flush()).await?;
     Ok(())
 }

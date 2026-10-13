@@ -19,9 +19,11 @@ mod batch;
 pub mod documents;
 pub mod edit;
 pub mod lint;
+pub mod note;
 pub mod prompts;
 mod reading;
 pub mod sources;
+mod transcribe;
 
 pub use documents::{Document, DocumentMatch};
 pub use edit::{Edit, PageAudience, Target};
@@ -271,12 +273,18 @@ impl Librarian {
         self.llm.clone()
     }
 
+    /// The model's name, as the model file gives it.
+    pub fn model_name(&self) -> String {
+        self.cfg.llm.model().unwrap_or_default()
+    }
+
     fn prompt(&self, system: &str, user: String, schema: serde_json::Value) -> Prompt {
         Prompt {
             system: system.to_owned(),
             user,
             max_tokens: self.cfg.max_tokens,
             schema,
+            images: Vec::new(),
         }
     }
 

@@ -80,6 +80,7 @@ fn generate() -> String {
     export::<api::insert::DecisionIn>(&cfg);
     export::<api::insert::ExpertiseIn>(&cfg);
     export::<api::insert::PreferenceIn>(&cfg);
+    export::<api::insert::NoteIn>(&cfg);
     export::<api::read::ReadRequest>(&cfg);
     export::<api::read::ReadResponse>(&cfg);
     export::<api::lint::LintReport>(&cfg);
@@ -90,6 +91,8 @@ fn generate() -> String {
     export::<api::ingest::DataResponse>(&cfg);
     export::<crate::graph::def::SchemaDef>(&cfg);
     export::<crate::graph::def::SpaceRequest>(&cfg);
+    export::<crate::graph::def::SpaceAccess>(&cfg);
+    export::<api::ingest::SpaceDeleted>(&cfg);
     export::<crate::graph::def::DataRequest>(&cfg);
     export::<api::draft::DraftRequest>(&cfg);
     export::<api::draft::DraftView>(&cfg);

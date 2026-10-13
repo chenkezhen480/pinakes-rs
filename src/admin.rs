@@ -430,6 +430,7 @@ impl AppState {
                 "required": ["ok"],
                 "additionalProperties": false
             }),
+            images: Vec::new(),
         };
         let reply = llm::once(client.complete(&prompt)).await;
         let ms = started.elapsed().as_millis() as u64;

@@ -109,6 +109,7 @@ async fn run(
         Owner::User(_) => "delete_user",
         Owner::Group(_) => "delete_group",
     };
+    let jobs = app.jobs.clone();
     let job = app
         .jobs
         .run(
@@ -116,7 +117,7 @@ async fn run(
             None,
             kind,
             Box::pin(async move {
-                let _ = tx.send(deletion::delete(&tenant, &owner, &actor).await?);
+                let _ = tx.send(deletion::delete(&tenant, &owner, &actor, &jobs).await?);
                 Ok(JobResult::default())
             }),
         )

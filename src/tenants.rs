@@ -254,13 +254,24 @@ impl Tenant {
             .clone()
     }
 
-    /// The current search snapshot, built from the wiki on first use. Concurrent first
-    /// searches wait for one build instead of each running their own.
-    pub async fn snapshot(&self) -> anyhow::Result<Arc<SearchSnapshot>> {
+    /// The current search snapshot, built from the wiki on first use. The build runs as a task
+    /// of its own: a caller that stops waiting (its client gone) doesn't stop it, and callers
+    /// meanwhile wait for that one build instead of each running their own. (Built inside the
+    /// request, a large tenant whose pages all needed embedding started over with every request
+    /// that gave up first; found by the comparison, `docs/comparison.md`.)
+    pub async fn snapshot(self: &Arc<Self>) -> anyhow::Result<Arc<SearchSnapshot>> {
         self.touch();
         if let Some(s) = self.current_snapshot() {
             return Ok(s);
         }
+        let tenant = self.clone();
+        tokio::spawn(async move { tenant.open_once().await })
+            .await
+            .context("building the search snapshot panicked")?
+    }
+
+    /// The snapshot, built unless another build made it meanwhile.
+    async fn open_once(&self) -> anyhow::Result<Arc<SearchSnapshot>> {
         let _building = self.building.lock().await;
         if let Some(s) = self.current_snapshot() {
             return Ok(s);
@@ -300,6 +311,20 @@ impl Tenant {
             *self.search.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(next));
         }
         Ok(())
+    }
+
+    /// Lets go of the search snapshot when it holds page vectors (embeddings were turned off),
+    /// so their memory comes back now rather than at the idle sweep; the next search builds
+    /// it again without them. Says whether it did.
+    pub async fn drop_vectors(&self) -> bool {
+        let _building = self.building.lock().await;
+        let mut search = self.search.write().unwrap_or_else(|e| e.into_inner());
+        if search.as_ref().is_some_and(|s| s.vectors.is_some()) {
+            *search = None;
+            tracing::info!(tenant = %self.dir_name, "page vectors released from memory");
+            return true;
+        }
+        false
     }
 
     fn index_dir(&self) -> Option<PathBuf> {
@@ -429,7 +454,7 @@ impl Tenant {
         snapshot: SearchSnapshot,
         previous: Option<&Arc<SearchSnapshot>>,
     ) -> anyhow::Result<SearchSnapshot> {
-        use crate::search::vectors::{Earlier, build};
+        use crate::search::vectors::{Earlier, build_keeping};
         // A model still loading adds the vectors when it is in (`add_missing_vectors`).
         let Some(embedder) = self.embedder.clone().filter(|e| e.ready()) else {
             return Ok(snapshot);
@@ -467,6 +492,15 @@ impl Tenant {
         let started = Instant::now();
         let graph_dir = self.writable.then(|| self.dir.join("index"));
         let graph_rows = self.vector_graph_rows;
+        // New vectors are stored a step at a time as they are made, so a build cut short (the
+        // service stopped, the model turned off) keeps what it embedded.
+        let keeper = self.writable.then(|| {
+            (
+                self.store.clone(),
+                tokio::runtime::Handle::current(),
+                self.dir_name.clone(),
+            )
+        });
         let (built, mut snapshot) = tokio::task::spawn_blocking(move || {
             let earlier = match previous.as_ref() {
                 Some(p) => {
@@ -474,31 +508,45 @@ impl Tenant {
                 }
                 None => Earlier::Stored(stored),
             };
-            let built = build(&snapshot.catalog, earlier, &*embedder).and_then(|mut built| {
-                // The graph index over the rows, when there are enough of them.
-                let started = Instant::now();
-                let before = previous
-                    .as_ref()
-                    .map(|p| (p.vectors.as_ref().expect("checked above"), &p.catalog));
-                let change = crate::search::vectors::index(
-                    &mut built.vectors,
-                    &snapshot.catalog,
-                    before,
-                    graph_dir.as_deref(),
-                    graph_rows,
-                )?;
-                if let Some(c) = change.filter(|c| c.added > 0 || c.removed > 0) {
-                    tracing::info!(
-                        kept = c.kept,
-                        added = c.added,
-                        removed = c.removed,
-                        from_file = c.from_file,
-                        ms = started.elapsed().as_millis() as u64,
-                        "vector graph updated"
-                    );
+            let model = embedder.model().to_owned();
+            let mut keep = |made: &[crate::store::StoredVector]| {
+                let Some((store, runtime, tenant)) = &keeper else {
+                    return;
+                };
+                // The vectors are good either way; unstored ones are made again after a restart.
+                if let Err(e) =
+                    runtime.block_on(store.sync_embeddings(&model, made.to_vec(), Vec::new()))
+                {
+                    tracing::warn!(%tenant, error = %format!("{e:#}"), "page vectors not stored");
                 }
-                Ok(built)
-            });
+            };
+            let built = build_keeping(&snapshot.catalog, earlier, &*embedder, &mut keep).and_then(
+                |mut built| {
+                    // The graph index over the rows, when there are enough of them.
+                    let started = Instant::now();
+                    let before = previous
+                        .as_ref()
+                        .map(|p| (p.vectors.as_ref().expect("checked above"), &p.catalog));
+                    let change = crate::search::vectors::index(
+                        &mut built.vectors,
+                        &snapshot.catalog,
+                        before,
+                        graph_dir.as_deref(),
+                        graph_rows,
+                    )?;
+                    if let Some(c) = change.filter(|c| c.added > 0 || c.removed > 0) {
+                        tracing::info!(
+                            kept = c.kept,
+                            added = c.added,
+                            removed = c.removed,
+                            from_file = c.from_file,
+                            ms = started.elapsed().as_millis() as u64,
+                            "vector graph updated"
+                        );
+                    }
+                    Ok(built)
+                },
+            );
             (built, snapshot)
         })
         .await
@@ -517,11 +565,12 @@ impl Tenant {
                 ms = started.elapsed().as_millis() as u64,
                 "page vectors updated"
             );
-            // The vectors are good either way; unstored ones are made again after a restart.
-            if let Err(e) = self
-                .store
-                .sync_embeddings(&built.vectors.model, built.put, built.drop)
-                .await
+            // The new ones are stored already; the units that are gone leave now.
+            if !built.drop.is_empty()
+                && let Err(e) = self
+                    .store
+                    .sync_embeddings(&built.vectors.model, Vec::new(), built.drop)
+                    .await
             {
                 tracing::warn!(tenant = %self.dir_name, error = %format!("{e:#}"), "page vectors not stored");
             }
@@ -584,12 +633,22 @@ impl Tenant {
     ///
     /// After a failed load, calls fail at once for [`GRAPH_RETRY_AFTER`] instead of each
     /// waiting on an unreachable store again; requests queued behind the failed load too.
-    pub async fn graph(&self) -> anyhow::Result<Arc<GraphSnapshot>> {
+    pub async fn graph(self: &Arc<Self>) -> anyhow::Result<Arc<GraphSnapshot>> {
         self.touch();
         if let Some(g) = self.current_graph() {
             return Ok(g);
         }
         self.check_graph_failure()?;
+        // A task of its own, as the search snapshot's: a caller that gives up doesn't throw the
+        // load away.
+        let tenant = self.clone();
+        tokio::spawn(async move { tenant.load_graph_once().await })
+            .await
+            .context("loading the graph panicked")?
+    }
+
+    /// The graph, loaded unless another load made it meanwhile.
+    async fn load_graph_once(&self) -> anyhow::Result<Arc<GraphSnapshot>> {
         let _loading = self.graph_loading.lock().await;
         if let Some(g) = self.current_graph() {
             return Ok(g);
@@ -623,7 +682,7 @@ impl Tenant {
 
     /// The graph for a read that can do without it: when it can't be loaded (Neo4j down), an
     /// empty graph, so the caller answers from the wiki alone. `graph` logs the failure.
-    pub async fn graph_or_empty(&self) -> Arc<GraphSnapshot> {
+    pub async fn graph_or_empty(self: &Arc<Self>) -> Arc<GraphSnapshot> {
         self.graph()
             .await
             .unwrap_or_else(|_| Arc::new(GraphSnapshot::empty()))
@@ -832,6 +891,8 @@ pub struct Tenants {
     vector_graph_rows: usize,
     /// Whether tenants' folders may be written (off for replays, which only read).
     writable: bool,
+    /// The service's job registry, which saves the jobs of opened tenants to their stores.
+    jobs: Option<crate::jobs::Jobs>,
     /// Open tenants. The lock is only ever held for a map lookup or insert, never across disk
     /// work, so loading one tenant can't stall requests for the others.
     open: RwLock<HashMap<String, Arc<Tenant>>>,
@@ -854,6 +915,7 @@ impl Tenants {
             embedder: None,
             vector_graph_rows: crate::config::SearchConfig::default().vector_graph_rows,
             writable: true,
+            jobs: None,
             open: RwLock::new(HashMap::new()),
             creating: Mutex::new(()),
         }
@@ -863,6 +925,13 @@ impl Tenants {
     /// traced searches can be replayed on the wiki they ran on.
     pub fn keep_history(mut self, on: bool) -> Self {
         self.keep_history = on;
+        self
+    }
+
+    /// The job registry that saves each opened tenant's jobs to its store, so their status
+    /// outlives a restart (none by default: offline tools run no jobs).
+    pub fn jobs(mut self, jobs: crate::jobs::Jobs) -> Self {
+        self.jobs = Some(jobs);
         self
     }
 
@@ -973,7 +1042,11 @@ impl Tenants {
         }
 
         let tenant = Arc::new(self.load(&dir_name).await?);
-        self.open.write().await.insert(dir_name, tenant.clone());
+        self.open
+            .write()
+            .await
+            .insert(dir_name.clone(), tenant.clone());
+        self.attach_jobs(&tenant).await;
         Ok(CreatedTenant { tenant, api_key })
     }
 
@@ -999,6 +1072,9 @@ impl Tenants {
         };
         if tenant.id != tenant_id {
             return Ok(false);
+        }
+        if let Some(jobs) = &self.jobs {
+            jobs.forget_tenant(&dir_name).await;
         }
         tenant.shut_down().await?;
         let gone = self.root.join(format!(
@@ -1156,10 +1232,22 @@ impl Tenants {
         // Load without holding the lock. If two requests race on a cold tenant, both load it and
         // the first insert wins; the other copy is dropped.
         let tenant = Arc::new(self.load(dir_name).await?);
-        let mut open = self.open.write().await;
-        Ok(Some(
-            open.entry(dir_name.to_owned()).or_insert(tenant).clone(),
-        ))
+        let tenant = self
+            .open
+            .write()
+            .await
+            .entry(dir_name.to_owned())
+            .or_insert(tenant)
+            .clone();
+        self.attach_jobs(&tenant).await;
+        Ok(Some(tenant))
+    }
+
+    /// Hands a tenant just opened to the job registry (see [`crate::jobs::Jobs::attach`]).
+    async fn attach_jobs(&self, tenant: &Tenant) {
+        if let Some(jobs) = self.jobs.as_ref().filter(|_| self.writable) {
+            jobs.attach(&tenant.dir_name, tenant.store.clone()).await;
+        }
     }
 
     async fn load(&self, dir_name: &str) -> anyhow::Result<Tenant> {
@@ -1384,6 +1472,130 @@ mod tests {
         assert!(tenant.current_snapshot().is_none());
         tenant.snapshot().await.unwrap();
         assert!(tenant.current_snapshot().is_some());
+    }
+
+    /// A model for the build tests: each text the same unit vector, counting the texts it
+    /// embedded, taking `pause` a call and failing once `fail_after` texts are done.
+    struct Counting {
+        pause: Duration,
+        fail_after: Option<usize>,
+        done: AtomicUsize,
+        /// Calls begun.
+        calls: AtomicUsize,
+    }
+
+    impl Counting {
+        fn new(pause: Duration, fail_after: Option<usize>) -> Arc<Self> {
+            Arc::new(Self {
+                pause,
+                fail_after,
+                done: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl Embedder for Counting {
+        fn model(&self) -> &str {
+            "counting"
+        }
+
+        fn dim(&self) -> usize {
+            4
+        }
+
+        fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.pause);
+            if self
+                .fail_after
+                .is_some_and(|n| self.done.load(Ordering::SeqCst) >= n)
+            {
+                anyhow::bail!("the model stopped");
+            }
+            self.done.fetch_add(texts.len(), Ordering::SeqCst);
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        }
+    }
+
+    /// A tenant with `pages` pages written but never opened, and its key.
+    async fn unopened(dir: &Path, pages: usize) -> String {
+        let created = Tenants::new(dir, "pinakes.sqlite", Duration::from_secs(60))
+            .create("acme", "initial")
+            .await
+            .unwrap();
+        for i in 0..pages {
+            let p = page(
+                &format!("expertise/p{i}"),
+                &format!("Page {i}"),
+                &[],
+                "Some text.",
+            );
+            created.tenant.wiki().write(&p).unwrap();
+        }
+        created.api_key
+    }
+
+    /// A first search that gives up (its client gone) doesn't stop the snapshot's build: the
+    /// next search gets that build, and no page is embedded twice.
+    #[tokio::test]
+    async fn a_first_search_that_gives_up_leaves_the_build_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unopened(dir.path(), 3).await;
+        let model = Counting::new(Duration::from_millis(300), None);
+        let tenants = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60))
+            .embedder(Some(model.clone()));
+        let tenant = tenants.authenticate(&key).await.unwrap().unwrap();
+        // The first caller gives up once the model is at work.
+        {
+            let first = tenant.snapshot();
+            tokio::pin!(first);
+            while model.calls.load(Ordering::SeqCst) == 0 {
+                tokio::select! {
+                    _ = &mut first => panic!("the build should outlast the caller"),
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                }
+            }
+        }
+        let snap = tenant.snapshot().await.unwrap();
+        assert!(snap.vectors.is_some());
+        let stored = tenant.store.embeddings("counting").await.unwrap().len();
+        assert!(stored > 3, "a head and a section a page, and the index");
+        assert_eq!(
+            model.done.load(Ordering::SeqCst),
+            stored,
+            "each unit embedded once"
+        );
+    }
+
+    /// A build cut short keeps the vectors it made (they are stored a step at a time), and the
+    /// next build embeds only the rest.
+    #[tokio::test]
+    async fn vectors_made_before_a_failure_are_kept() {
+        let step = crate::search::vectors::KEEP_STEP;
+        let dir = tempfile::tempdir().unwrap();
+        let key = unopened(dir.path(), step).await;
+        let failing = Counting::new(Duration::ZERO, Some(step));
+        let tenants = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60))
+            .embedder(Some(failing.clone()));
+        let tenant = tenants.authenticate(&key).await.unwrap().unwrap();
+        // The model failing leaves the snapshot without vectors; keyword search goes on.
+        assert!(tenant.snapshot().await.unwrap().vectors.is_none());
+        let kept = tenant.store.embeddings("counting").await.unwrap().len();
+        assert_eq!(kept, step, "the first step was stored before the failure");
+
+        let model = Counting::new(Duration::ZERO, None);
+        let reopened = Tenants::new(dir.path(), "pinakes.sqlite", Duration::from_secs(60))
+            .embedder(Some(model.clone()));
+        let tenant = reopened.authenticate(&key).await.unwrap().unwrap();
+        assert!(tenant.snapshot().await.unwrap().vectors.is_some());
+        let all = tenant.store.embeddings("counting").await.unwrap().len();
+        assert!(all > step);
+        assert_eq!(
+            model.done.load(Ordering::SeqCst),
+            all - step,
+            "only the rest embedded"
+        );
     }
 
     #[tokio::test]

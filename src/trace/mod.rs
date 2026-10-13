@@ -1,5 +1,5 @@
-//! Search traces (design, "Search traces and replay"): one JSON line per `/search` and `/read`
-//! in the tenant's `logs/search-<date>.jsonl`, written by a background thread so the read path
+//! Search traces (design, "Search traces and replay"): one JSON line per `/search`, `/read`,
+//! `/graph` and `/graph/path` in the tenant's `logs/search-<date>.jsonl`, written by a background thread so the read path
 //! never waits on a disk. Next to each day's file, `logs/versions-<date>.txt` lists the wiki
 //! versions that day's lines ran on. Old files are removed after the retention period, and so
 //! are the wiki versions (`wiki::History`) no remaining day refers to.
@@ -28,6 +28,10 @@ const QUEUE: usize = 10_000;
 pub enum Endpoint {
     Search,
     Read,
+    /// `/graph`: a walk from a node.
+    Graph,
+    /// `/graph/path`.
+    Path,
 }
 
 /// One line of a trace file.

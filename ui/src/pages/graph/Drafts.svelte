@@ -48,6 +48,18 @@
     <Loading rows={1} />
   {:else if load.error}
     <ErrorNote error={load.error} />
+  {:else if draft && draft.delete_space}
+    <div class="summary">
+      <span class="del">{t("graph.drafts.deletesSpace")}</span>
+      {#if draft.proposal}<a class="btn small primary" href={href("/review")}>{t("graph.drafts.review")}</a>{/if}
+    </div>
+    {#if draft.notes.length}
+      <ol class="notes">
+        {#each draft.notes as n, i (i)}
+          <li><span class="when">{when(n.at)}</span>{#if n.by}<span class="chip">{n.by}</span>{/if} <span>{n.reason}</span></li>
+        {/each}
+      </ol>
+    {/if}
   {:else if draft && picture && draftSize(draft) > 0}
     <div class="summary">
       <span class="add">+{draft.put_nodes.length} {t("graph.drafts.nodes")}</span>

@@ -1,0 +1,122 @@
+diff -ruN a/prompts/tools/instructions.md b/prompts/tools/instructions.md
+--- a/prompts/tools/instructions.md	2026-10-13 13:42:54.810302300 +0900
++++ b/prompts/tools/instructions.md	2026-10-13 13:42:54.910654600 +0900
+@@ -13,18 +13,17 @@
+ 3. A slot marked `weak`, or keywords listed in `unmatched_keywords`, mean the search missed. Retry
+    with other terms (synonyms, the other language, an identifier), or with `mode: "semantic"`.
+ 4. Every `search` result carries a `session`. Pass it to every later call of the same task that
+-   takes one (`read`, `graph`, `path`, `record_experience`, `record_decision`): pages already read
++   takes one (`read`, `graph`, `path`, `record_decision_or_lesson`): pages already read
+    are then not sent twice, and what you record is linked to the knowledge you read.
+ 5. Record as you go, without being asked. Before you finish an answer, check the conversation for
+    what is worth keeping, and record each in the same turn (one message may hold several):
+    - something about the user that should shape later answers: a lasting preference, or a
+      standing fact such as the role, region, site or accounts they now handle →
+      `record_preference` ("from now on", "always", "以后", "每次", "我现在负责…");
+-   - a decision the user or their team made → `record_decision` ("we decided", "we're going
+-     ahead with", "定了", "决定");
+-   - a lesson: what went wrong and why, a fix or workaround, a step the knowledge base lacked,
+-     whether the user tells you or you found it in a task → `record_experience` ("lesson",
+-     "for the record", "记一下", "踩坑", "下次").
++   - a decision the user or their team made, or a lesson (what went wrong and why, a fix or
++     workaround, a step the knowledge base lacked), whether the user tells you or you found it
++     in a task → `record_decision_or_lesson` ("we decided", "定了", "决定", "lesson", "for the
++     record", "记一下", "踩坑", "下次").
+    Recording is filed in the background: it never delays your answer and needs no permission.
+    Still answer what the message asks. Don't record instructions for this message only ("this
+    time", "这次"), hypotheticals or options still under discussion, plain questions, someone
+diff -ruN a/prompts/tools/record_decision_or_lesson.md b/prompts/tools/record_decision_or_lesson.md
+--- a/prompts/tools/record_decision_or_lesson.md	1970-01-01 09:00:00.000000000 +0900
++++ b/prompts/tools/record_decision_or_lesson.md	2026-10-13 13:42:54.911657200 +0900
+@@ -0,0 +1,17 @@
++Records a decision the user or their team made, or a lesson worth keeping (what went wrong and
++why, a fix or workaround, a step the knowledge base didn't describe), so later tasks follow it.
++One call may hold both: a lesson and the decision taken because of it. Call it without being
++asked whenever the user makes or reports one ("we decided…", "定了：…", "the login loop was the
++customer's clock being off", "记一下这次的教训"), even in a message that also asks something, and
++after a task of your own that failed, hit a pitfall or needed a new approach. Not for your own
++intermediate choices, options still under discussion, hypotheticals, routine successes, or what
++the knowledge base already says.
++
++- `topic`: what it is about, short and general ("refund policy", "partial refund after shipment").
++- `content`: what was decided and what was learned, in the user's terms, with the exact numbers,
++  names and conditions.
++- `context`: optional: the situation that led to it, and what came of it.
++- `entities`: optional ids of graph nodes or types it concerned, as `search` returned them.
++- `session`: the task's session, so it is linked to the knowledge you read.
++
++A librarian files it in the background: a decision for the user, a lesson for the team.
+diff -ruN a/src/mcp.rs b/src/mcp.rs
+--- a/src/mcp.rs	2026-10-13 13:42:54.760162100 +0900
++++ b/src/mcp.rs	2026-10-13 13:42:54.858946100 +0900
+@@ -24,7 +24,7 @@
+ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+ use rmcp::{ErrorData, RoleServer, ServerHandler};
+ use serde::de::DeserializeOwned;
+-use serde_json::{Value, json};
++use serde_json::{Map, Value, json};
+ 
+ use crate::AppState;
+ use crate::api::{draft, graph, insert, read, search};
+@@ -37,18 +37,14 @@
+ const SESSION_HEADER: &str = "mcp-session-id";
+ 
+ /// The tools, in the order clients list them: the entry, the follow-ups, then the records.
+-pub(crate) const TOOLS: [(&str, &str); 8] = [
++pub(crate) const TOOLS: [(&str, &str); 7] = [
+     ("search", include_str!("../prompts/tools/search.md")),
+     ("read", include_str!("../prompts/tools/read.md")),
+     ("graph", include_str!("../prompts/tools/graph.md")),
+     ("path", include_str!("../prompts/tools/path.md")),
+     (
+-        "record_experience",
+-        include_str!("../prompts/tools/record_experience.md"),
+-    ),
+-    (
+-        "record_decision",
+-        include_str!("../prompts/tools/record_decision.md"),
++        "record_decision_or_lesson",
++        include_str!("../prompts/tools/record_decision_or_lesson.md"),
+     ),
+     (
+         "record_preference",
+@@ -124,6 +120,15 @@
+             }),
+             vec!["task", "outcome"],
+         ),
++        "record_decision_or_lesson" => (
++            json!({
++                "topic": text("What it is about, short and general."),
++                "content": text("What was decided and what was learned, with exact numbers and                     conditions."),
++                "context": text("The situation that led to it, and what came of it."),
++                "entities": entities,
++            }),
++            vec!["topic", "content"],
++        ),
+         "record_decision" => (
+             json!({
+                 "topic": text("What the decision is about, short."),
+@@ -363,6 +368,23 @@
+                         "record_experience" => {
+                             insert::experience(State(app), scope, headers, record).await?
+                         }
++                        // Experiment: filed as experience until the librarian splits notes.
++                        "record_decision_or_lesson" => {
++                            let mut r = Map::new();
++                            if let Ok(Json(Value::Object(a))) = record {
++                                for (k, v) in a {
++                                    let k = match k.as_str() {
++                                        "topic" => "task",
++                                        "content" => "outcome",
++                                        "context" => "details",
++                                        _ => k.as_str(),
++                                    };
++                                    r.insert(k.to_string(), v);
++                                }
++                            }
++                            let record = Ok(Json(Value::Object(r)));
++                            insert::experience(State(app), scope, headers, record).await?
++                        }
+                         "record_decision" => {
+                             insert::decision(State(app), scope, headers, record).await?
+                         }

@@ -249,8 +249,8 @@ async fn later_changes_build_on_the_pending_draft_and_approval_applies_it_whole(
     assert_eq!(status, StatusCode::OK, "{approved}");
     assert_eq!(
         approved["job"]["result"]["graph"],
-        json!({ "space": "mainland", "nodes_put": 2, "nodes_removed": 1, "edges_added": 2,
-                "edges_removed": 1 })
+        json!({ "space": "mainland", "space_deleted": false, "nodes_put": 2, "nodes_removed": 1,
+                "edges_added": 2, "edges_removed": 1 })
     );
     let (again, _) = app
         .post(
@@ -323,6 +323,101 @@ async fn later_changes_build_on_the_pending_draft_and_approval_applies_it_whole(
     assert!(gone.get("proposal").is_none(), "{gone}");
     let (_, list) = app.get(c, "/proposals").await;
     assert_eq!(list["proposals"], json!([]));
+}
+
+/// `mainland` is no longer there: not listed, its nodes not found.
+async fn space_gone(app: &TestApp, c: Caller<'_>) {
+    let (status, _) = app
+        .post(c, "/graph", json!({ "node": "mainland:order/1042" }))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, spaces) = app.get(c, "/graph/spaces").await;
+    assert!(!spaces.to_string().contains("mainland"), "{spaces}");
+}
+
+/// An agent deletes a space only by proposing it: the draft then holds only that, shown for
+/// review, and approving deletes the space with its nodes and edges, in memory and in store. The
+/// console's admin deletes one directly; nobody else does.
+#[tokio::test]
+async fn a_space_is_deleted_by_review_or_by_the_admin() {
+    let (mut app, key) = world().await;
+    let c = Caller::new(&key);
+    // A change pending first, then the deletion: the draft keeps only the deletion.
+    ok(
+        &app,
+        c,
+        "/graph/draft",
+        json!({ "space": "mainland", "reason": "A new customer.",
+                "changes": [{ "op": "put_node", "type": "customer", "key": "c2", "name": "王芳" }] }),
+    )
+    .await;
+    let draft = ok(
+        &app,
+        c,
+        "/graph/draft",
+        json!({ "space": "mainland", "reason": "The store closed.",
+                "changes": [{ "op": "delete_space", "type": null, "key": null }] }),
+    )
+    .await;
+    assert_eq!(draft["delete_space"], true, "{draft}");
+    assert_eq!(draft["put_nodes"], json!([]));
+    let id = draft["proposal"].as_str().unwrap().to_owned();
+    let (status, r) = app
+        .post(
+            c,
+            "/graph/draft",
+            json!({ "space": "mainland", "reason": "More.",
+                    "changes": [{ "op": "remove_node", "type": "order", "key": "1042" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(r.to_string().contains("deletes the space"), "{r}");
+    // Nothing changes before approval.
+    assert_eq!(edges_of(&app, c, "mainland:order/1042").await.len(), 2);
+
+    let (status, approved) = app
+        .post(
+            Caller::new(ADMIN),
+            &format!("/proposals/{id}/approve"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["job"]["result"]["graph"]["space_deleted"], true);
+    space_gone(&app, c).await;
+    app.restart();
+    space_gone(&app, c).await;
+    // The name is free again.
+    ok(
+        &app,
+        c,
+        "/ingest/graph/space",
+        json!({ "space": "mainland", "schema": "commerce" }),
+    )
+    .await;
+    let (_, spaces) = app.get(c, "/graph/spaces").await;
+    let mainland = spaces["spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["space"] == "mainland")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        mainland["nodes"],
+        json!({}),
+        "the old nodes stay gone: {mainland}"
+    );
+
+    // Directly: refused to a tenant's caller (forbidden when it sees the space, not found when
+    // it doesn't); the admin key isn't a console session, so it has no tenant to look at.
+    let (status, _) = app.delete(c, "/graph/spaces/mainland").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = app.delete(c, "/graph/spaces/secret").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let jin = c.user(Some("jin"));
+    let (status, _) = app.delete(jin, "/graph/spaces/secret").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

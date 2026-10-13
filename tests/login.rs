@@ -398,3 +398,116 @@ async fn a_session_follows_every_job_of_the_tenant() {
     assert_eq!(status, StatusCode::OK, "{job}");
     assert_eq!(job["status"], "done");
 }
+
+#[tokio::test]
+async fn a_session_changes_who_sees_any_space() {
+    let app = TestApp::new();
+    let acme = app.create_tenant("acme").await;
+    let c = Caller::new(&acme);
+    let (status, r) = app
+        .post(
+            c,
+            "/ingest/graph/schema",
+            json!({ "schema": "commerce", "summary": "Orders.",
+                    "nodes": { "order": { "key": "order_id" } }, "relations": {} }),
+        )
+        .await;
+    assert!(status.is_success(), "{r}");
+    for (who, body) in [
+        (
+            c.user(Some("jin")),
+            json!({ "space": "secret", "schema": "commerce", "visibility": "private" }),
+        ),
+        (c, json!({ "space": "mainland", "schema": "commerce" })),
+    ] {
+        let (status, r) = app.post(who, "/ingest/graph/space", body).await;
+        assert!(status.is_success(), "{r}");
+    }
+    let (_, body) = sign_in(&app, HERE, "root", "1234").await;
+    let token = body["token"].as_str().unwrap().to_owned();
+    let tenant = [("X-Pinakes-Tenant", "acme")];
+
+    // The admin changes a space it doesn't own, and one it can't see as the user it looks as.
+    let (status, r) = send(
+        &app,
+        "PUT",
+        "/graph/spaces/secret",
+        HERE,
+        Some(&token),
+        &tenant,
+        Some(json!({ "visibility": "restricted", "members": { "groups": ["risk"] } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    // A space created without a user has no owner to keep it private.
+    let (status, r) = send(
+        &app,
+        "PUT",
+        "/graph/spaces/mainland",
+        HERE,
+        Some(&token),
+        &tenant,
+        Some(json!({ "visibility": "private" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{r}");
+    assert!(r.to_string().contains("can't be made private"), "{r}");
+    let (_, audit) = send(
+        &app,
+        "GET",
+        "/admin/tenants/acme/audit",
+        HERE,
+        Some(&token),
+        &[],
+        None,
+    )
+    .await;
+    assert!(audit.to_string().contains("graph.space.access"), "{audit}");
+
+    // The admin deletes a space directly, with its pending draft.
+    let (status, r) = app
+        .post(
+            c,
+            "/graph/draft",
+            json!({ "space": "mainland", "reason": "An order.",
+                    "changes": [{ "op": "put_node", "type": "order", "key": "1" }] }),
+        )
+        .await;
+    assert!(status.is_success(), "{r}");
+    let (status, r) = send(
+        &app,
+        "DELETE",
+        "/graph/spaces/mainland",
+        HERE,
+        Some(&token),
+        &tenant,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["space"], "mainland");
+    let (_, list) = send(&app, "GET", "/proposals", HERE, Some(&token), &tenant, None).await;
+    assert_eq!(list["proposals"], json!([]), "{list}");
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        "/graph/spaces/mainland",
+        HERE,
+        Some(&token),
+        &tenant,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, audit) = send(
+        &app,
+        "GET",
+        "/admin/tenants/acme/audit",
+        HERE,
+        Some(&token),
+        &[],
+        None,
+    )
+    .await;
+    assert!(audit.to_string().contains("graph.space.delete"), "{audit}");
+}

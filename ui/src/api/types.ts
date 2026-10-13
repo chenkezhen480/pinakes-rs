@@ -238,7 +238,11 @@ notes: Array<DraftNote>,
  * Every user who changed it (folders), kept however many notes are: deleting one of them
  * deletes the draft.
  */
-authors?: Array<string>, };
+authors?: Array<string>, 
+/**
+ * Approving it deletes the whole space instead.
+ */
+delete_space: boolean, };
 
 export type Edge = { space: string, from: string, from_name: string, type: string, to: string, to_name: string, 
 /**
@@ -450,7 +454,11 @@ claim?: string | null, };
 /**
  * What approving a draft applied.
  */
-export type GraphApplied = { space: string, nodes_put: number, nodes_removed: number, edges_added: number, edges_removed: number, };
+export type GraphApplied = { space: string, 
+/**
+ * The draft deleted the whole space.
+ */
+space_deleted: boolean, nodes_put: number, nodes_removed: number, edges_added: number, edges_removed: number, };
 
 /**
  * The pending draft of one space: its net change from the stored graph.
@@ -476,7 +484,11 @@ notes: Array<DraftNote>,
  * Every user who changed it (folders), kept however many notes are: deleting one of them
  * deletes the draft.
  */
-authors?: Array<string>, };
+authors?: Array<string>, 
+/**
+ * Approving it deletes the whole space instead.
+ */
+delete_space: boolean, };
 
 export type GraphRequest = { node: string, depth: number | null, direction: Direction, 
 /**
@@ -578,7 +590,13 @@ acquisition: RunReport | null,
 /**
  * For an approved graph draft: what it applied.
  */
-graph: GraphApplied | null, };
+graph: GraphApplied | null, 
+/**
+ * For a note (`/ingest/note`): the records the librarian split it into, each filed for its
+ * own audience (a decision for the user, a lesson for the team). The pages of all of them
+ * are in `pages_created` and `pages_updated`; `source` is the note as it arrived.
+ */
+split?: Array<NoteFiled>, };
 
 export type JobState = "queued" | "running" | "done" | "failed";
 
@@ -748,6 +766,49 @@ export type Note = { at: string, url: string, reason: string,
  * deleting that owner removes.
  */
 owner: string, };
+
+/**
+ * One record a note was split into.
+ */
+export type NoteFiled = { 
+/**
+ * `decision` or `experience`.
+ */
+kind: string, 
+/**
+ * Who it is for: `tenant`, or a group's or user's folder name (`g_…`, `u_…`).
+ */
+audience: string, 
+/**
+ * The record, as `/read` takes it.
+ */
+source: string, 
+/**
+ * The proposal holding what the verifier didn't accept of it, if any.
+ */
+proposal: string | null, };
+
+/**
+ * A note an agent recorded: a decision, a lesson or both, which the librarian splits (MCP
+ * `record_decision_or_lesson`).
+ */
+export type NoteIn = { 
+/**
+ * What it is about, short: a decision's topic, or the kind of task a lesson is about.
+ */
+topic: string, 
+/**
+ * What was decided and what was learned, with the exact numbers and conditions.
+ */
+content: string, 
+/**
+ * The situation that led to it, and what came of it.
+ */
+context: string | null, entities: Array<string>, date: string | null, 
+/**
+ * The session the agent searched and read with (see [`read_pages`]).
+ */
+session: string | null, };
 
 export type PageResponse = { page: string, kind: Kind | null, 
 /**
@@ -1025,6 +1086,14 @@ export type Skipped = { gap: string, reason: string, owner: string, };
 
 export type SlotRequest = { memories: number | null, knowledge: number | null, relations: number | null, };
 
+/**
+ * A change of who sees a space (`PUT /graph/spaces/{space}`): its visibility and members, set
+ * whole. The owner stays the user who created it.
+ */
+export type SpaceAccess = { visibility: Visibility, members: Members, };
+
+export type SpaceDeleted = { space: string, nodes: number, edges: number, };
+
 export type SpaceList = { spaces: Array<SpaceOut>, };
 
 export type SpaceOut = { space: string, schema: string, name: string | null, aliases?: Array<string>, visibility: Visibility, 
@@ -1050,7 +1119,11 @@ export type SpaceRequest = { space: string, schema: string,
  */
 name: string | null, aliases: Array<string>, visibility: Visibility, members: Members, };
 
-export type SpaceResponse = { space: string, schema: string, name: string | null, visibility: Visibility, };
+export type SpaceResponse = { space: string, schema: string, name: string | null, visibility: Visibility, 
+/**
+ * Who else sees a restricted space.
+ */
+members: Members | null, };
 
 export type Status = { 
 /**

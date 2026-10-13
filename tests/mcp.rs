@@ -186,8 +186,7 @@ async fn tools_are_listed_with_their_strategy() {
                 "read",
                 "graph",
                 "path",
-                "record_experience",
-                "record_decision",
+                "record_decision_or_lesson",
                 "record_preference",
                 "propose_graph_change"
             ]
@@ -199,6 +198,18 @@ async fn tools_are_listed_with_their_strategy() {
             "first-person questions are taught"
         );
         assert!(text.contains("unmatched_keywords"));
+        for record in &tools[4..6] {
+            let words: Vec<&str> = record["description"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .collect();
+            assert!(
+                words.join(" ").contains("without being asked"),
+                "{} asks the agent to record unprompted",
+                record["name"]
+            );
+        }
         let schema = &search["inputSchema"];
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["required"], json!(["query"]));
@@ -210,9 +221,9 @@ async fn tools_are_listed_with_their_strategy() {
         );
         assert_eq!(search["annotations"]["readOnlyHint"], true);
         assert_eq!(tools[4]["annotations"]["readOnlyHint"], false);
+        assert!(tools[5]["inputSchema"]["properties"]["session"].is_null());
+        assert_eq!(tools[6]["annotations"]["readOnlyHint"], false);
         assert!(tools[6]["inputSchema"]["properties"]["session"].is_null());
-        assert_eq!(tools[7]["annotations"]["readOnlyHint"], false);
-        assert!(tools[7]["inputSchema"]["properties"]["session"].is_null());
     }
 }
 
@@ -297,6 +308,13 @@ async fn mcp_needs_credentials() {
 #[tokio::test]
 async fn an_agent_searches_reads_and_records_with_the_session_search_gave() {
     let llm = librarian();
+    llm.split_with(|_| {
+        json!({ "items": [{
+            "kind": "lesson",
+            "title": "partial refund after shipment",
+            "text": "Checked the shipment first; the refund went through.",
+        }] })
+    });
     let (app, key) = shopline(&llm).await;
     let mut wang = Client::connect(&app, &key, Some("wang"), NEW).await;
 
@@ -340,13 +358,13 @@ async fn an_agent_searches_reads_and_records_with_the_session_search_gave() {
         .await;
     assert!(theirs["pages"][0]["already_read"].is_null(), "{theirs}");
 
-    // The experience is filed with the knowledge the session read as an anchor.
+    // The lesson is filed with the knowledge the session read as an anchor.
     let job = wang
         .ok(
-            "record_experience",
+            "record_decision_or_lesson",
             json!({
-                "task": "partial refund after shipment",
-                "outcome": "Checked the shipment first; the refund went through.",
+                "topic": "partial refund after shipment",
+                "content": "Checked the shipment first; the refund went through.",
                 "session": session,
             }),
         )

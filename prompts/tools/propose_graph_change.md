@@ -17,6 +17,8 @@ Changes, applied in order:
 - `remove_node`: removes a node and every edge of it.
 - `add_edge` / `remove_edge`: `from` and `to` as `type/key` within the space, `type` the
   relation; both ends must exist once the draft is applied.
+- `delete_space` (no other fields): deletes the whole space, with every node and edge in it, once
+  approved. The draft then holds only that; other changes wait until it is approved or rejected.
 
 Node and relation types, and which types a relation joins, are the space's schema's (`search`
 shows them, and `graph` shows a node's type and key). Give a `reason` that says, for the reviewer,

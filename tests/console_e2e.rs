@@ -164,7 +164,8 @@ async fn serve() {
         ),
     )
     .unwrap();
-    let config = Config::load(&file).unwrap();
+    let mut config = Config::load(&file).unwrap();
+    config.converter.pdf_reader = Some(env!("CARGO_BIN_EXE_pinakes-pdf").into());
     std::fs::create_dir_all(config.tenants_dir()).unwrap();
     let state = AppState::with_switch(config, Some(ADMIN), Ok(librarian().llm()), Some(switch()));
     state.prepare().await.unwrap();

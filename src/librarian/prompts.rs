@@ -15,6 +15,8 @@ pub const READ: &str = include_str!("../../prompts/read.md");
 pub const LINT: &str = include_str!("../../prompts/lint.md");
 pub const ACQUIRE_RANK: &str = include_str!("../../prompts/acquire-rank.md");
 pub const ACQUIRE_SCREEN: &str = include_str!("../../prompts/acquire-screen.md");
+pub const TRANSCRIBE: &str = include_str!("../../prompts/transcribe.md");
+pub const NOTE: &str = include_str!("../../prompts/note.md");
 
 /// The rules shipped with the service for a kind.
 pub fn default_rules(kind: Kind) -> &'static str {

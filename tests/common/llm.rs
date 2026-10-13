@@ -31,6 +31,16 @@ pub enum Step {
 
 type Reply = dyn Fn(Step, &str, usize) -> String + Send + Sync;
 
+/// A scan's page transcribed: the page's message (`Page n of m.`) to the reply.
+type Transcriber = dyn Fn(&str) -> String + Send + Sync;
+
+/// A note split: the note's message to the reply (`{"items": [...]}`).
+type Splitter = dyn Fn(&str) -> Value + Send + Sync;
+
+/// A transcription reply that makes the call fail with the rest as the error, as a model's API
+/// refusing the picture does.
+pub const FAILS: &str = "!fails ";
+
 /// A reply that makes the call fail, as an unreachable model does.
 pub const UNREACHABLE: &str = "!unreachable";
 
@@ -39,6 +49,12 @@ pub const UNREACHABLE: &str = "!unreachable";
 pub struct FakeLlm {
     reply: Box<Reply>,
     calls: Mutex<Vec<(Step, String)>>,
+    /// Reads a scan's pages, when a test scripts it (`transcribe_with`).
+    transcriber: Mutex<Option<Arc<Transcriber>>>,
+    transcribed: Mutex<Vec<String>>,
+    /// Splits notes, when a test scripts it (`split_with`).
+    splitter: Mutex<Option<Arc<Splitter>>>,
+    notes: Mutex<Vec<String>>,
 }
 
 impl FakeLlm {
@@ -46,7 +62,32 @@ impl FakeLlm {
         Arc::new(Self {
             reply: Box::new(reply),
             calls: Mutex::new(Vec::new()),
+            transcriber: Mutex::new(None),
+            transcribed: Mutex::new(Vec::new()),
+            splitter: Mutex::new(None),
+            notes: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Scripts how the librarian splits a note (`/ingest/note`): `split(message)` is the reply.
+    pub fn split_with(&self, split: impl Fn(&str) -> Value + Send + Sync + 'static) {
+        *self.splitter.lock().unwrap() = Some(Arc::new(split));
+    }
+
+    /// The messages of the notes split, in the order they were asked.
+    pub fn notes(&self) -> Vec<String> {
+        self.notes.lock().unwrap().clone()
+    }
+
+    /// Scripts how the model transcribes a scan's pages: `page(message)` is the reply's
+    /// Markdown, or [`FAILS`] and the error.
+    pub fn transcribe_with(&self, page: impl Fn(&str) -> String + Send + Sync + 'static) {
+        *self.transcriber.lock().unwrap() = Some(Arc::new(page));
+    }
+
+    /// The messages of the pages transcribed, in the order they were asked.
+    pub fn transcribed(&self) -> Vec<String> {
+        self.transcribed.lock().unwrap().clone()
     }
 
     pub fn llm(self: &Arc<Self>) -> Llm {
@@ -72,6 +113,44 @@ impl FakeLlm {
 #[async_trait]
 impl LlmClient for FakeLlm {
     async fn complete(&self, prompt: &Prompt) -> anyhow::Result<String> {
+        if prompt.system == prompts::TRANSCRIBE {
+            assert!(
+                prompt.images.len() == 1
+                    && prompt.images[0].media_type == "image/png"
+                    && prompt.images[0].data.starts_with(&[0x89, b'P', b'N', b'G']),
+                "a page is shown as one PNG"
+            );
+            let page = self
+                .transcriber
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("this test doesn't script transcribing");
+            self.transcribed.lock().unwrap().push(prompt.user.clone());
+            let markdown = page(&prompt.user);
+            if let Some(error) = markdown.strip_prefix(FAILS) {
+                anyhow::bail!("{error}");
+            }
+            return Ok(json!({ "markdown": markdown }).to_string());
+        }
+        assert!(prompt.images.is_empty(), "only a scan's page has a picture");
+        if prompt.system == prompts::NOTE {
+            let split = self
+                .splitter
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("this test doesn't script splitting notes");
+            self.notes.lock().unwrap().push(prompt.user.clone());
+            let value = split(&prompt.user);
+            if value == json!(UNREACHABLE) {
+                anyhow::bail!("connection refused");
+            }
+            if let Err(e) = fits(&prompt.schema, &value, "$") {
+                panic!("the scripted split doesn't fit the prompt's schema: {e}\n{value}");
+            }
+            return Ok(value.to_string());
+        }
         let step = match prompt.system.as_str() {
             s if s == prompts::INGEST => Step::Plan,
             s if s == prompts::VERIFY => Step::Verify,

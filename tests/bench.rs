@@ -1,13 +1,15 @@
 //! M6 benchmark (design, "How it stays fast"): one tenant with 1k, 10k and 100k pages and a
-//! graph of a matching size, timed per search step in keyword and semantic mode, plus the cost
-//! of opening the tenant and of writes.
+//! graph of a matching size, timed per search step in keyword, semantic and both modes, plus
+//! the cost of opening the tenant and of writes.
 //!
 //! The tenant is the `shopline` scenario (its pages, schema, spaces and graph data, and its
 //! questions as the queries), filled up to the size with pages made from the lines, titles and
 //! aliases of all six scenarios, and with orders and customers in its `mainland` space (a tenth
 //! of them on one hub customer). Page vectors come from a fast stand-in model with the real
-//! model's 768 dimensions, so the vector search costs what it would; embedding the query with
-//! the real model is timed on its own when `PINAKES_TEST_EMBEDDING` is set.
+//! model's 768 dimensions, so the vector search costs what it would. With
+//! `PINAKES_TEST_EMBEDDING` set, embedding a query with the real model is timed on its own, and
+//! every search's query is embedded by the real model too (its vector dropped, the stand-in's
+//! used), so the searches cost what they would with it, end to end.
 //!
 //! ```text
 //! PINAKES_BENCH_PAGES=1000,10000,100000 cargo test --release --test integration bench:: -- --ignored --nocapture
@@ -23,6 +25,7 @@ use crate::common;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::common::app::{Caller, TestApp};
@@ -40,8 +43,14 @@ const DIM: usize = 768;
 const HUB: &str = "王大客户";
 
 /// Bags of character bigrams in 768 dimensions: as fast as hashing, as large as the real
-/// model's vectors.
-struct Stand;
+/// model's vectors. With `real` given and `queries` on, a single text (a search's query) is
+/// embedded by the real model as well and its vector dropped: the search pays the real model's
+/// time and computing, while its results stay comparable with the stand-in's page vectors.
+#[derive(Default)]
+struct Stand {
+    real: Option<Arc<dyn Embedder>>,
+    queries: AtomicBool,
+}
 
 impl Embedder for Stand {
     fn model(&self) -> &str {
@@ -51,6 +60,12 @@ impl Embedder for Stand {
         DIM
     }
     fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        if texts.len() == 1
+            && self.queries.load(Ordering::Relaxed)
+            && let Some(real) = &self.real
+        {
+            real.embed(texts)?;
+        }
         Ok(texts
             .iter()
             .map(|t| {
@@ -296,7 +311,11 @@ vector_graph_rows = {}
         ),
         Err(_) => String::new(),
     };
-    let mut app = TestApp::with_embedder(&extra, Arc::new(Stand));
+    let stand = Arc::new(Stand {
+        real: common::embed::real(),
+        queries: AtomicBool::new(false),
+    });
+    let mut app = TestApp::with_embedder(&extra, stand.clone());
     let key = app.create_tenant(TENANT).await;
     let wiki_dir = app.wiki_dir(TENANT);
     testset::install_wiki(TENANT, &wiki_dir);
@@ -399,7 +418,8 @@ vector_graph_rows = {}
     ] {
         queries.push((None, json!({ "query": query, "keywords": keywords })));
     }
-    for mode in ["keyword", "semantic"] {
+    stand.queries.store(true, Ordering::Relaxed);
+    for mode in ["keyword", "semantic", "both"] {
         let mut wall = Vec::new();
         for _ in 0..RUNS {
             for (user, body) in &queries {
@@ -428,6 +448,7 @@ vector_graph_rows = {}
         let (p50, p95) = stats(&mut wall);
         println!("  {:<18} {p50:>6.2} ms {p95:>6.2} ms", "request");
     }
+    stand.queries.store(false, Ordering::Relaxed);
 
     // The graph index against the exact scan, on the same snapshot: every question's top ten
     // pages per slot as the tenant sees them.
@@ -442,7 +463,7 @@ vector_graph_rows = {}
         let (mut hits, mut wanted) = (0, 0);
         let (mut graph_us, mut exact_us) = (Vec::new(), Vec::new());
         for (_, body) in &queries {
-            let q = Stand
+            let q = Stand::default()
                 .embed(&[body["query"].as_str().unwrap().to_owned()])
                 .unwrap()
                 .remove(0);

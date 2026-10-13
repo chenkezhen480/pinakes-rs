@@ -55,6 +55,10 @@ pub fn router(state: AppState) -> Router {
         .route("/graph/draft", get(draft::get).post(draft::propose))
         .route("/graph/schemas", get(browse::schemas))
         .route("/graph/spaces", get(browse::spaces))
+        .route(
+            "/graph/spaces/{space}",
+            axum::routing::put(ingest::space_access).delete(ingest::delete_space),
+        )
         .route("/graph/nodes", get(browse::nodes))
         .route("/ingest/experience", post(insert::experience))
         .route("/ingest/decision", post(insert::decision))
@@ -65,6 +69,7 @@ pub fn router(state: AppState) -> Router {
             post(insert::expertise).layer(axum::extract::DefaultBodyLimit::max(21 * 1024 * 1024)),
         )
         .route("/ingest/preference", post(insert::preference))
+        .route("/ingest/note", post(insert::note))
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get))
         .route("/proposals", get(jobs::list))

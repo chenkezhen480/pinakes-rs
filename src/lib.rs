@@ -252,6 +252,13 @@ impl AppState {
         } else {
             switch.turn_off();
             tracing::info!("embeddings turned off");
+            // The open tenants' page vectors leave memory now, not at the idle sweep.
+            let state = self.clone();
+            tokio::spawn(async move {
+                for tenant in state.tenants.open_tenants().await {
+                    tenant.drop_vectors().await;
+                }
+            });
         }
     }
 
@@ -321,11 +328,15 @@ impl AppState {
         embedding: Option<Arc<embed::Switch>>,
         login: login::Login,
     ) -> Self {
+        let jobs = jobs::Jobs::new(std::time::Duration::from_secs(
+            config.jobs.keep_finished_minutes.saturating_mul(60),
+        ));
         let tenants = Tenants::new(
             config.tenants_dir(),
             config.store.file_name.clone(),
             std::time::Duration::from_secs(config.search.session_idle_minutes.saturating_mul(60)),
         )
+        .jobs(jobs.clone())
         // Wiki versions are kept only for replaying traces.
         .keep_history(config.trace.enabled)
         .graph_backend(graph::GraphBackend::from_config(&config))
@@ -346,9 +357,7 @@ impl AppState {
         }
         Self(Arc::new(AppInner {
             converter,
-            jobs: jobs::Jobs::new(std::time::Duration::from_secs(
-                config.jobs.keep_finished_minutes.saturating_mul(60),
-            )),
+            jobs,
             librarian: std::sync::RwLock::new(librarian),
             model: std::sync::RwLock::new(admin::ModelState {
                 config: config.librarian.llm.clone(),

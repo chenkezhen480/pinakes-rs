@@ -18,11 +18,13 @@ aho-corasick = "1"
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22.1"
 calamine = { version = "0.36", features = ["dates"] }
 csv = "1.4"
 ego-tree = "0.11"
 encoding_rs = "0.8"
 fastembed = { version = "7.1", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+futures-util = "0.3.34"
 hex = "0.4.3"
 hf-hub = { version = "0.5", default-features = false, features = ["ureq", "rustls-tls"] }
 jieba-rs = "0.11"
@@ -58,6 +60,12 @@ unicode-normalization = "0.1.25"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 argon2 = "0.6"
 percent-encoding = "2.3.2"
+# PDF text, read by the `pinakes-pdf` helper in a process of its own (design, "PDF read by the
+# service"). Pure Rust; Chinese CMaps only (Japanese and Korean left out).
+pdfni = { version = "0.2.0", default-features = false, features = ["document", "cmap-gb1", "cmap-cns1"] }
+# A scan's pages drawn as images for the model to read, by the same helper (design, "Scans read
+# by the model"). Pure Rust.
+hayro = "0.8.0"
 
 [dev-dependencies]
 http-body-util = "0.1.5"

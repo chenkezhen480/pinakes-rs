@@ -13,7 +13,7 @@
   import { jobs } from "../lib/jobs.svelte";
   import { when } from "../lib/format";
   import { dur, ease } from "../lib/motion";
-  import { draftGraph, draftSize } from "../lib/draft";
+  import { draftGraph, draftSize, spaceCounts } from "../lib/draft";
   import { diffLines, folded } from "../lib/diff";
   import PageHead from "../components/PageHead.svelte";
   import KindMark from "../components/KindMark.svelte";
@@ -23,6 +23,8 @@
   import GraphCanvas from "../components/GraphCanvas.svelte";
 
   const proposals = new Resource(() => api.proposals());
+  // What a draft deleting a space would remove: its counts, as the spaces list gives them.
+  const spaces = new Resource(() => api.spaces());
   const acting = new Action();
   let rejecting = $state("");
   let reason = $state("");
@@ -187,6 +189,17 @@
               {:else}
                 <button class="btn small" onclick={() => showFetched(p)}>{t("review.showFetched")}</button>
               {/if}
+            {/if}
+          </section>
+        {:else if k === "draft" && p.graph && p.graph.delete_space}
+          {@const graph = p.graph}
+          {@const n = spaceCounts(spaces.data?.spaces.find((s) => s.space === graph.space))}
+          <section class="draft">
+            <p class="deletes">{t("review.deletesSpace", { space: graph.space, nodes: n?.nodes ?? "?", edges: n?.edges ?? "?" })}</p>
+            {#if graph.notes.length}
+              <ul class="notes">
+                {#each graph.notes as note, i (i)}<li>{#if note.by}<span class="chip">{note.by}</span>{/if} {note.reason}</li>{/each}
+              </ul>
             {/if}
           </section>
         {:else if k === "draft" && p.graph}
@@ -391,6 +404,13 @@
   }
   .pre {
     white-space: pre-wrap;
+  }
+  .deletes {
+    padding: var(--space-3) var(--space-4);
+    border-left: 3px solid var(--seal);
+    background: var(--warn-wash);
+    border-radius: var(--radius);
+    font-weight: 600;
   }
   .notes {
     margin: 0;

@@ -59,7 +59,12 @@ pub struct Deleted {
 /// jobs queued before it have written their pages first and are deleted with the rest. The
 /// graph comes first: if its store can't be reached, nothing is deleted yet.
 #[tracing::instrument(skip_all, fields(tenant = %tenant.dir_name))]
-pub async fn delete(tenant: &Arc<Tenant>, owner: &Owner, actor: &str) -> anyhow::Result<Deleted> {
+pub async fn delete(
+    tenant: &Arc<Tenant>,
+    owner: &Owner,
+    actor: &str,
+    jobs: &crate::jobs::Jobs,
+) -> anyhow::Result<Deleted> {
     let mut out = Deleted::default();
     let (dir, prefix) = (owner.dir(), owner.prefix());
 
@@ -134,6 +139,9 @@ pub async fn delete(tenant: &Arc<Tenant>, owner: &Owner, actor: &str) -> anyhow:
     if let Owner::User(_) = owner {
         crate::api::draft::forget_author(tenant, &dir).await?;
     }
+    // Its jobs, also those whose results name it: forgotten here first, so none is saved again
+    // after the store's deletion removes the saved ones.
+    jobs.forget_owner(&tenant.dir_name, &dir).await;
     tenant.store.delete_audience(&dir).await?;
     // Lint must not bring the owner's search terms back from the traces kept until they
     // expire: it skips the owner's searches made before now.

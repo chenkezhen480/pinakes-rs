@@ -65,11 +65,25 @@ impl Anthropic {
 
 /// The request body for a prompt.
 fn body(model: &str, prompt: &Prompt, shape: Shape) -> Value {
+    let content = if prompt.images.is_empty() {
+        json!(prompt.user)
+    } else {
+        let mut blocks: Vec<Value> = prompt
+            .images
+            .iter()
+            .map(|i| {
+                json!({ "type": "image", "source": {
+                    "type": "base64", "media_type": i.media_type, "data": i.base64() } })
+            })
+            .collect();
+        blocks.push(json!({ "type": "text", "text": prompt.user }));
+        Value::Array(blocks)
+    };
     let mut body = json!({
         "model": model,
         "max_tokens": prompt.max_tokens,
         "system": prompt.system,
-        "messages": [{ "role": "user", "content": prompt.user }],
+        "messages": [{ "role": "user", "content": content }],
     });
     match shape {
         Shape::OutputFormat => {
@@ -161,7 +175,27 @@ mod tests {
             max_tokens: 100,
             schema: json!({ "type": "object", "properties": {}, "required": [],
                             "additionalProperties": false }),
+            images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn pictures_go_before_the_text() {
+        let mut p = prompt();
+        p.images.push(super::super::Image {
+            media_type: "image/png",
+            data: vec![0x89, b'P', b'N', b'G'],
+        });
+        let b = body("m", &p, Shape::ReplyTool);
+        let content = &b["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "iVBORw==");
+        assert_eq!(content[1], json!({ "type": "text", "text": "u" }));
+        assert_eq!(
+            body("m", &prompt(), Shape::ReplyTool)["messages"][0]["content"],
+            "u"
+        );
     }
 
     #[test]

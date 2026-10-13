@@ -172,6 +172,9 @@ export const api = {
     call<T.NodeList>("GET", "/graph/nodes", { query: { space, ...query } }),
   putSchema: (def: T.SchemaDef) => call<T.SchemaResponse>("POST", "/ingest/graph/schema", { body: def }),
   putSpace: (req: T.SpaceRequest) => call<T.SpaceResponse>("POST", "/ingest/graph/space", { body: req }),
+  deleteSpace: (space: string) => call<T.SpaceDeleted>("DELETE", `/graph/spaces/${encodeURIComponent(space)}`),
+  putSpaceAccess: (space: string, req: T.SpaceAccess) =>
+    call<T.SpaceResponse>("PUT", `/graph/spaces/${encodeURIComponent(space)}`, { body: req }),
   putData: (req: T.DataRequest) => call<T.DataResponse>("POST", "/ingest/graph/data", { body: req }),
   draft: (space: string) => call<T.DraftView>("GET", "/graph/draft", { query: { space } }),
 
