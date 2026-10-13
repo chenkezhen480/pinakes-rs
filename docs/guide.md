@@ -113,7 +113,9 @@ node, or anything of another tenant is reported as 404, so callers can't probe f
 
 Every insert except graph spaces and graph data is a background **job**: the call saves the raw
 record unchanged in `sources/` and answers 202 with a job id; the librarian files it shortly
-after. `GET /jobs/{id}` shows its status and result to the caller who queued it.
+after. `GET /jobs/{id}` shows its status and result to the caller who queued it; while a
+document is being read it also shows how far the reading has come (`progress`: the lines read of
+the total, and the concepts filed so far), which the console draws as a bar.
 
 ```json
 POST /ingest/decision

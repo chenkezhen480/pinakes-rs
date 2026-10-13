@@ -16,6 +16,7 @@
   import PageHead from "../components/PageHead.svelte";
   import ErrorNote from "../components/ErrorNote.svelte";
   import Icon from "../components/Icon.svelte";
+  import Progress from "../components/Progress.svelte";
 
   type Tab = "upload" | "experience" | "decision" | "preference" | "text";
   const tabs: Tab[] = ["upload", "experience", "decision", "preference", "text"];
@@ -64,6 +65,13 @@
     });
   }
 
+  /** The job as last polled: its status and, while a document is read, how far it has come. */
+  function live(s: Sent): JobInfo | null {
+    const mine = s.job;
+    if (!mine) return null;
+    return jobs.list.find((j) => j.job === mine.job) ?? mine;
+  }
+
   function newEntry(label: string, converter?: string): Sent {
     const e: Sent = { id: crypto.randomUUID(), label, job: null, error: null, converter };
     sent = [e, ...sent];
@@ -76,7 +84,7 @@
   let documentId = $state("");
   let sourceUrl = $state("");
   let fileInput: HTMLInputElement | undefined = $state();
-  const builtin = ["md", "markdown", "txt", "html", "htm", "xhtml", "docx", "xlsx", "xlsm", "csv", "pptx"];
+  const builtin = ["md", "markdown", "txt", "html", "htm", "xhtml", "docx", "xlsx", "xlsm", "csv", "pptx", "pdf"];
 
   async function upload(files: FileList | File[]) {
     for (const file of Array.from(files)) {
@@ -158,7 +166,7 @@
     const j = s.job;
     if (!j) return { tone: "wait", text: t("know.sending") };
     if (j.status === "failed") return { tone: "bad", text: j.error ?? t("job.failed") };
-    if (j.status !== "done") return { tone: "wait", text: t(`job.status.${j.status}`) };
+    if (j.status !== "done") return { tone: "wait", text: t(`job.status.${live(s)?.status ?? j.status}`) };
     const r = j.result;
     const parts: string[] = [];
     if (r?.pages_created.length) parts.push(t("job.created", { n: r.pages_created.length }));
@@ -267,6 +275,10 @@
             <strong>{s.label}</strong>
             {#if s.converter && !s.error}<span class="by">{s.converter}</span>{/if}
             <p>{o.text}</p>
+            {#if s.job?.status !== "done" && live(s)?.progress}
+              {@const p = live(s)!.progress!}
+              <Progress done={p.lines_read} total={p.lines_total} label={t("job.reading", { read: p.lines_read, total: p.lines_total, n: p.concepts_filed })} />
+            {/if}
             {#if s.job?.status === "done" && s.job.result}
               {@const r = s.job.result}
               <div class="links">

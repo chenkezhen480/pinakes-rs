@@ -76,6 +76,7 @@ export const en = {
   "job.held": "some edits held for review",
   "job.rejected": "{n} edits refused",
   "job.toReview": "to review",
+  "job.reading": "Read {read} of {total} lines · {n} concepts filed",
   "job.status.queued": "Queued",
   "job.status.running": "Working…",
   "job.status.done": "Done",

@@ -321,6 +321,21 @@ fn version_note(doc: &documents::Document, version: u32) -> String {
     )
 }
 
+/// Shows the job how far the reading has come: the lines read up to `read_to`, and the
+/// concepts filed so far.
+fn report(state: &ReadingState, read_to: usize, total: usize) {
+    crate::jobs::report_progress(crate::jobs::JobProgress {
+        lines_read: read_to.min(total),
+        lines_total: total,
+        concepts_filed: state
+            .reading
+            .steps
+            .iter()
+            .filter(|s| s.page.is_some())
+            .count(),
+    });
+}
+
 impl Librarian {
     /// Files a document (expertise) by reading it, window by window; the concepts each window
     /// holds are filed as one batch from their extracts. Resumes an unfinished reading of the
@@ -455,10 +470,12 @@ impl Librarian {
 
         let mut first_sources = earlier_sources.clone();
         first_sources.push(state.source.clone());
+        report(&state, state.cursor.saturating_sub(1), lines.len());
         while state.cursor <= lines.len() {
             if let Some(kept) = earlier.as_ref().and_then(|e| e.kept_at(state.cursor)) {
                 state.cursor = kept.to + 1;
                 state.reading.steps.push(kept);
+                report(&state, state.cursor - 1, lines.len());
                 continue;
             }
             let limit = earlier
@@ -485,6 +502,12 @@ impl Librarian {
             {
                 state.reading.thread = t;
             }
+            // Read up to the window's last step; its concepts are filed next.
+            report(
+                &state,
+                read.steps.last().map_or(state.cursor - 1, |s| s.end),
+                lines.len(),
+            );
 
             // The window's concepts, filed as one batch from their extracts.
             let note = document_note(&state, earlier.as_ref());
@@ -565,6 +588,7 @@ impl Librarian {
             }
             // Saved after every window, so a job that stops here resumes from the next line.
             tenant.store.put_reading_state(&state).await?;
+            report(&state, state.cursor - 1, lines.len());
         }
 
         // The version is recorded once it is filed (and its unfinished reading dropped), so a

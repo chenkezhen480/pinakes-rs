@@ -112,6 +112,37 @@ pub struct JobInfo {
     /// one, the id is in `result.document` once the job is done.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document: Option<String>,
+    /// While a document is being read: how far the reading has come. Gone once the job ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<JobProgress>,
+}
+
+/// How far a running job has come in the document it reads, window by window.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct JobProgress {
+    /// Lines of the document read so far, as the reading numbers them (its Markdown).
+    pub lines_read: usize,
+    pub lines_total: usize,
+    /// Concepts read so far that are filed in the wiki.
+    pub concepts_filed: usize,
+}
+
+tokio::task_local! {
+    /// The job the current task runs (the queue and the job's id), so the work deep inside it
+    /// can say how far it has come.
+    static CURRENT: (Jobs, String);
+}
+
+/// Shows how far the running job has come, on `/jobs`. Does nothing outside a queued job.
+pub fn report_progress(progress: JobProgress) {
+    let _ = CURRENT.try_with(|(jobs, id)| {
+        if let Some(e) = jobs.lock().jobs.get_mut(id)
+            && e.info.status == JobState::Running
+        {
+            e.info.progress = Some(progress);
+        }
+    });
 }
 
 pub type Work = Pin<Box<dyn Future<Output = anyhow::Result<JobResult>> + Send>>;
@@ -226,6 +257,7 @@ impl Jobs {
             result: None,
             error: None,
             document: None,
+            progress: None,
         };
         inner.jobs.insert(
             id.clone(),
@@ -261,8 +293,9 @@ impl Jobs {
         tokio::spawn(async move {
             while let Some(q) = rx.recv().await {
                 jobs.set_running(&q.id);
+                let work = CURRENT.scope((jobs.clone(), q.id.clone()), q.work);
                 // A panicking job fails alone; the queue carries on.
-                let outcome = match tokio::spawn(q.work).await {
+                let outcome = match tokio::spawn(work).await {
                     Ok(r) => r,
                     Err(e) => Err(anyhow::anyhow!("the job panicked: {e}")),
                 };
@@ -290,6 +323,7 @@ impl Jobs {
         };
         e.finished = Some(Instant::now());
         e.info.finished_at = Some(crate::trace::now_rfc3339());
+        e.info.progress = None;
         match outcome {
             Ok(r) => {
                 e.info.status = JobState::Done;
@@ -501,6 +535,49 @@ impl Jobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_running_job_shows_how_far_it_has_come_until_it_ends() {
+        let jobs = Jobs::new(Duration::from_secs(60));
+        let (go_on, wait) = oneshot::channel::<()>();
+        let (reported, seen) = oneshot::channel::<()>();
+        let step = JobProgress {
+            lines_read: 120,
+            lines_total: 480,
+            concepts_filed: 7,
+        };
+        let info = jobs.submit(
+            "t_a",
+            None,
+            "expertise",
+            Box::pin(async move {
+                report_progress(step);
+                let _ = reported.send(());
+                let _ = wait.await;
+                Ok(JobResult::default())
+            }),
+        );
+        assert_eq!(info.progress, None);
+        seen.await.unwrap();
+        let running = jobs.get(&info.job, "t_a", None).unwrap();
+        assert_eq!(running.status, JobState::Running);
+        assert_eq!(running.progress, Some(step));
+        let _ = go_on.send(());
+        // Outside a job, reporting does nothing.
+        report_progress(step);
+        let done = jobs
+            .run(
+                "t_a",
+                None,
+                "test",
+                Box::pin(async { Ok(JobResult::default()) }),
+            )
+            .await;
+        assert_eq!(done.progress, None);
+        let finished = jobs.get(&info.job, "t_a", None).unwrap();
+        assert_eq!(finished.status, JobState::Done);
+        assert_eq!(finished.progress, None, "gone once the job ends");
+    }
 
     #[tokio::test]
     async fn jobs_of_one_tenant_run_in_order() {

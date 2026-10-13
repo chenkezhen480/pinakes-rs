@@ -70,6 +70,7 @@ export const zh: Strings = {
   "job.held": "部分修改待审阅",
   "job.rejected": "{n} 处修改被拒",
   "job.toReview": "去审阅",
+  "job.reading": "已读 {read} / {total} 行 · 已归档 {n} 个概念",
   "job.status.queued": "排队中",
   "job.status.running": "进行中…",
   "job.status.done": "完成",

@@ -544,9 +544,26 @@ export type JobInfo = { job: string, kind: string, status: JobState, created_at:
  * In the answer to `/ingest/expertise` only: the document id the caller sent. Without
  * one, the id is in `result.document` once the job is done.
  */
-document: string | null, };
+document: string | null, 
+/**
+ * While a document is being read: how far the reading has come. Gone once the job ends.
+ */
+progress?: JobProgress | null, };
 
 export type JobList = { jobs: Array<JobInfo>, };
+
+/**
+ * How far a running job has come in the document it reads, window by window.
+ */
+export type JobProgress = { 
+/**
+ * Lines of the document read so far, as the reading numbers them (its Markdown).
+ */
+lines_read: number, lines_total: number, 
+/**
+ * Concepts read so far that are filed in the wiki.
+ */
+concepts_filed: number, };
 
 /**
  * What a job did.

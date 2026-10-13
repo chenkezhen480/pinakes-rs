@@ -7,6 +7,16 @@ How each part works is in [docs/guide.md](docs/guide.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Reading progress**: while a document is read, its job shows how far the reading has come
+  (`progress` on `/jobs`: lines read of the total, concepts filed so far), updated after every
+  window; the console draws it as a bar on the upload page and in the jobs tray.
+
+### Fixed
+
+- The console marked uploaded PDFs as needing MarkItDown, though the service reads them itself.
+
 ## [0.1.0] - 2026-10-13
 
 The first version: milestones M1 to M10, and the work after them.

@@ -10,6 +10,7 @@
   import { dur, ease } from "../lib/motion";
   import { href } from "../lib/router.svelte";
   import Icon from "./Icon.svelte";
+  import Progress from "./Progress.svelte";
 
   let open = $state(false);
   const recent = $derived(jobs.list.slice(0, 6));
@@ -58,6 +59,9 @@
               <span class="when">{ago(j.created_at)}</span>
             </div>
             <p class="what">{outcome(j)}</p>
+            {#if j.progress && j.status === "running"}
+              <Progress done={j.progress.lines_read} total={j.progress.lines_total} label={t("job.reading", { read: j.progress.lines_read, total: j.progress.lines_total, n: j.progress.concepts_filed })} />
+            {/if}
             {#if j.result && j.status === "done"}
               <div class="links">
                 {#each [...j.result.pages_created, ...j.result.pages_updated].slice(0, 4) as p (p)}
