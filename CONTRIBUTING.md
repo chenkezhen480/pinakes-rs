@@ -15,8 +15,9 @@ change has to keep. 中文读者：本页说明构建、测试与协作规范，
 ## Design first
 
 [docs/guide.md](docs/guide.md) describes what each part does and what each interface takes, and
-the rules below are the ones the code keeps. A change that alters behavior updates the guide in
-the same pull request; a change of configuration regenerates
+[CLAUDE.md](CLAUDE.md) lists the rules the code keeps (scopes, audiences, what may call a model,
+what the read path may touch). A change that alters behavior updates the guide in the same pull
+request, and a rule it changes in CLAUDE.md too; a change of configuration regenerates
 [docs/configuration.md](docs/configuration.md).
 
 ## Setting up
@@ -89,6 +90,9 @@ These are the project's invariants; reviews check them.
 - **Languages are Chinese and English.** Code, comments and docs are in English; issues, pull
   requests and commit messages may be in Chinese or English.
 - **Retries stop at three**, then fail with a message that says what to do.
+
+`CLAUDE.md` holds the same rules in the form the project's AI assistant reads; keep both in step
+when a rule changes.
 
 ## Pull requests
 

@@ -6,12 +6,9 @@
 /model.conf
 /config.local.toml
 
-# Kept locally for now: the design record, the comparison experiment and the AI assistant's
-# working files.
+# The design record and the comparison experiment, kept locally for now.
 /docs/design.md
 /docs/Design.docx
 /docs/images/
 /docs/comparison.md
 /compare/
-/CLAUDE.md
-/.claude/
