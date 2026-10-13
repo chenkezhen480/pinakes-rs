@@ -22,10 +22,14 @@ async function listLayout(page: Page) {
   await page.addInitScript(() => localStorage.setItem("pinakes.layout", "list"));
 }
 
+/** Waits for the sign-in form first: right after signing out, the page left behind (Settings)
+ * may still be shown, with fields of its own named 用户名 and …密码. */
 async function signInForm(page: Page, user: string, password: string) {
-  await page.getByLabel("用户名").fill(user);
-  await page.getByLabel("密码").fill(password);
-  await page.getByRole("button", { name: "登录" }).click();
+  const signIn = page.getByRole("button", { name: "登录", exact: true });
+  await expect(signIn).toBeVisible();
+  await page.getByLabel("用户名", { exact: true }).fill(user);
+  await page.getByLabel("密码", { exact: true }).fill(password);
+  await signIn.click();
 }
 
 test("the default account signs in and stays signed in", async ({ page }) => {

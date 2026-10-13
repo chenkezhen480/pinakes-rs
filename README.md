@@ -51,6 +51,29 @@ had just written. What makes it fast:
   page in about a second.
 - **Rust**, with one bounded compute pool: no garbage-collection pauses, predictable latency.
 
+### Compared end to end through an agent
+
+Pinakes was compared with Mem0, Graphiti, LightRAG and Hindsight end to end through the
+[Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) agent: Pi 1.1 with its own MCP client, each system
+behind its own read tools, DeepSeek V4.1 Flash as the model of the agent and of every system, the
+212 questions of the six-scenario test set (Chinese and English, with users, groups and hidden
+graph spaces), each answer graded blind by an LLM judge (2 answered, 1 partly, 0 not).
+
+| System | Search time (median) | Answered fully | Mean score (0–2) | Text handed to the agent per question | Time per question |
+|---|---|---|---|---|---|
+| **Pinakes** | **3.4 ms** (keywords), 18.9 ms (with meaning) | **99.1%** | **1.99** | 3.4k characters | 3.9 s |
+| Hindsight 0.10.3 | 1,911 ms | 95.3% | 1.93 | 31.9k characters | 15.7 s |
+| Mem0 2.2.1 | 254 ms | 92.9% | 1.88 | 4.0k characters | 4.3 s |
+| Files + grep (Pi's own tools) | – | 92.5% | 1.86 | 3.0k characters | 4.5 s |
+| LightRAG 1.5.7 | 1,076 ms | 86.3% | 1.76 | 37.9k characters | 5.7 s |
+| Graphiti 0.30.2 | 186 ms | 62.7% | 1.46 | 5.0k characters | 3.9 s |
+
+The other systems embed queries with Qwen3-Embedding-0.6B here (about 120 ms a query on this
+CPU); with jina-embeddings-v2-base-zh for every system, as Pinakes uses, they searched in 80 ms
+(Graphiti), 106 ms (Mem0) and 854 ms (LightRAG, which calls the LLM on every search). At 10,000
+pages Pinakes still answers in 4.3 ms by keywords and 25.5 ms with meaning, while Mem0 took
+491 ms and Graphiti 263 ms. No system leaked another user's, group's or hidden space's content.
+
 ## 2. Knowledge that hosts and manages itself
 
 **Self-hosted.** Pinakes is one Rust binary, with its web console built in, on your own
