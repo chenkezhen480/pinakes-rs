@@ -6,9 +6,10 @@
 /model.conf
 /config.local.toml
 
-# The design record and the comparison experiment, kept locally for now.
+# The design record, the comparison experiment and research drafts, kept locally for now.
 /docs/design.md
 /docs/Design.docx
 /docs/images/
 /docs/comparison.md
 /compare/
+/docs/research/
