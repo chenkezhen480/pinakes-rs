@@ -7,5 +7,5 @@
 - [ ] `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test -j 2` pass
 - [ ] Tests cover the change
 - [ ] Optional tests run, if they apply (Neo4j, converter, embedding, live model): which ones:
-- [ ] `docs/design.md` updated where behavior changed (and `CLAUDE.md` if a rule changed)
+- [ ] `docs/guide.md` updated where behavior changed
 - [ ] No keys, `model.conf` or real tenant data in the change

@@ -23,8 +23,7 @@ LLM 担任**馆员**，负责归档、合并和核查每一份进来的内容。
 关键词检索、图谱游走，以及智能体需要时的向量检索，全部在内存快照上完成。传统 RAG 每个问题都要调用一次
 LLM；Pinakes 在 LLM 还没开始之前就已经返回了结果。
 
-在一台笔记本上以 4 个计算线程测得（中位数；方法与全部数据见 [docs/design.md](docs/design.md)
-“How it stays fast”）：
+在一台笔记本上以 4 个计算线程测得（中位数；方法与全部数据见 [docs/performance.md](docs/performance.md)）：
 
 | Wiki 规模 | 关键词检索 | 向量检索 | 语义检索（含查询向量化） | 修改一页（写入） |
 |---|---|---|---|---|
@@ -66,6 +65,9 @@ flowchart LR
 
 - **归档而不是堆积**：新内容会更新它所属的页面，而不是再加一份文档；文档像人一样逐个概念地读，新版本只更新
   改动的部分。证据不足的修改会暂存待审。
+- **再大的文档也能读完**：馆员像人读书一样一个窗口接一个窗口地往下读，读到一个概念就归档一个，几千页的手册
+  和一页纸的笔记一样能读完、读全。文档长度不受模型上下文窗口限制；每读完一个窗口都会保存进度，中断后从原处
+  接着读（单个上传文件最大 20 MB）。
 - **日常维护**：lint 发现矛盾、过时说法、重复页面、坏链接、没有锚点的记忆，以及总是检索不到的关键词，
   并提出修复。
 - **自己生长**：外部获取只读取租户信任的站点（白名单，不用搜索引擎），把页面与 lint 找到的缺口匹配，
@@ -110,7 +112,7 @@ Pinakes 把知识分成三层，中间那层只由馆员来写：
 
 - **由 schema 描述的业务图谱**：节点类型、关系类型、节点属性，任意多个图空间（共享、私有或受限）。
 - **中英双语原生支持**：jieba 分词、名称匹配器，以及本地运行的中英文向量模型，支持跨语言检索。
-- **为智能体而建**：除 HTTP API 外提供 MCP 服务，8 个工具的描述本身就教会智能体检索策略。
+- **为智能体而建**：除 HTTP API 外提供 MCP 服务，7 个工具的描述本身就教会智能体检索策略。
 
 ## 架构
 
@@ -184,6 +186,15 @@ cp model.conf.example model.conf
 cargo run --release                   # 读取 config.toml，监听 127.0.0.1:8080
 ```
 
+从 crates.io 安装（控制台已内置）：
+
+```bash
+cargo install pinakes                 # 安装 pinakes、pinakes-pdf、pinakes-replay、pinakes-migrate-graph
+mkdir pinakes && cd pinakes           # 数据保存在 ./data
+# 在这里写好 model.conf，格式见本仓库的 model.conf.example
+pinakes                               # 没有 config.toml 时使用默认配置
+```
+
 个人使用时，在 `config.toml` 中设置 `deployment = "personal"`：首次启动会自动创建默认租户，
 并把它的 Key 写入 `<data>/personal-api-key.txt`。想带数据试用，运行
 `cargo run --example load_testset -- ./data`，会载入六个示例业务场景。
@@ -205,7 +216,9 @@ curl -s -X POST http://127.0.0.1:8080/search \
 
 ## 文档
 
-- [docs/design.md](docs/design.md)：完整设计，包括每个里程碑实际做了什么、测量数据和各项决策（英文）。
+- [docs/guide.md](docs/guide.md)：工作原理与用法：概念、身份、写入知识、图谱、检索、馆员、lint 与外部获取、存储、HTTP API 和 MCP 工具（英文）。
+- [docs/configuration.md](docs/configuration.md)：全部配置项（英文）。
+- [docs/performance.md](docs/performance.md)：速度与内存的测量数据及测量方法（英文）。
 - [CONTRIBUTING.md](CONTRIBUTING.md)：构建、测试与协作规范。
 - [CHANGELOG.md](CHANGELOG.md)：各里程碑带来的变化。
 

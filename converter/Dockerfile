@@ -1,4 +1,4 @@
-# Pinakes' document converter (design.md, "Files are turned into Markdown first").
+# Pinakes' optional document converter (MarkItDown), for the formats the service doesn't read itself.
 FROM python:3.12-slim
 
 # Pinned: the converter's version is recorded with every document version it converts.

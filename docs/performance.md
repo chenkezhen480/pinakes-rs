@@ -1,9 +1,8 @@
 # Pinakes: performance measurements
 
 Every speed and memory figure behind the decisions on search, gathered in one place (2026-10-12).
-The design and the reasons for each choice are in [design.md](design.md) ("How it stays fast",
-"An 8-bit model, and the query embedded alongside the keywords"); this file keeps the numbers,
-how they were taken, and how to take them again.
+How search works is in [guide.md](guide.md) ("Searching"); this file keeps the numbers, how
+they were taken, and how to take them again.
 
 ## The machine
 

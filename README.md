@@ -27,7 +27,7 @@ the agent asks, a vector search, all over an in-memory snapshot. Classic RAG pay
 every question; Pinakes answers before an LLM would have started.
 
 Measured on a laptop with 4 compute threads (medians; method and every number in
-[docs/design.md](docs/design.md), "How it stays fast"):
+[docs/performance.md](docs/performance.md)):
 
 | Wiki size | Keyword search | Vector search | Semantic search, query embedding included | One page changed (write) |
 |---|---|---|---|---|
@@ -77,6 +77,10 @@ flowchart LR
 - **Filing, not piling up**: new content updates the pages it belongs to instead of adding
   another document; a document is read like a person reads it, one concept at a time, and a new
   version updates only what changed. Edits the evidence doesn't support are held for review.
+- **Documents of any length**: the librarian reads a document window by window, as a person
+  works through a book, and files each concept as it goes, so a manual of thousands of pages is
+  read as fully as a one-page note. The model's context window never limits it; the reading is
+  saved after every window, and one that stops resumes where it was (uploads up to 20 MB).
 - **Upkeep**: lint finds contradictions, stale claims, duplicates, broken links, unanchored
   memories and keywords searches keep missing, and proposes fixes.
 - **Growing on its own**: acquisition reads the sites a tenant trusts (its allowlist only, no
@@ -126,7 +130,7 @@ agent chooses keywords or meaning, what to open and what to follow
   number of graph spaces (shared, private or restricted).
 - **Chinese and English** from day one: jieba tokenizing, a name matcher, and a local
   Chinese–English embedding model for cross-language search.
-- **Built for agents**: an MCP server with eight tools whose descriptions teach the retrieval
+- **Built for agents**: an MCP server with seven tools whose descriptions teach the retrieval
   strategy, beside the HTTP API.
 
 ## Architecture
@@ -206,6 +210,15 @@ cp model.conf.example model.conf
 cargo run --release                   # reads config.toml; binds 127.0.0.1:8080
 ```
 
+From crates.io (the console is built in):
+
+```bash
+cargo install pinakes                 # pinakes, pinakes-pdf, pinakes-replay, pinakes-migrate-graph
+mkdir pinakes && cd pinakes           # the service keeps its data in ./data
+# write model.conf here, as model.conf.example in this repository shows
+pinakes                               # without a config.toml it runs on the defaults
+```
+
 For one person, set `deployment = "personal"` in `config.toml`: the service creates a default
 tenant on first start and writes its key to `<data>/personal-api-key.txt`. To try it with data,
 `cargo run --example load_testset -- ./data` loads six sample business scenarios.
@@ -227,8 +240,11 @@ curl -s -X POST http://127.0.0.1:8080/search \
 
 ## Documentation
 
-- [docs/design.md](docs/design.md): the full design, with what was built in each milestone,
-  measurements and decisions (English).
+- [docs/guide.md](docs/guide.md): how it works and how to use it: concepts, identity, adding
+  knowledge, the graph, searching, the librarian, lint and acquisition, storage, the HTTP API
+  and the MCP tools.
+- [docs/configuration.md](docs/configuration.md): every configuration field.
+- [docs/performance.md](docs/performance.md): speed and memory measurements, and how to take them.
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and the working rules.
 - [CHANGELOG.md](CHANGELOG.md): what each milestone brought.
 

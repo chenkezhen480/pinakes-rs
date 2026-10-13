@@ -27,7 +27,7 @@ welcome:
   verification into the wiki, or makes it act on instructions.
 - **Server-side request forgery**: acquisition reaching hosts off a tenant's allowlist or on
   private networks (note that behind an HTTP proxy, the proxy resolves names; see
-  docs/design.md "Filling gaps from outside").
+  docs/guide.md "Lint, review and filling gaps").
 - **Untrusted files**: uploads that break out of the converter, exhaust memory or time
   (zip bombs, huge XML), or escape a tenant's folder through names.
 - **Deletion**: data of a deleted user, group or tenant that survives in files, the stores, the

@@ -14,10 +14,10 @@ change has to keep. 中文读者：本页说明构建、测试与协作规范，
 
 ## Design first
 
-[docs/design.md](docs/design.md) is the design of record: what each part does, why, what was
-built in each milestone ("As built in Mx") and what was measured. A change that alters behavior
-updates the relevant section in the same pull request. Work is organized in milestones
-(M1 to M10, "Build milestones"); each ends with a "done when" check backed by tests.
+[docs/guide.md](docs/guide.md) describes what each part does and what each interface takes, and
+the rules below are the ones the code keeps. A change that alters behavior updates the guide in
+the same pull request; a change of configuration regenerates
+[docs/configuration.md](docs/configuration.md).
 
 ## Setting up
 
@@ -90,12 +90,9 @@ These are the project's invariants; reviews check them.
   requests and commit messages may be in Chinese or English.
 - **Retries stop at three**, then fail with a message that says what to do.
 
-`CLAUDE.md` holds the same rules in the form the project's AI assistant reads; keep both in step
-when a rule changes.
-
 ## Pull requests
 
-- One topic per pull request, with tests for what it changes and the design updated.
+- One topic per pull request, with tests for what it changes and the guide updated.
 - The description says what changed, why, and how it was checked (which of the optional tests
   ran, if any).
 - Keep commits readable; they are squashed or kept as they are on merge, at the maintainers'

@@ -3,12 +3,49 @@
 All notable changes to Pinakes are listed here, by milestone. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may break APIs).
-Details, measurements and decisions for each milestone are in
-[docs/design.md](docs/design.md) under "As built in Mx".
+How each part works is in [docs/guide.md](docs/guide.md).
 
 ## [Unreleased]
 
-### Added (M10, 2026-10-10)
+## [0.1.0] - 2026-10-13
+
+The first version: milestones M1 to M10, and the work after them.
+
+### Added after M10 (2026-10-11 to 2026-10-13)
+
+- **One tool for decisions and lessons**: MCP `record_decision_or_lesson` (`POST /ingest/note`)
+  replaces `record_decision` and `record_experience`. The agent only judges that something is
+  worth keeping; the librarian splits the note, filing decisions for the user and lessons for the
+  team, and keeps what it can't tell apart as the user's decision. The HTTP inserts
+  `/ingest/decision` and `/ingest/experience` stay for host code that knows the kind.
+- **Recording unprompted**: the MCP server's instructions and the record tools ask the agent to
+  record lasting preferences, standing facts about the user (role, region, accounts), decisions
+  and lessons in the same turn, without being asked, and not to record one-off instructions,
+  hypotheticals or questions.
+- **PDF read by the service**: the text layer is read by `pinakes-pdf`, a second binary that
+  reads each PDF in a process of its own, its memory capped and killed past a deadline. A scan
+  (no text layer) is drawn page by page and transcribed by the librarian's model. MarkItDown is
+  now needed only for `.doc`, `.xls`, `.ppt` and PDFs the service can't read.
+- **An 8-bit embedding model**: after the download the service quantizes
+  jina-embeddings-v2-base-zh to 8-bit weights itself (checked against a pinned SHA-256) and
+  removes the full one: same answers on the test set at half the query time and memory. In `both`
+  mode the query is embedded alongside the keyword search.
+- **Graph spaces changed and deleted**: `PUT /graph/spaces/{space}` sets a space's visibility and
+  members (its owner or the admin); `DELETE /graph/spaces/{space}` removes a space with its data
+  (the admin), and agents can propose it in a draft (`delete_space`), reviewed like any draft.
+- **Job status kept across restarts** in the tenant's SQLite; a job a restart cut off answers
+  failed with "send it again".
+- `/graph` and `/graph/path` write search trace lines too.
+- The console's Overview tests the model with one button; turning embeddings off drops the page
+  vectors at once.
+
+### Fixed
+
+- A tenant's search snapshot and graph are built in a task of their own that later requests
+  wait for, so a client that gives up no longer throws the build away; new page vectors are stored
+  as they are made.
+
+### Added in M10 (2026-10-10)
 
 - **A web console** at `/ui` for every operation: an overview, search (the three slots, with the
   developer chat as a tab), the wiki rendered with its history and hand edits, adding knowledge
@@ -21,8 +58,8 @@ Details, measurements and decisions for each milestone are in
   phone-sized too. Its API types are generated from the Rust structs.
 - **Built-in conversion** of HTML, Word, Excel (`.xlsx`, CSV) and PowerPoint in pure
   Rust, every file bounded (size, zip bombs, entities, nesting, cells, time). MarkItDown is
-  optional (compose profile `markitdown`), for PDF and `.doc`/`.xls`/`.ppt`; without it those are
-  refused with what to do.
+  optional (compose profile `markitdown`) for the formats the service doesn't read; without it
+  those are refused with what to do.
 - **The Library's hall**: the console opens as a 3D hall of the Library of Alexandria (three.js,
   loaded on demand), its sections standing in it as the catalogue table, the scroll shelves, the
   scriptorium, the armillary sphere, the sealing lectern, the water clock and the rest; through
@@ -40,11 +77,7 @@ Details, measurements and decisions for each milestone are in
   `/admin/audit`, `/admin/tenants/{id}/audit`. `docs/configuration.md` is generated from the
   settings' descriptions.
 
-## [0.1.0] - 2026-10-10
-
-The first version: milestones M1 to M9.
-
-### Added
+### Added in M1 to M9 (2026-09-29 to 2026-10-10)
 
 - **M9, acquisition and scale** (2026-10-10): gaps found by lint are matched against a local
   index of the sites a tenant trusts (read politely: `robots.txt`, `Crawl-delay`, sitemaps), and
