@@ -21,25 +21,33 @@ merges and checks everything that comes in. It is built around two things.
 
 The expensive thinking happens once, when knowledge is added (the
 [LLM wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)): the
-librarian writes the synthesis into pages ahead of time. So a read is only a lookup. **No LLM
-and no database query on the read path**: name matching, keyword search, graph walks and, when
-the agent asks, a vector search, all over an in-memory snapshot. Classic RAG pays an LLM call on
-every question; Pinakes answers before an LLM would have started.
+librarian writes the synthesis into pages ahead of time. So a read is only a lookup. **No
+generative model and no database query on the read path**: name matching, keyword search, graph
+walks and, when the agent asks, a vector search (whose only model is the small query encoder),
+all over an in-memory snapshot. A classic RAG retriever is quick too, but it hands back raw
+chunks that an LLM has to synthesize on every question; here that synthesis is already in the
+pages, and the agent answers from them.
 
 Measured on a laptop with 4 compute threads (medians; method and every number in
 [docs/performance.md](docs/performance.md)):
 
 | Wiki size | Keyword search | Vector search | Semantic search, query embedding included | One page changed (write) |
 |---|---|---|---|---|
-| 10,000 pages | **2.3 ms** | 6 ms (exact) | **20 ms** | 0.16 s |
-| 100,000 pages | **10 ms** | **3 to 5 ms** (HNSW, recall@10 0.983) | about 18 to 20 ms (see below) | 1.29 s |
+| 10,000 pages | **2.3 ms** | 6 ms (exact scan) | **20 ms** | 0.16 s |
+| 100,000 pages | **13.3 ms**¹ | **about 3 ms** (HNSW) | 37.6 ms¹ | 1.29 s |
 
-Graph walks take microseconds, and name matching under 0.3 ms at every size. Most of a semantic
-search is embedding the query on the CPU: 14 ms with the model's weights in 8 bits, which the
-service quantizes itself after the download (same answers on the test set as the full model, at
-half the time and memory). At 100,000 pages that adds up to about 18 to 20 ms; the benchmark
-measured 38 ms there, while Windows Defender kept two to three cores busy scanning the files it
-had just written. What makes it fast:
+¹ Measured while Windows Defender kept two to three cores busy scanning the files the benchmark
+had just written; keyword search measured 10 to 13 ms across runs. With the query embedding timed
+alone (14 to 16 ms), a semantic search on an idle machine would take about 18 to 20 ms: an
+estimate, not a measured run.
+
+The benchmark's page vectors are stand-ins, so these rows measure speed, not search quality.
+Quality was measured separately on real vectors from the service's 8-bit model: the HNSW index
+finds what the exact scan finds, recall@10 0.993 on 10,881 rows (3,093 pages). Graph walks take
+microseconds, and name matching under 0.3 ms at every size. Most of a semantic search is
+embedding the query on the CPU: 14 ms with the model's weights in 8 bits, which the service
+quantizes itself after the download (same answers on the test set as the full model, at half
+the time and memory). What makes it fast:
 
 - **Compiled at write time, looked up at read time**: one search returns answer-shaped pages,
   related memories and real graph edges together, in three slots, with routes to follow.
@@ -143,7 +151,7 @@ agent chooses keywords or meaning, what to open and what to follow
 |---|---|---|
 | When the thinking happens | on every question | once, when knowledge is added |
 | What a search finds | raw text chunks | synthesized pages, related memories, real graph edges |
-| An LLM on the read path | yes | no |
+| Model work per question | an LLM synthesizes the retrieved chunks | the agent answers from pages already synthesized; the search runs no generative model |
 | Who decides how to search | the pipeline | the agent |
 | How knowledge stays current | re-index the documents | the librarian merges, lint checks, people approve |
 
