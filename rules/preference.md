@@ -21,5 +21,7 @@ to that user.
 
 ## Anchors
 
-- Anchor the page to what the preferences concern most, such as a node type the user works
-  with. At least one anchor is required.
+- The page is anchored to its user by where it is (the user's folder): no anchor is required.
+- Add an anchor only when preferences really concern something, such as the node type a role
+  or an export format is about. A reply language or an answer format concerns no node or page:
+  leave `about` empty rather than add an anchor just to have one.

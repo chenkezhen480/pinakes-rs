@@ -29,7 +29,7 @@ today (check each: does a claim depend on it?). There are three kinds of task:
   overlap, differ only in wording or detail, or that nothing shows a change, there is no
   finding. One page giving more detail than another (a step the other leaves out) is not a
   contradiction; a contradiction is two answers to the same question that can't both hold.
-- **anchor**: a memory page (experience, decision, preference) without any anchor. Propose one
+- **anchor**: an experience or decision page without any anchor. Propose one
   `update` that adds anchors (`add_about`) from the anchors listed as allowed for that page, the
   ones the page is really about. If none fits, report nothing.
 - **miss**: searches for a keyword kept coming back weak. If one of the pages shown covers it,

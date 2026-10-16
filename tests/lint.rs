@@ -291,6 +291,14 @@ async fn lint_reports_findings_and_proposes_fixes() {
             &[],
             "The guarantee lasts one year.",
         ),
+        // A preference page needs no anchor: not reported as unanchored.
+        page(
+            &format!("users/{}/preferences", user_dir_name("lily")),
+            "Lily's preferences",
+            &[],
+            &[],
+            "- Reply language: Chinese",
+        ),
     ] {
         wiki.write(&p).unwrap();
     }

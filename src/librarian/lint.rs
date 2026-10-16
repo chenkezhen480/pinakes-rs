@@ -12,7 +12,7 @@
 //!
 //! The model reviews pages that changed since the last run (or whose dates have passed since):
 //! each with the pages most related to it, for contradictions, duplicates and stale claims;
-//! and proposes fixes where they are clear: anchors for an unanchored memory, a weak keyword
+//! and proposes fixes where they are clear: anchors for an unanchored experience or decision, a weak keyword
 //! as an alias of the page that covers it, a stale claim superseded, a duplicate's names on
 //! the page to keep. Fixes are never written by lint itself: each is held as a proposal for a
 //! person to approve (`/proposals`), or approved at once when the admin turned on
@@ -957,15 +957,14 @@ fn code_findings(
                 );
             }
         }
-        let memory = matches!(
-            page.kind,
-            Kind::Experience | Kind::Decision | Kind::Preference
-        );
-        if memory && page.about.is_empty() {
+        // A preference page is its user's, by its folder: it needs no anchor.
+        let anchored = matches!(page.kind, Kind::Experience | Kind::Decision);
+        if anchored && page.about.is_empty() {
             push(
                 FindingKind::Unanchored,
                 page,
-                "a memory page with no anchor: hops and lifts can't reach it".into(),
+                "an experience or decision page with no anchor: hops and lifts can't reach it"
+                    .into(),
                 None,
             );
         }

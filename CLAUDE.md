@@ -120,7 +120,9 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   hash. Tests use `common::embed::Fake`; the real model runs with
   `PINAKES_TEST_EMBEDDING=1 cargo test --test integration meaning_testset:: -- --nocapture` (downloads it into
   `target/models` the first time; skipped without the variable).
-- The librarian never writes graph data, and every memory page has at least one anchor.
+- The librarian never writes graph data, and every experience and decision page has at least one
+  anchor; a preference page is its user's by its folder and needs none (decided 2026-10-16: a
+  reply language concerns no node, and forced anchors lost such preferences in E1).
 - A graph schema backs many graph spaces. Only creating or changing a schema writes the wiki (via
   the librarian); creating a space or writing nodes and edges never does. Structural schema fields
   come from the stored definition, never from the LLM. Node names and aliases reach the name

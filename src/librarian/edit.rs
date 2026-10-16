@@ -406,7 +406,8 @@ fn add_anchors(
     Ok(())
 }
 
-/// Code-owned fields, and the anchor every memory page needs.
+/// Code-owned fields, and the anchor every experience and decision page needs (a preference page
+/// is its user's, by its folder: its anchors are optional).
 fn finish(page: &mut Page, r: &Rules) -> Result<(), String> {
     page.front.kind = Some(r.target.kind);
     page.front.updated = Some(r.today.to_owned());
@@ -415,12 +416,9 @@ fn finish(page: &mut Page, r: &Rules) -> Result<(), String> {
     {
         page.front.sources.push(source.to_owned());
     }
-    let memory = matches!(
-        r.target.kind,
-        Kind::Experience | Kind::Decision | Kind::Preference
-    );
-    if memory && page.front.about.is_empty() {
-        return Err("a memory page needs at least one anchor in about".into());
+    let anchored = matches!(r.target.kind, Kind::Experience | Kind::Decision);
+    if anchored && page.front.about.is_empty() {
+        return Err("an experience or decision page needs at least one anchor in about".into());
     }
     if page.body.chars().count() > MAX_BODY {
         return Err(format!(

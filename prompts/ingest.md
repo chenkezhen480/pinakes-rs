@@ -60,8 +60,10 @@ How edits work:
 - Items of one batch may link to each other's pages; an item may create a page another item
   links to.
 - `summary` is 1–3 sentences. `aliases` and `keywords` are short terms in English and Chinese.
-- `about` anchors: only the anchors listed as allowed. Memory pages (experience, decisions,
-  preferences) need at least one.
+- `about` anchors: only the anchors listed as allowed, and only what the page is really about.
+  Experience and decision pages need at least one. A preference page is its user's (its folder
+  says whose): anchor it only to what its preferences really concern, or leave `about` empty;
+  never add an anchor just to have one.
 - Never write ids, dates, `kind`, `sources` or `updated`; the service adds them.
 - Only state what the new content or the pages already support. Do not invent facts.
 - If the content adds nothing new, reply `{"edits": []}`.

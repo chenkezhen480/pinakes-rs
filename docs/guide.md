@@ -364,7 +364,8 @@ the graph store.
    keywords or anchors, or supersede a claim (struck through with the date and reason; never
    deleted).
 4. **Check.** Code checks each edit: the right kind and folder, limits, anchors and links the
-   page's readers can see, at least one anchor on every memory, decision pages append-only.
+   page's readers can see, at least one anchor on every experience and decision page (a
+   preference page is its user's, by its folder, and needs none), decision pages append-only.
 5. **Verify.** A second model call checks every edit against the sources. Refused edits go back
    with the reasons, up to three times; edits the verifier still refuses are held as a proposal
    for review, the rest are applied.

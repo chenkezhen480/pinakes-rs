@@ -18,6 +18,17 @@ How each part works is in [docs/guide.md](docs/guide.md).
   `result.approved`), candidate sources from acquisition (`approved` in the run's report) and
   agents' graph drafts (the draft's answer says what it `applied`).
 
+### Changed
+
+- A preference page no longer needs an anchor: it is its user's, by its folder. A reply language
+  or an answer format concerns no node or page, and forcing one lost such preferences (the
+  verifier held the made-up anchor, or code refused the page without one). Experience and
+  decision pages still need at least one; lint no longer reports an unanchored preference.
+
+### Security
+
+- rustls 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
+
 ### Fixed
 
 - The console marked uploaded PDFs as needing MarkItDown, though the service reads them itself.

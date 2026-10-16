@@ -352,6 +352,42 @@ async fn a_record_dropped_after_a_refusal_is_held_not_lost() {
     }
 }
 
+/// A preference page is its user's, by its folder: one with no anchor is filed (E1: a reply
+/// language concerns no node, and the anchor rule lost such preferences in every run).
+#[tokio::test]
+async fn a_preference_needs_no_anchor() {
+    let llm = model(|msg, _| {
+        // A preference's "folder" is its one page.
+        json!({ "edits": [create(
+            &folder(msg),
+            "Zoe's preferences",
+            "Replies in Chinese.",
+            &[],
+            "# Zoe's preferences\n\n- Reply language: Chinese\n",
+        )]})
+    });
+    let (app, key) = shopline(&llm).await;
+    let zoe = Caller::new(&key).user(Some("zoe"));
+    let job = submit(
+        &app,
+        zoe,
+        "/ingest/preference",
+        json!({ "statement": "Reply to me in Chinese." }),
+    )
+    .await;
+    let page = format!("users/{}/preferences", user_dir_name("zoe"));
+    assert_eq!(
+        job["result"]["pages_created"],
+        json!([page.as_str()]),
+        "{job}"
+    );
+    let (_, got) = app.get(zoe, &format!("/pages/{page}")).await;
+    assert!(
+        got["front_matter"].get("about").is_none(),
+        "no anchor: {got}"
+    );
+}
+
 /// With `[librarian] auto_approve`, a hand edit the verifier holds is saved all the same.
 #[tokio::test]
 async fn auto_approve_saves_a_held_hand_edit() {
