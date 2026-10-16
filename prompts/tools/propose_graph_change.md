@@ -1,6 +1,7 @@
 Proposes changes to the data of a graph space (its nodes and edges) for a person to review.
 Nothing changes in the graph until the change is approved; `search`, `graph` and `path` keep
-showing the graph as it is.
+showing the graph as it is. Where the deployment approves everything at once, the answer says
+what was applied (`applied`) and the graph has changed already.
 
 Each space has at most one pending draft. Your changes are added to it, and are checked against
 the space as the draft would leave it: you may link, rename or take back a node the draft adds,

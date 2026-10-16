@@ -139,13 +139,101 @@ fn numbers(text: &str) -> Vec<String> {
     out
 }
 
-/// The numbers an extract has that the text it was read from doesn't.
+/// The numbers an extract has that the text it was read from doesn't. The numbering of a list
+/// the model wrote itself ("1. ", "2) ", "3、", "(4) ") is its layout, not a fact taken from the
+/// text, so it isn't checked.
 fn numbers_missing(extract: &str, lines: &str) -> Vec<String> {
     let source = numbers(lines);
-    numbers(extract)
+    let extract: Vec<&str> = extract.lines().map(without_list_number).collect();
+    numbers(&extract.join("\n"))
         .into_iter()
         .filter(|n| !source.contains(n))
         .collect()
+}
+
+/// What an extract's numbers may come from besides the lines it reads: the main thread, and for
+/// a new version what changed (an extract says what a rule was before) and the version numbers
+/// the message itself gives ("since version 2 …"). A first version adds no version number: "1"
+/// would let any 1 through. Not the line numbers: any number within the window's range would
+/// pass then.
+fn number_sources(
+    thread: &str,
+    changes: Option<String>,
+    version: u32,
+    earlier: Option<u32>,
+) -> String {
+    let versions = earlier
+        .map(|e| format!("version {version} {e}"))
+        .unwrap_or_default();
+    format!("{thread}\n{}\n{versions}", changes.unwrap_or_default())
+}
+
+/// Where the extract has the number `n`: about 40 characters either side of it, so the model
+/// (and the log) can see what it wrote.
+fn line_with(extract: &str, n: &str) -> Option<String> {
+    let line = extract
+        .lines()
+        .map(without_list_number)
+        .find(|l| numbers(l).iter().any(|x| x == n))?;
+    let chars: Vec<char> = line.chars().collect();
+    // The first run of digits (and decimals) that reads as `n`.
+    let mut at = None;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_ascii_digit()
+                    || (matches!(chars[i], '.' | ',')
+                        && chars.get(i + 1).is_some_and(char::is_ascii_digit)))
+            {
+                i += 1;
+            }
+            let run: String = chars[start..i].iter().collect();
+            if numbers(&run).first().is_some_and(|x| x == n) {
+                at = Some((start, i));
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let (start, end) = at.unwrap_or((0, 0));
+    let from = start.saturating_sub(40);
+    let to = (end + 40).min(chars.len());
+    let mut quote: String = chars[from..to].iter().collect::<String>().trim().to_owned();
+    if from > 0 {
+        quote.insert(0, '…');
+    }
+    if to < chars.len() {
+        quote.push('…');
+    }
+    Some(quote)
+}
+
+/// A line without the number of its list item, if it starts with one: digits then `.`, `)` or
+/// `、` (and the full-width forms) followed by a space or the end, or digits in brackets. A
+/// decimal such as "1.5% fee" is not a list number.
+fn without_list_number(line: &str) -> &str {
+    let body = line.trim_start();
+    let bracketed = body
+        .strip_prefix(['(', '（'])
+        .map(|rest| (rest, &[')', '）'][..]));
+    let (rest, closers) = bracketed.unwrap_or((body, &['.', ')', '、', '．', '）'][..]));
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return line;
+    }
+    let Some(after) = rest[digits..].strip_prefix(closers) else {
+        return line;
+    };
+    // `、` and the closing brackets need no space after them; `.` and `)` do, or "1.5" would be
+    // read as an item.
+    let needs_space = bracketed.is_none() && !rest[digits..].starts_with(['、', '）']);
+    if needs_space && !after.is_empty() && !after.starts_with(char::is_whitespace) {
+        return line;
+    }
+    after
 }
 
 /// The version before the one being read, and how it differs.
@@ -550,6 +638,7 @@ impl Librarian {
                     // The job's first proposal; `GET /proposals` lists them all.
                     result.proposal.get_or_insert(p.clone());
                 }
+                result.approved.extend(f.approved.iter().cloned());
             }
             for ((step, &(from, to)), item) in read.steps.into_iter().zip(&spans).zip(item_of_step)
             {
@@ -653,14 +742,11 @@ impl Librarian {
                 earlier,
                 feedback.as_deref(),
             );
-            // What an extract's numbers may come from besides the lines: the main thread, and
-            // for a new version what changed (an extract says what a rule was before).
-            let context = format!(
-                "{}\n{}",
-                state.reading.thread,
-                earlier
-                    .and_then(|e| e.changes_text(cursor, end))
-                    .unwrap_or_default()
+            let context = number_sources(
+                &state.reading.thread,
+                earlier.and_then(|e| e.changes_text(cursor, end)),
+                state.version,
+                earlier.map(|e| e.version),
             );
             let reply = self
                 .llm
@@ -760,9 +846,12 @@ fn check_read(
                 let missing = numbers_missing(extract, &read_text);
                 if !missing.is_empty() {
                     return Err(format!(
-                        "step {n}: the extract has {}, which the text shown doesn't; numbers, \
+                        "step {n}: the extract has {}{}, which the text shown doesn't; numbers, \
                          dates and amounts are written as the lines have them",
-                        missing.join(", ")
+                        missing.join(", "),
+                        line_with(extract, &missing[0])
+                            .map(|l| format!(" (in \"{l}\")"))
+                            .unwrap_or_default()
                     ));
                 }
                 Some(Concept {
@@ -1016,6 +1105,56 @@ mod tests {
         assert!(numbers_missing("上限 25 元，5000 元以上复核，费率 1.5%", lines).is_empty());
         assert_eq!(numbers_missing("上限 20 元", lines), vec!["20"]);
         assert_eq!(numbers("2026-11-01 起 7 天"), vec!["2026", "11", "1", "7"]);
+    }
+
+    #[test]
+    fn a_list_the_model_numbers_itself_is_not_a_number_from_the_text() {
+        // E1: a training handout whose terms are headings, read into a numbered extract, was
+        // refused four times for "1, 2" and the document failed.
+        let lines = "**EXW — Ex Works.** Costs and risk pass at the seller's premises.\n\
+                     **FOB — Free On Board.** Risk passes on board at origin.";
+        let extract = "1. EXW: risk passes at the seller's premises.\n2. FOB: on board at origin.";
+        assert!(numbers_missing(extract, lines).is_empty());
+        assert!(
+            numbers_missing(
+                "3、内部作业\n（4）外部作业\n5) 检查表",
+                "内部作业 外部作业 检查表"
+            )
+            .is_empty()
+        );
+        // Numbers inside an item are still checked, and so is a decimal at the start of a line.
+        assert_eq!(numbers_missing("1. 上限 20 元", "上限 25 元"), vec!["20"]);
+        assert_eq!(numbers_missing("1.5% fee", "a fee"), vec!["1.5"]);
+        assert_eq!(numbers_missing("2026 rules", "the rules"), vec!["2026"]);
+        // The refusal quotes where the number is.
+        assert_eq!(
+            line_with("Risk passes on board.\nSince version 2 the fee is 20.", "2").as_deref(),
+            Some("Since version 2 the fee is 20.")
+        );
+        // E1: reading version 2 of a billing policy, the model wrote the version the message
+        // names into an extract, and was refused for it.
+        let lines = "| From day 21 | Read-only until the outstanding invoice is paid. |";
+        let sources = number_sources("", Some("-| From day 14 |".into()), 2, Some(1));
+        let extract = "Read-only from day 21; until version 2 it was day 14.";
+        assert!(numbers_missing(extract, &format!("{lines}\n{sources}")).is_empty());
+        assert_eq!(
+            numbers_missing("Read-only from day 30.", &format!("{lines}\n{sources}")),
+            vec!["30"]
+        );
+        // A first version's reading lets no version number through: "1" stays checked.
+        let first = number_sources("", None, 1, None);
+        assert_eq!(
+            numbers_missing("Retried 1 time.", &format!("{lines}\n{first}")),
+            vec!["1"]
+        );
+        let long = format!(
+            "{} up from 14 days in version 2 of the policy",
+            "x".repeat(60)
+        );
+        assert_eq!(
+            line_with(&long, "2").as_deref(),
+            Some("…xxxxxxxxxxxx up from 14 days in version 2 of the policy")
+        );
     }
 
     #[test]

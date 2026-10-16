@@ -129,8 +129,8 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   unique in a tenant and never equal a schema name.
 - Agents change graph data only by proposing (`POST /graph/draft`, MCP `propose_graph_change`):
   one pending draft per space, every change checked against the graph as the draft would leave
-  it, applied whole only when the admin approves (`graph::draft`, `GraphStore::apply`). Graph
-  data never touches the wiki.
+  it, applied whole only when the admin approves, or at once with `auto_approve`
+  (`graph::draft`, `GraphStore::apply`). Graph data never touches the wiki.
 - Graph spaces are shared (default), private (owner only) or restricted (member users and groups).
   Compute the caller's visible spaces once per request and drop everything from other spaces
   before responding; edges never cross spaces; hidden nodes are 404.
@@ -141,7 +141,10 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 
 - Lint never writes wiki pages (only its line in `log.md`): it reports findings and holds fixes
   as proposals (`librarian::lint`). A finding and its fix stay within the audience of the page
-  (or the searches) it comes from.
+  (or the searches) it comes from. `[librarian] auto_approve` (off by default; decided
+  2026-10-16, widened the same day by the user to every proposal) approves at once, through the
+  admin's approval path: held edits (filing, lint's fixes, hand edits; `Librarian::hold_or_approve`),
+  acquisition candidates and graph drafts. With it off, every proposal waits for an admin.
   Deletion is hard (`deletion`, `Tenants::delete`): a deleted owner's text must be gone from
   every file of the tenant except the search traces (`tests/deletion.rs` checks byte by byte);
   writers take `Tenant::lock_wiki`/`lock_graph`, which refuse once the tenant is deleted.
@@ -155,9 +158,9 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
   /admin/tenants/{id}/acquisition`) both turn it on. Only the tenant's allowlisted sites are
   ever read (a crawl into a local index: robots.txt, sitemaps, same-site links; no text kept);
   no search engine or other third party is asked anything, and gaps are matched on the
-  service. Nothing it finds enters the wiki without an admin's approval: a candidate is a held
-  proposal of a source, filed through the normal expertise ingest when approved (an upload with
-  one review step more). Fetched text is shown to the model only between markers as data, and
+  service. Nothing it finds enters the wiki without an admin's approval (or `auto_approve`): a
+  candidate is a held proposal of a source, filed through the normal expertise ingest when
+  approved (an upload with one review step more). Fetched text is shown to the model only between markers as data, and
   screened before anyone is asked; fetches reach only allowlisted, public hosts (redirects
   included). Tests use a local stand-in for the trusted site (`tests/acquisition.rs`); the real
   model's screening: `PINAKES_TEST_LLM=1 cargo test --test integration acquisition_live:: -- --nocapture`;

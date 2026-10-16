@@ -112,6 +112,49 @@ async fn edges_of(app: &TestApp, caller: Caller<'_>, node: &str) -> Vec<String> 
     out
 }
 
+/// With `[librarian] auto_approve`, a draft is applied the moment it is proposed: the answer
+/// says what it applied, nothing waits for review, and the audit names `auto-approve`.
+#[tokio::test]
+async fn auto_approve_applies_a_draft_at_once() {
+    let (app, key) = world_with("[librarian]\nauto_approve = true\n", "acme").await;
+    let c = Caller::new(&key);
+    let resp = ok(
+        &app,
+        c,
+        "/graph/draft",
+        json!({ "space": "mainland", "reason": "the order was handed to another buyer",
+                "changes": [
+                    { "op": "put_node", "type": "customer", "key": "c2", "name": "王芳" },
+                    { "op": "add_edge", "from": "order/1042", "type": "placed_by", "to": "customer/c2" },
+                    { "op": "remove_edge", "from": "order/1042", "type": "placed_by", "to": "customer/c1" }
+                ] }),
+    )
+    .await;
+    assert!(resp.get("proposal").is_none(), "{resp}");
+    assert_eq!(resp["applied"]["nodes_put"], 1, "{resp}");
+    assert_eq!(resp["applied"]["edges_added"], 1, "{resp}");
+    assert_eq!(
+        edges_of(&app, c, "mainland:order/1042").await,
+        vec![
+            "mainland:order/1042 contains mainland:product/p1",
+            "mainland:order/1042 placed_by mainland:customer/c2"
+        ]
+    );
+    let (_, list) = app.get(c, "/proposals").await;
+    assert_eq!(list["proposals"], json!([]));
+    // A change that no longer fits the graph is still refused when proposed.
+    let (status, resp) = app
+        .post(
+            c,
+            "/graph/draft",
+            json!({ "space": "mainland", "reason": "x",
+                    "changes": [{ "op": "remove_edge", "from": "order/1042", "type": "placed_by",
+                                  "to": "customer/c1" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+}
+
 #[tokio::test]
 async fn later_changes_build_on_the_pending_draft_and_approval_applies_it_whole() {
     let (app, key) = world().await;

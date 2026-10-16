@@ -128,7 +128,7 @@ pub async fn approve(
         )));
     }
     if proposal.graph.is_some() {
-        let job = super::draft::approve(&app, tenant, id.clone()).await?;
+        let job = super::draft::approve(&app, tenant, id.clone(), "admin").await?;
         tracing::info!(proposal = %id, "graph draft approved");
         return Ok((
             StatusCode::OK,
@@ -140,7 +140,7 @@ pub async fn approve(
         ));
     }
     if proposal.candidate.is_some() {
-        let job = crate::acquisition::approve(&app, tenant, proposal).await?;
+        let job = crate::acquisition::approve(&app, tenant, proposal, "admin").await?;
         tracing::info!(proposal = %id, job = %job.job, "proposed source approved");
         return Ok((
             StatusCode::ACCEPTED,

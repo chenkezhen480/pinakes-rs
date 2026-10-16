@@ -158,6 +158,57 @@ fn of_kind<'a>(report: &'a Value, kind: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+/// With `[librarian] auto_approve`, lint's fixes are approved in the run that proposes them; a
+/// contradiction is still only reported.
+#[tokio::test]
+async fn auto_approve_applies_lint_fixes() {
+    let llm = linter();
+    let mut app = TestApp::with_llm_and_config(llm.llm(), "[librarian]\nauto_approve = true\n");
+    let key = app.create_tenant("acme").await;
+    let host = Caller::new(&key);
+    ok(
+        &app,
+        host,
+        "/ingest/graph/schema",
+        json!({ "schema": "commerce", "summary": "Orders and buyers.",
+                "nodes": { "order": { "key": "order_id" } }, "relations": {} }),
+    )
+    .await;
+    let wiki = WikiFs::new(app.wiki_dir("acme"));
+    for p in [
+        page(
+            "experience/order-lookup",
+            "Looking up orders",
+            &[],
+            &[],
+            "Search by the order id first.",
+        ),
+        page("expertise/return-window", "Return window", &[], &[], SHORT),
+        page("expertise/return-policy", "Return policy", &[], &[], LONG),
+    ] {
+        wiki.write(&p).unwrap();
+    }
+    app.restart();
+    let (job, report) = lint(&app, host).await;
+    let fix = of_kind(&report, "unanchored");
+    assert_eq!(fix.len(), 1, "{report}");
+    let lookup = wiki
+        .read(&PagePath::parse("experience/order-lookup").unwrap())
+        .unwrap();
+    assert_eq!(lookup.front.about, vec!["commerce:order"], "{job}");
+    let (_, held) = app.get(host, "/proposals").await;
+    assert_eq!(held["proposals"], json!([]), "nothing waits for review");
+    assert_eq!(
+        of_kind(&report, "contradiction").len(),
+        1,
+        "still only reported"
+    );
+    let unchanged = wiki
+        .read(&PagePath::parse("expertise/return-policy").unwrap())
+        .unwrap();
+    assert!(unchanged.body.contains(LONG));
+}
+
 #[tokio::test]
 async fn lint_reports_findings_and_proposes_fixes() {
     let llm = linter();

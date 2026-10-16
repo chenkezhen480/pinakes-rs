@@ -31,7 +31,8 @@ How to use it:
    record is not searchable at once.
 6. When the graph is missing something or holds something wrong (a new character, a relation
    that ended), `propose_graph_change`: it goes to a person for review, and nothing changes until
-   it is approved. See the space's pending draft first and build on it.
+   it is approved (unless the answer says it was applied at once). See the space's pending draft
+   first and build on it.
 
 You choose the order of calls and when you have enough. Nothing here calls an LLM on the read
 path: searches take milliseconds, so searching again is cheap.

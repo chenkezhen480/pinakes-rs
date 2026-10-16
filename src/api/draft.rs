@@ -58,6 +58,9 @@ pub struct DraftQuery {
 pub struct DraftView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal: Option<String>,
+    /// With `[librarian] auto_approve`: what the draft applied at once (it is no longer pending).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<GraphApplied>,
     #[serde(flatten)]
     pub draft: GraphDraft,
 }
@@ -99,6 +102,7 @@ fn view(space: &str, p: Option<Proposal>) -> DraftView {
     match p {
         Some(p) => DraftView {
             proposal: Some(p.id),
+            applied: None,
             draft: p
                 .graph
                 .map(|g| g.shown())
@@ -106,6 +110,7 @@ fn view(space: &str, p: Option<Proposal>) -> DraftView {
         },
         None => DraftView {
             proposal: None,
+            applied: None,
             draft: GraphDraft::new(space),
         },
     }
@@ -131,14 +136,14 @@ pub async fn get(
 
 #[tracing::instrument(name = "graph_draft_propose", skip_all)]
 pub async fn propose(
-    State(_app): State<AppState>,
+    State(app): State<AppState>,
     scope: Scope,
     body: Result<Json<DraftRequest>, JsonRejection>,
 ) -> Result<Json<DraftView>, ApiError> {
     let Json(req) = body?;
     let tenant = scope.tenant();
     // Drafts change under the graph writer, so a draft and an approval never cross.
-    let _writer = tenant.lock_graph().await?;
+    let writer = tenant.lock_graph().await?;
     let graph = tenant.graph().await?;
     let Some(space) = graph.space(&req.space).filter(|s| s.visible_to(&scope)) else {
         return Err(ApiError::NotFound);
@@ -200,6 +205,7 @@ pub async fn propose(
         }
         return Ok(Json(DraftView {
             proposal: None,
+            applied: None,
             draft: draft.shown(),
         }));
     }
@@ -233,7 +239,26 @@ pub async fn propose(
         )
         .await?;
     tracing::info!(proposal = %p.id, space = %req.space, changes = n, "graph draft changed");
-    Ok(Json(view(&req.space, Some(p))))
+    if !app.config.librarian.auto_approve {
+        return Ok(Json(view(&req.space, Some(p))));
+    }
+    // Approved at once, as the admin would: checked again and applied whole on the write queue,
+    // which takes the graph writer this request holds.
+    drop((writer, graph));
+    let id = p.id.clone();
+    match approve(&app, tenant.clone(), id.clone(), "auto-approve").await {
+        Ok(job) => Ok(Json(DraftView {
+            proposal: None,
+            applied: job.result.and_then(|r| r.graph),
+            draft: GraphDraft::new(&req.space),
+        })),
+        // It stays held, as one an admin's approval found no longer applying.
+        Err(ApiError::Conflict(why)) => {
+            tracing::info!(proposal = %id, %why, "draft not approved at once; held");
+            Ok(Json(view(&req.space, held(tenant, &req.space).await?)))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether a caller may see a draft: it may see its space.
@@ -251,6 +276,7 @@ pub(crate) async fn approve(
     app: &AppState,
     tenant: Arc<Tenant>,
     id: String,
+    actor: &'static str,
 ) -> Result<JobInfo, ApiError> {
     let t = tenant.clone();
     let job = app
@@ -281,7 +307,7 @@ pub(crate) async fn approve(
                     super::ingest::remove_space(&t, &draft.space).await?;
                     p.status = ProposalStatus::Approved;
                     t.store.put_proposal(&p).await?;
-                    t.store.audit("admin", "proposal.approve", &p.id).await?;
+                    t.store.audit(actor, "proposal.approve", &p.id).await?;
                     tracing::info!(proposal = %p.id, space = %draft.space, "graph space deleted");
                     return Ok(JobResult {
                         graph: Some(GraphApplied {
@@ -313,7 +339,7 @@ pub(crate) async fn approve(
                 t.set_graph(next);
                 p.status = ProposalStatus::Approved;
                 t.store.put_proposal(&p).await?;
-                t.store.audit("admin", "proposal.approve", &p.id).await?;
+                t.store.audit(actor, "proposal.approve", &p.id).await?;
                 tracing::info!(proposal = %p.id, space = %draft.space, "graph draft applied");
                 Ok(JobResult {
                     graph: Some(GraphApplied {

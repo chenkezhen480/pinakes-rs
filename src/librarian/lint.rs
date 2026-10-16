@@ -14,8 +14,9 @@
 //! each with the pages most related to it, for contradictions, duplicates and stale claims;
 //! and proposes fixes where they are clear: anchors for an unanchored memory, a weak keyword
 //! as an alias of the page that covers it, a stale claim superseded, a duplicate's names on
-//! the page to keep. Fixes are never written by lint: each is held as a proposal for a person
-//! to approve (`/proposals`). Contradictions are only reported.
+//! the page to keep. Fixes are never written by lint itself: each is held as a proposal for a
+//! person to approve (`/proposals`), or approved at once when the admin turned on
+//! `[librarian] auto_approve`. Contradictions are only reported.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -30,7 +31,7 @@ use serde_json::json;
 use super::edit::{PageAudience, Target};
 use super::{
     ATTEMPTS, Edit, HeldEdit, Librarian, MAX_PAGE_CHARS, Related, anchor_options, check, cut, find,
-    hold, object, parse_json, plan_schema, prompts, record_log, string, strings,
+    object, parse_json, plan_schema, prompts, record_log, string, strings,
 };
 use crate::graph::{EntityRef, GraphSnapshot, Visibility};
 use crate::identity::Scope;
@@ -487,7 +488,8 @@ impl Librarian {
     }
 
     /// Holds a finding's edits as proposals after the code checks, one per page audience and
-    /// kind; answers the first. Edits the checks refuse are dropped.
+    /// kind (approved at once with `auto_approve`); answers the first. Edits the checks refuse
+    /// are dropped.
     async fn propose(
         &self,
         tenant: &Arc<Tenant>,
@@ -528,7 +530,9 @@ impl Librarian {
                 continue;
             }
             let _writer = tenant.lock_wiki().await?;
-            let id = hold(tenant, &target, &writer, None, held).await?;
+            let (id, _) = self
+                .hold_or_approve(tenant, &target, &writer, None, held)
+                .await?;
             first.get_or_insert(id);
         }
         Ok(first)

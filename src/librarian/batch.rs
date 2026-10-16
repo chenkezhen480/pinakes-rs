@@ -15,8 +15,8 @@ use serde_json::json;
 use super::edit::Target;
 use super::{
     ATTEMPTS, Checked, Edit, HeldEdit, Librarian, MAX_PAGE_CHARS, Related, added_links,
-    anchor_options, anchorable_pages, apply_and_record, check, cut, hold, op_name, page_id,
-    parse_json, plan_schema, prompts, record_log,
+    anchor_options, anchorable_pages, apply_and_record, check, cut, op_name, page_id, parse_json,
+    plan_schema, prompts, record_log,
 };
 use crate::identity::Scope;
 use crate::jobs::{JobResult, Rejected};
@@ -28,6 +28,8 @@ use crate::wiki::Page;
 const ROUND_ITEMS: usize = 8;
 /// Most knowledge pages a record's session read that its item is shown and offered.
 const MAX_READ_PAGES: usize = 8;
+/// Told to an item sent back that came back without edits.
+const DROPPED: &str = "- The last reply had no edits for this item, but it still has to be filed: correct the                        edits refused above instead of dropping them.";
 
 /// One thing to file.
 pub(super) struct Item {
@@ -60,6 +62,8 @@ pub(super) struct Filed {
     pub rejected: Vec<Rejected>,
     /// The proposal its held edits went to.
     pub proposal: Option<String>,
+    /// The proposal its held edits went to and that was approved at once (`auto_approve`).
+    pub approved: Option<String>,
     /// Pages one of its edits wanted to write but that weren't written (held or refused).
     pub not_written: HashSet<String>,
 }
@@ -186,6 +190,9 @@ impl Librarian {
         let mut out: Vec<Filed> = (0..n).map(|_| Filed::default()).collect();
         let mut tries = vec![0usize; n];
         let mut feedback: Vec<Vec<String>> = vec![Vec::new(); n];
+        // The edits an item was last sent back for, and why: what it comes to if the model
+        // then drops them instead of correcting them.
+        let mut last: Vec<Vec<(Edit, bool, String)>> = vec![Vec::new(); n];
         let mut open: Vec<usize> = (0..n).collect();
         while !open.is_empty() {
             let round: Vec<usize> = open.iter().take(ROUND_ITEMS).copied().collect();
@@ -254,8 +261,25 @@ impl Librarian {
             let mut pass: Vec<usize> = Vec::new();
             let mut finished: Vec<usize> = Vec::new();
             let mut finals: Vec<(usize, Vec<Refusal>)> = Vec::new();
+            // Items whose last refused edits stand: sent back, they came back empty.
+            let mut dropped: Vec<usize> = Vec::new();
             for (&i, outcome) in round.iter().zip(&outcomes) {
                 match outcome {
+                    // No edits after being sent back: the model dropped the item rather than
+                    // correct it. Asked again; in the end its last refusals stand, so the record
+                    // is held or refused as any item that keeps failing, never lost unseen.
+                    Outcome::Passed if !last[i].is_empty() && !owner.contains(&i) => {
+                        tries[i] += 1;
+                        if tries[i] >= ATTEMPTS {
+                            dropped.push(i);
+                            finished.push(i);
+                        } else {
+                            if !feedback[i].iter().any(|f| f == DROPPED) {
+                                feedback[i].push(DROPPED.to_owned());
+                            }
+                            tracing::info!(item = %id_of(i), "item sent back: no edits after a refusal");
+                        }
+                    }
                     Outcome::Passed => {
                         pass.push(i);
                         finished.push(i);
@@ -297,6 +321,10 @@ impl Librarian {
                                 .map(|(k, _, r)| {
                                     format!("- {} {}: {r}", op_name(&edits[*k]), edits[*k].page())
                                 })
+                                .collect();
+                            last[i] = why
+                                .iter()
+                                .map(|(k, by_code, r)| (edits[*k].clone(), *by_code, r.clone()))
                                 .collect();
                             tracing::info!(item = %id_of(i), reasons = ?feedback[i], "item sent back");
                         }
@@ -392,33 +420,91 @@ impl Librarian {
                     }
                 }
             }
-            for (i, why) in finals {
+            let settled = finals
+                .into_iter()
+                .map(|(i, why)| {
+                    let why: Vec<(Edit, bool, String)> = why
+                        .into_iter()
+                        .map(|(k, by_code, r)| (edits[k].clone(), by_code, r))
+                        .collect();
+                    (i, why)
+                })
+                .chain(
+                    dropped
+                        .into_iter()
+                        .map(|i| (i, std::mem::take(&mut last[i]))),
+                )
+                .collect::<Vec<_>>();
+            for (i, why) in settled {
                 let mut held = Vec::new();
-                for (k, by_code, reason) in why {
-                    out[i].not_written.insert(page_id(&edits[k].page()));
+                for (edit, by_code, reason) in why {
+                    out[i].not_written.insert(page_id(&edit.page()));
                     if by_code {
                         out[i].rejected.push(Rejected {
-                            page: edits[k].page(),
+                            page: edit.page(),
                             reason,
                         });
                     } else {
-                        held.push(HeldEdit {
-                            edit: edits[k].clone(),
-                            reason,
-                        });
+                        held.push(HeldEdit { edit, reason });
                     }
                 }
                 if !held.is_empty() {
-                    let id = hold(tenant, target, writer, Some(&items[i].cite), held).await?;
-                    record_log(
-                        tenant,
-                        &format!("ingest {}: held as {id}", target.kind.as_str()),
-                    )
-                    .await?;
-                    out[i].proposal = Some(id);
+                    let (id, approved) = self
+                        .hold_or_approve(tenant, target, writer, Some(&items[i].cite), held)
+                        .await?;
+                    match approved {
+                        // Written after all: the item's pages count as filed.
+                        Some(written) => {
+                            for p in written.pages_created {
+                                out[i].not_written.remove(&page_id(&p));
+                                out[i].created.push(p);
+                            }
+                            for p in written.pages_updated {
+                                out[i].not_written.remove(&page_id(&p));
+                                out[i].updated.push(p);
+                            }
+                            out[i].rejected.extend(written.rejected);
+                            out[i].approved = Some(id);
+                        }
+                        None => {
+                            record_log(
+                                tenant,
+                                &format!("ingest {}: held as {id}", target.kind.as_str()),
+                            )
+                            .await?;
+                            out[i].proposal = Some(id);
+                        }
+                    }
                 }
             }
             open.retain(|i| !finished.contains(i));
+        }
+        // A record that came to nothing at all says so in the log.
+        let empty: Vec<&Item> = (0..n)
+            .filter(|&i| {
+                let f = &out[i];
+                items[i].page.is_none()
+                    && f.created.is_empty()
+                    && f.updated.is_empty()
+                    && f.rejected.is_empty()
+                    && f.proposal.is_none()
+                    && f.approved.is_none()
+            })
+            .map(|i| &items[i])
+            .collect();
+        if !empty.is_empty() {
+            let _writer = tenant.lock_wiki().await?;
+            for item in empty {
+                record_log(
+                    tenant,
+                    &format!(
+                        "ingest {}: nothing filed from {}",
+                        target.kind.as_str(),
+                        item.cite
+                    ),
+                )
+                .await?;
+            }
         }
         Ok(out)
     }

@@ -190,9 +190,19 @@ async fn setup_with(
     copy: bool,
     down: Arc<AtomicBool>,
 ) -> (TestApp, Web, Arc<FakeLlm>, String) {
+    setup_full(budget, copy, down, "").await
+}
+
+/// [`setup_with`] with extra config.
+async fn setup_full(
+    budget: u64,
+    copy: bool,
+    down: Arc<AtomicBool>,
+    extra: &str,
+) -> (TestApp, Web, Arc<FakeLlm>, String) {
     let web = start_web().await;
     let llm = librarian(down);
-    let app = TestApp::with_llm_and_config(llm.llm(), &config(budget));
+    let app = TestApp::with_llm_and_config(llm.llm(), &format!("{}{extra}", config(budget)));
     let key = app.create_tenant("acme").await;
     let (status, body) = app
         .put(
@@ -272,6 +282,46 @@ fn of_kind<'a>(report: &'a Value, kind: &str) -> Vec<&'a Value> {
         .iter()
         .filter(|f| f["kind"] == kind)
         .collect()
+}
+
+/// With `[librarian] auto_approve`, a screened page of a trusted site is filed at once: the run
+/// reports it approved, its filing follows on the write queue, and nothing waits for review. A
+/// page the screening stops is still never proposed.
+#[tokio::test]
+async fn auto_approve_files_a_found_page_at_once() {
+    let (app, _web, _llm, key) = setup_full(
+        200_000,
+        false,
+        Arc::default(),
+        "[librarian]\nauto_approve = true\n",
+    )
+    .await;
+    let c = Caller::new(&key);
+    miss(&app, &key, "跨境退货").await;
+    miss(&app, &key, "保修期").await;
+    let status = lint_and_acquire(&app, &key, 0).await;
+    let run = &status["last_run"];
+    assert_eq!(run["proposals"].as_array().unwrap().len(), 2, "{status}");
+    assert_eq!(run["approved"], run["proposals"], "{status}");
+    assert_eq!(run["refused"], 1, "the planted page is stopped: {status}");
+    // Each is approved once its filing job has filed it.
+    let started = std::time::Instant::now();
+    loop {
+        let (_, list) = app.get(c, "/proposals").await;
+        if list["proposals"] == json!([]) {
+            break;
+        }
+        assert!(started.elapsed().as_secs() < 30, "never filed: {list}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let (_, found) = app
+        .post(
+            c,
+            "/search",
+            json!({ "query": "跨境退货", "keywords": ["跨境退货"] }),
+        )
+        .await;
+    assert_ne!(found["knowledge"]["coverage"], "weak", "{found}");
 }
 
 #[tokio::test]

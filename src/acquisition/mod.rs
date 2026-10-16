@@ -226,6 +226,10 @@ pub struct RunReport {
     /// Gaps nothing was proposed for before choosing, with why.
     pub skipped: Vec<Skipped>,
     pub proposals: Vec<String>,
+    /// Of those, the ones approved at once (`[librarian] auto_approve`): their filing jobs are
+    /// queued after this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved: Vec<String>,
     /// Pages turned back this run (the reasons are at `GET /acquisition`).
     pub refused: usize,
     pub tokens: u64,
@@ -805,7 +809,19 @@ async fn run_inner(
             let id = propose(tenant, audience, candidate, &text_md, &fetched, &converted).await?;
             state.seen.insert(r.url.clone());
             state.seen.insert(fetched.url.clone());
-            report.proposals.push(id);
+            report.proposals.push(id.clone());
+            if app.config.librarian.auto_approve {
+                // Approved at once, as the admin would: its filing is queued after this run.
+                let p = tenant
+                    .store
+                    .proposal(&id)
+                    .await?
+                    .with_context(|| format!("proposal {id} was just held"))?;
+                approve(app, tenant.clone(), p, "auto-approve")
+                    .await
+                    .map_err(|e| anyhow::anyhow!("approving {id} at once: {e:?}"))?;
+                report.approved.push(id);
+            }
         }
     }
     Ok(())
@@ -946,6 +962,7 @@ pub async fn approve(
     app: &AppState,
     tenant: Arc<Tenant>,
     proposal: Proposal,
+    actor: &'static str,
 ) -> Result<JobInfo, ApiError> {
     let librarian = app.librarian()?;
     let candidate = proposal
@@ -1001,7 +1018,7 @@ pub async fn approve(
         let result = librarian.ingest(t3.clone(), job).await?;
         p.status = ProposalStatus::Approved;
         t3.store.put_proposal(&p).await?;
-        t3.store.audit("admin", "proposal.approve", &p.id).await?;
+        t3.store.audit(actor, "proposal.approve", &p.id).await?;
         if !copy {
             // The license doesn't say copies may be kept: only the address and what the
             // librarian wrote from it stay.

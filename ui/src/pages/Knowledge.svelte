@@ -172,6 +172,7 @@
     if (r?.pages_created.length) parts.push(t("job.created", { n: r.pages_created.length }));
     if (r?.pages_updated.length) parts.push(t("job.updated", { n: r.pages_updated.length }));
     if (r?.proposal) parts.push(t("job.held"));
+    if (r?.approved?.length) parts.push(t("job.approved", { n: r.approved.length }));
     if (!parts.length) parts.push(t("know.nothingChanged"));
     return { tone: r?.proposal ? "held" : "ok", text: parts.join(" · ") };
   }

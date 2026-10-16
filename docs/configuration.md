@@ -62,6 +62,7 @@ The librarian, the one LLM the service calls (writes only). Which model and its 
 | `timeout_secs` | a whole number, 0 or more | `300` | after a restart | How long one model call may take, in seconds. |
 | `related_pages` | a whole number, 0 or more | `8` | after a restart | How many related pages the librarian is shown when it files something (5 to 10 works best). |
 | `read_window_tokens` | a whole number, 0 or more | `20000` | after a restart | About how much of a document one reading step sees, in tokens; it grows when a concept runs past it. |
+| `auto_approve` | true or false | `false` | after a restart | Approve every proposal at once instead of leaving it on the Review page: edits the verifier held (filing, lint's fixes, hand edits), sources acquisition found on the trusted sites, and agents' graph drafts. Each takes the same path as an admin's approval (code checks, the graph checked again, a source read and filed by the librarian), but nobody looks first: an edit the verifier rightly stopped is written, a screened outside page is filed, an agent's graph change is applied. |
 
 ## [converter]
 

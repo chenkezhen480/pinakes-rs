@@ -274,6 +274,12 @@ pub struct LibrarianConfig {
     /// when a concept runs past it (design, "Reading like a person, one concept at a time").
     #[serde(default = "default_read_window_tokens")]
     pub read_window_tokens: usize,
+    /// Approve every proposal at once instead of leaving it for an admin: what the verifier held
+    /// (filing, lint's fixes, hand edits), the sources acquisition found and agents' graph
+    /// drafts. Each goes through the same path as an admin's approval (code checks, the graph
+    /// checked again, a source filed by the librarian) and is kept as an approved proposal.
+    #[serde(default)]
+    pub auto_approve: bool,
     /// What the model file says, once read ([`Config::load_model_file`]).
     #[serde(skip)]
     pub llm: ModelConfig,
@@ -301,6 +307,7 @@ impl Default for LibrarianConfig {
             timeout_secs: default_llm_timeout(),
             related_pages: default_related_pages(),
             read_window_tokens: default_read_window_tokens(),
+            auto_approve: false,
             llm: ModelConfig::default(),
             llm_file: None,
         }

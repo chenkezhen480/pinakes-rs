@@ -217,7 +217,11 @@ reason: string | null, };
 /**
  * A space's pending draft: its proposal (none when nothing is pending) and its net change.
  */
-export type DraftView = { proposal: string | null, space: string, 
+export type DraftView = { proposal: string | null, 
+/**
+ * With `[librarian] auto_approve`: what the draft applied at once (it is no longer pending).
+ */
+applied: GraphApplied | null, space: string, 
 /**
  * Nodes it adds or changes, as they would be.
  */
@@ -613,7 +617,12 @@ graph: GraphApplied | null,
  * own audience (a decision for the user, a lesson for the team). The pages of all of them
  * are in `pages_created` and `pages_updated`; `source` is the note as it arrived.
  */
-split?: Array<NoteFiled>, };
+split?: Array<NoteFiled>, 
+/**
+ * Proposals of this job approved at once (`[librarian] auto_approve`): the verifier held
+ * their edits and they were written all the same; their pages are in the lists above.
+ */
+approved?: Array<string>, };
 
 export type JobState = "queued" | "running" | "done" | "failed";
 
@@ -1013,6 +1022,11 @@ matched: Array<Matched>,
  * Gaps nothing was proposed for before choosing, with why.
  */
 skipped: Array<Skipped>, proposals: Array<string>, 
+/**
+ * Of those, the ones approved at once (`[librarian] auto_approve`): their filing jobs are
+ * queued after this run.
+ */
+approved?: Array<string>, 
 /**
  * Pages turned back this run (the reasons are at `GET /acquisition`).
  */

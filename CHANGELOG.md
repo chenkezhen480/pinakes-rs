@@ -12,10 +12,23 @@ How each part works is in [docs/guide.md](docs/guide.md).
 - **Reading progress**: while a document is read, its job shows how far the reading has come
   (`progress` on `/jobs`: lines read of the total, concepts filed so far), updated after every
   window; the console draws it as a bar on the upload page and in the jobs tray.
+- **Auto-approve** (`[librarian] auto_approve`, off by default, on the console's Settings page):
+  every proposal is approved at once through the admin's approval path, instead of waiting on
+  the Review page: edits the verifier held (filing, lint's fixes, hand edits; a job lists them in
+  `result.approved`), candidate sources from acquisition (`approved` in the run's report) and
+  agents' graph drafts (the draft's answer says what it `applied`).
 
 ### Fixed
 
 - The console marked uploaded PDFs as needing MarkItDown, though the service reads them itself.
+- A document's reading could fail on numbers the text never lacked: the check that every number
+  of an extract comes from the text counted the extract's own list numbering ("1. ", "2) ",
+  "3、") and, when a new version was read, the version numbers the librarian is told ("since
+  version 2 …"), and refused the reading four times. A refusal now quotes where the number is.
+- A record could be lost without a trace: sent back with the verifier's reasons, the model
+  could answer with no edits for it, which counted as filed. It is now asked again, and if it
+  keeps dropping the record, the edits it was last refused for are held (or refused) as for any
+  record that keeps failing. A record that files nothing says so in `log.md`.
 
 ## [0.1.0] - 2026-10-13
 

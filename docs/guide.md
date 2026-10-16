@@ -388,6 +388,15 @@ Ollama or vLLM too. Without a model, reads work and writes answer 503 saying why
 `GET /proposals`, each with its reasons. `POST /proposals/{id}/approve` and
 `POST /proposals/{id}/reject` (`{reason}`) take the admin key or the console.
 
+**Auto-approve** (`[librarian] auto_approve`, off by default): every proposal is approved at once
+instead of waiting: edits the verifier held (filing, lint's fixes, hand edits), candidate sources
+from acquisition, and agents' graph drafts. Each takes the admin's approval path (code checks,
+the graph checked again, a source read and filed by the librarian) and is kept as an approved
+proposal, with `auto-approve` in the audit log. A job lists the edits it approved in
+`result.approved`, an acquisition run its sources in `approved`, and a graph draft's answer says
+what it `applied`. Nobody looks first: an edit the verifier rightly stopped is written, a screened
+outside page is filed, an agent's change to the graph is applied.
+
 **Lint** (`POST /lint`, a job; `GET /lint` lists the last run's findings the caller may see)
 never writes pages. Code checks every page for broken links, anchors readers can't see, memories
 without anchors, missing or orphaned sources and unfinished document readings. From the search

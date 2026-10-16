@@ -862,6 +862,7 @@ pub async fn note(
             result.pages_created.extend(done.pages_created);
             result.pages_updated.extend(done.pages_updated);
             result.rejected.extend(done.rejected);
+            result.approved.extend(done.approved);
             if result.proposal.is_none() {
                 result.proposal = done.proposal.clone();
             }

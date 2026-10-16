@@ -68,6 +68,7 @@ export const zh: Strings = {
   "job.created": "新建 {n} 页",
   "job.updated": "更新 {n} 页",
   "job.held": "部分修改待审阅",
+  "job.approved": "{n} 项被拦下的修改已自动批准",
   "job.rejected": "{n} 处修改被拒",
   "job.toReview": "去审阅",
   "job.reading": "已读 {read} / {total} 行 · 已归档 {n} 个概念",

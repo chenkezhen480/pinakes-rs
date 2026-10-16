@@ -60,6 +60,10 @@ pub struct JobResult {
     /// are in `pages_created` and `pages_updated`; `source` is the note as it arrived.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<NoteFiled>,
+    /// Proposals of this job approved at once (`[librarian] auto_approve`): the verifier held
+    /// their edits and they were written all the same; their pages are in the lists above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved: Vec<String>,
 }
 
 /// One record a note was split into.

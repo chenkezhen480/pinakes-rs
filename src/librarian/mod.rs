@@ -393,6 +393,7 @@ impl Librarian {
                 pages_updated: f.updated,
                 rejected: f.rejected,
                 proposal: f.proposal,
+                approved: f.approved.into_iter().collect(),
                 source: Some(format!("sources/{}", j.source)),
                 ..JobResult::default()
             })
@@ -972,24 +973,29 @@ impl Librarian {
         let _writer = tenant.lock_wiki().await?;
         match verdicts.get(&0) {
             Some(Err(reason)) => {
-                result.proposal = Some(
-                    hold(
-                        &tenant,
-                        &target,
-                        &writer,
-                        None,
-                        vec![HeldEdit {
-                            edit,
-                            reason: reason.clone(),
-                        }],
-                    )
-                    .await?,
-                );
-                record_log(
-                    &tenant,
-                    &format!("hand edit of {}: held", log_page(&target, &own)),
-                )
-                .await?;
+                let held = vec![HeldEdit {
+                    edit,
+                    reason: reason.clone(),
+                }];
+                match self
+                    .hold_or_approve(&tenant, &target, &writer, None, held)
+                    .await?
+                {
+                    (id, Some(written)) => {
+                        result.pages_created.extend(written.pages_created);
+                        result.pages_updated.extend(written.pages_updated);
+                        result.rejected.extend(written.rejected);
+                        result.approved.push(id);
+                    }
+                    (id, None) => {
+                        result.proposal = Some(id);
+                        record_log(
+                            &tenant,
+                            &format!("hand edit of {}: held", log_page(&target, &own)),
+                        )
+                        .await?;
+                    }
+                }
             }
             _ => {
                 apply_and_record(
@@ -1037,13 +1043,24 @@ pub const NO_LONGER_APPLIES: &str = "none of the proposal's edits applies to the
 /// LLM is involved, so approving works without a librarian. When none of them applies any
 /// more, it fails with `NO_LONGER_APPLIES` and the proposal stays held.
 #[tracing::instrument(name = "approve_proposal", skip_all, fields(tenant = %tenant.dir_name))]
-pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Result<JobResult> {
+pub async fn approve(tenant: Arc<Tenant>, proposal: Proposal) -> anyhow::Result<JobResult> {
+    let _writer = tenant.lock_wiki().await?;
+    apply_proposal(&tenant, proposal, "admin").await
+}
+
+/// What [`approve`] does once it holds the wiki writer lock, for `actor` (`admin`, or
+/// `auto-approve` for [`Librarian::hold_or_approve`]).
+async fn apply_proposal(
+    tenant: &Arc<Tenant>,
+    mut proposal: Proposal,
+    actor: &str,
+) -> anyhow::Result<JobResult> {
+    let tenant = tenant.clone();
     let today = today();
     let mut result = JobResult {
         source: proposal.source.as_ref().map(|s| format!("sources/{s}")),
         ..JobResult::default()
     };
-    let _writer = tenant.lock_wiki().await?;
     // Approvals of one proposal can race; the status is checked again under the writer lock.
     let stored = tenant.store.proposal(&proposal.id).await?;
     anyhow::ensure!(
@@ -1068,7 +1085,11 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
         &today,
         &edits,
         &mut result,
-        &format!("approve {}", proposal.id),
+        &format!(
+            "{} {}",
+            if actor == "admin" { "approve" } else { actor },
+            proposal.id
+        ),
     )
     .await?;
     // Nothing applies any more (the pages changed or went away): the proposal stays held, so
@@ -1085,7 +1106,7 @@ pub async fn approve(tenant: Arc<Tenant>, mut proposal: Proposal) -> anyhow::Res
     tenant.store.put_proposal(&proposal).await?;
     tenant
         .store
-        .audit("admin", "proposal.approve", &proposal.id)
+        .audit(actor, "proposal.approve", &proposal.id)
         .await?;
     Ok(result)
 }
@@ -1579,6 +1600,44 @@ async fn hold(
         "edits held for review"
     );
     Ok(p.id)
+}
+
+impl Librarian {
+    /// Holds edits as a proposal and, with `[librarian] auto_approve`, approves it at once, as
+    /// an admin's approval would (the code checks again, not the verifier); the proposal is kept
+    /// as approved, by `auto-approve` in the audit log. Answers its id, and what the approval
+    /// wrote when it wrote anything; when nothing applies any more it stays held. For every
+    /// edit the verifier holds: filing, lint's fixes and hand edits. Callers hold the wiki
+    /// writer lock.
+    pub(super) async fn hold_or_approve(
+        &self,
+        tenant: &Arc<Tenant>,
+        target: &Target,
+        writer: &Scope,
+        source: Option<&str>,
+        edits: Vec<HeldEdit>,
+    ) -> anyhow::Result<(String, Option<JobResult>)> {
+        let id = hold(tenant, target, writer, source, edits).await?;
+        if !self.cfg.auto_approve {
+            return Ok((id, None));
+        }
+        let proposal = tenant
+            .store
+            .proposal(&id)
+            .await?
+            .with_context(|| format!("proposal {id} was just held"))?;
+        match apply_proposal(tenant, proposal, "auto-approve").await {
+            Ok(written) => {
+                tracing::info!(proposal = %id, "held edits approved at once");
+                Ok((id, Some(written)))
+            }
+            Err(e) if e.to_string().starts_with(NO_LONGER_APPLIES) => {
+                tracing::info!(proposal = %id, error = %e, "nothing to approve at once; held");
+                Ok((id, None))
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Step 5 and 6: checks the edits again on the wiki as it is now, writes what passes and

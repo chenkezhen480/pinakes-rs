@@ -23,7 +23,12 @@ use serde_json::{Value, json};
 
 /// The `shopline` scenario with its wiki and graph, behind a librarian that calls `llm`.
 async fn shopline(llm: &Arc<FakeLlm>) -> (TestApp, String) {
-    let mut app = TestApp::with_llm(llm.llm());
+    shopline_with(llm, "").await
+}
+
+/// [`shopline`] with extra config TOML.
+async fn shopline_with(llm: &Arc<FakeLlm>, extra: &str) -> (TestApp, String) {
+    let mut app = TestApp::with_llm_and_config(llm.llm(), extra);
     let key = app.create_tenant("shopline").await;
     testset::install_wiki("shopline", &app.wiki_dir("shopline"));
     app.restart();
@@ -280,6 +285,180 @@ async fn every_memory_is_anchored() {
         .await;
     assert_eq!(page["front_matter"]["about"], json!(["commerce:order"]));
     assert_eq!(page["front_matter"]["kind"], "experience");
+}
+
+/// A model that, sent back, drops the record's edits instead of correcting them: the edits it was
+/// last refused for stand, so the record is held (or approved at once with `auto_approve`), never
+/// lost without a trace (E1: three records came to nothing and said nothing).
+#[tokio::test]
+async fn a_record_dropped_after_a_refusal_is_held_not_lost() {
+    for auto in [false, true] {
+        let llm = FakeLlm::new(|step, msg, n| match step {
+            Step::Rank | Step::Screen => unreachable!("not asked here"),
+            Step::Plan if n == 0 => json!({ "edits": [create(
+                &format!("{}/oee-target", folder(msg)),
+                "OEE target",
+                "OEE target of 78% for L2.",
+                &["commerce:order"],
+                "# OEE target\n\n## 2026-07-01: 78% for L2\n\nDecided.",
+            )]})
+            .to_string(),
+            Step::Plan => NO_EDITS.into(),
+            Step::Verify => all_rejected(msg, "the record does not say which line"),
+            Step::Describe => describe_from_definition(msg),
+            Step::VerifyDescribe => OK.into(),
+            Step::Match => common::llm::NOT_THE_SAME.into(),
+            Step::Lint => common::llm::NO_FINDINGS.into(),
+            Step::Read => common::llm::skip_to_end(msg),
+        });
+        let extra = if auto {
+            "[librarian]\nauto_approve = true\n"
+        } else {
+            ""
+        };
+        let (app, key) = shopline_with(&llm, extra).await;
+        let lily = Caller::new(&key).user(Some("lily"));
+        let job = submit(
+            &app,
+            lily,
+            "/ingest/decision",
+            json!({ "topic": "OEE target", "decision": "78% for the welding line",
+                    "entities": ["commerce:order"] }),
+        )
+        .await;
+        let plans = llm.calls(Step::Plan);
+        assert_eq!(plans.len(), 4, "asked again until the tries run out");
+        assert!(plans[1].contains("the record does not say which line"));
+        assert!(
+            plans[2].contains("instead of dropping them"),
+            "{}",
+            plans[2]
+        );
+        let page = format!("users/{}/decisions/oee-target", user_dir_name("lily"));
+        let r = &job["result"];
+        if auto {
+            assert_eq!(r["pages_created"], json!([page.as_str()]), "{job}");
+            assert!(r["approved"][0].is_string(), "{job}");
+        } else {
+            assert_eq!(r["pages_created"], json!([]), "{job}");
+            let proposal = r["proposal"].as_str().unwrap();
+            let (_, list) = app.get(lily, "/proposals").await;
+            assert_eq!(list["proposals"][0]["proposal"], proposal);
+            assert_eq!(
+                list["proposals"][0]["edits"][0]["edit"]["page"],
+                page.as_str()
+            );
+        }
+    }
+}
+
+/// With `[librarian] auto_approve`, a hand edit the verifier holds is saved all the same.
+#[tokio::test]
+async fn auto_approve_saves_a_held_hand_edit() {
+    let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
+        Step::Verify => all_rejected(msg, "no page says 99 yuan"),
+        Step::Plan => NO_EDITS.into(),
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => common::llm::NOT_THE_SAME.into(),
+        Step::Lint => common::llm::NO_FINDINGS.into(),
+        Step::Read => common::llm::skip_to_end(msg),
+    });
+    let (app, key) = shopline_with(&llm, "[librarian]\nauto_approve = true\n").await;
+    let lily = Caller::new(&key).user(Some("lily"));
+    let uri = "/pages/expertise/shipping-sla";
+    let (_, page) = app.get(lily, uri).await;
+    let mut front = page["front_matter"].clone();
+    front["summary"] = json!("Free shipping from 99 yuan.");
+    let (status, resp) = app
+        .put(
+            lily,
+            uri,
+            json!({ "version": page["version"], "front_matter": front,
+                    "body": "# Shipping\n\nFree from 99 yuan.\n" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{resp}");
+    let job = app.wait_job(lily, resp["job"].as_str().unwrap()).await;
+    assert!(job["result"].get("proposal").is_none(), "{job}");
+    assert!(job["result"]["approved"][0].is_string(), "{job}");
+    let (_, now) = app.get(lily, uri).await;
+    assert!(now["body"].as_str().unwrap().contains("99 yuan"), "{now}");
+    let (_, list) = app.get(lily, "/proposals").await;
+    assert_eq!(list["proposals"], json!([]));
+}
+
+/// A record the model finds nothing to file from says so in the log.
+#[tokio::test]
+async fn a_record_that_files_nothing_is_logged() {
+    let llm = model(|_, _| json!({ "edits": [] }));
+    let (app, key) = shopline(&llm).await;
+    let lily = Caller::new(&key).user(Some("lily"));
+    let job = submit(
+        &app,
+        lily,
+        "/ingest/decision",
+        json!({ "topic": "nothing new", "decision": "Keep doing what we do" }),
+    )
+    .await;
+    assert_eq!(job["result"]["pages_created"], json!([]));
+    let log = std::fs::read_to_string(app.wiki_dir("shopline").join("log.md")).unwrap();
+    assert!(log.contains("ingest decision: nothing filed from"), "{log}");
+}
+
+/// With `[librarian] auto_approve`, the edits the verifier holds are approved at once: written
+/// through the code checks, the proposal kept as approved by `auto-approve`, nothing left to
+/// review.
+#[tokio::test]
+async fn auto_approve_writes_what_the_verifier_held() {
+    let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
+        Step::Plan => json!({ "edits": [create(
+            &format!("{}/free-shipping-threshold", folder(msg)),
+            "Free shipping threshold",
+            "Free shipping from 99 yuan.",
+            &["commerce:order"],
+            "# Free shipping threshold\n\n## 2026-10-01: free shipping from 99 yuan\n\nDecided.",
+        )]})
+        .to_string(),
+        Step::Verify => all_rejected(msg, "the record does not say the threshold is 99 yuan"),
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => common::llm::NOT_THE_SAME.into(),
+        Step::Lint => common::llm::NO_FINDINGS.into(),
+        Step::Read => common::llm::skip_to_end(msg),
+    });
+    let (app, key) = shopline_with(&llm, "[librarian]\nauto_approve = true\n").await;
+    let lily = Caller::new(&key).user(Some("lily"));
+    let job = submit(
+        &app,
+        lily,
+        "/ingest/decision",
+        json!({ "topic": "free shipping threshold", "decision": "Offer free shipping on big orders",
+                "entities": ["commerce:order"] }),
+    )
+    .await;
+    let page = format!(
+        "users/{}/decisions/free-shipping-threshold",
+        user_dir_name("lily")
+    );
+    let r = &job["result"];
+    assert_eq!(r["pages_created"], json!([page.as_str()]), "{job}");
+    assert!(r.get("proposal").is_none(), "nothing held: {job}");
+    let approved = r["approved"][0].as_str().unwrap();
+    let (status, got) = app.get(lily, &format!("/pages/{page}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(got["body"].as_str().unwrap().contains("99 yuan"));
+    let (_, list) = app.get(lily, "/proposals").await;
+    assert_eq!(list["proposals"], json!([]), "nothing waits for review");
+    let log = std::fs::read_to_string(app.wiki_dir("shopline").join("log.md")).unwrap();
+    assert!(log.contains(&format!("auto-approve {approved}")), "{log}");
+    // The admin can't approve it again.
+    let (status, _) = app
+        .post_admin(&format!("/proposals/{approved}/approve"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
 }
 
 /// Edits the verifier rejects twice are held as a proposal: nothing is written, the caller

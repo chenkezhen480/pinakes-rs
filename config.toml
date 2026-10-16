@@ -44,6 +44,9 @@ max_tokens = 16000             # per reply
 timeout_secs = 300             # per call
 related_pages = 8              # related pages the librarian is shown (5 to 10 in the design)
 read_window_tokens = 20000     # how much of a document one read sees; grows for a long concept
+auto_approve = false           # true: every proposal is approved at once instead of waiting on the
+                               # Review page: held edits (filing, lint, hand edits), sources found
+                               # outside and agents' graph drafts
 
 [converter]                    # MarkItDown, optional: PDF and the old binary Office formats. The service
                                # reads Markdown, text, HTML, Word, spreadsheets and PowerPoint itself.

@@ -74,6 +74,7 @@ export const en = {
   "job.created": "{n} pages created",
   "job.updated": "{n} updated",
   "job.held": "some edits held for review",
+  "job.approved": "{n} held edits approved automatically",
   "job.rejected": "{n} edits refused",
   "job.toReview": "to review",
   "job.reading": "Read {read} of {total} lines · {n} concepts filed",

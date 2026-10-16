@@ -243,6 +243,11 @@ pub const FIELDS: &[Field] = &[
         "About how much of a document one reading step sees, in tokens; it grows when a concept runs past it.",
     ),
     f(
+        "librarian.auto_approve",
+        Boolean,
+        "Approve every proposal at once instead of leaving it on the Review page: edits the verifier held (filing, lint's fixes, hand edits), sources acquisition found on the trusted sites, and agents' graph drafts. Each takes the same path as an admin's approval (code checks, the graph checked again, a source read and filed by the librarian), but nobody looks first: an edit the verifier rightly stopped is written, a screened outside page is filed, an agent's graph change is applied.",
+    ),
+    f(
         "converter.url",
         OptionalText,
         "Where the MarkItDown converter answers, such as http://127.0.0.1:8090. Unset, .doc, .xls and .ppt files are refused with what to do.",
@@ -509,6 +514,10 @@ pub const ZH: &[(&str, &str)] = &[
     (
         "librarian.read_window_tokens",
         "阅读文档时每一步大约看到的令牌数；一个概念超出时会扩大。",
+    ),
+    (
+        "librarian.auto_approve",
+        "所有待审内容立即自动批准，不再留在“审阅”页等待：校验员拦下的编辑（归档、体检修复、人工修改）、采集从信任网站找到的外部来源、智能体提交的图谱草稿。每一项都走和管理员批准相同的流程（代码检查、按当前图谱重新检查、由馆员阅读并归档外部来源），但没有人先看：校验员正确拦下的编辑会写入，筛查过的外部网页会归档，智能体的图谱修改会生效。",
     ),
     (
         "converter.url",
