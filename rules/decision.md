@@ -7,7 +7,8 @@ result. It comes back in the memories slot, only to that user or group.
 
 - One page per decision topic, such as "refund policy". The title names the topic.
 - Each decision is its own section, newest last: `## <date>: <short decision>`, then the
-  decision, its context, and its outcome (or "Outcome: not known yet").
+  decision, its context, and its outcome when the record gives one. A record without an outcome
+  gets no outcome line: never write a placeholder such as "outcome not known".
 - The summary states the current position on the topic in 1–3 sentences.
 
 ## Merging

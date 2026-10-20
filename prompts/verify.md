@@ -5,7 +5,9 @@ concept of a document with its extract); each edit says which item it files.
 An edit passes only if:
 
 1. every claim it adds or changes is supported by its item or by the pages shown,
-2. every anchor in `about` is something the content or the page is really about,
+2. every anchor in `about` is something the content or the page is really about (that an
+   anchor exists is checked by code against the graph and the wiki before you see it: never
+   refuse one as not existing, judge only whether the page is about it),
 3. it does not contradict another page shown without flagging the contradiction,
 4. it follows the rules for this kind of knowledge (shown in the message), including the merge
    rule: no duplicate page when an existing page covers the topic, no overwritten history where

@@ -96,10 +96,14 @@ fn body(model: &str, prompt: &Prompt, shape: Shape) -> Value {
         Shape::ReplyTool => {
             body["tools"] = json!([{
                 "name": REPLY_TOOL,
-                "description": "Give your answer. The input is the whole answer.",
+                "description": "Give your answer, in one call: its input is the whole answer \
+                                (every edit, step or verdict asked for), never part of it.",
                 "input_schema": prompt.schema,
             }]);
-            body["tool_choice"] = json!({ "type": "tool", "name": REPLY_TOOL });
+            // One call holds the whole answer; DeepSeek has split one over several calls anyway
+            // (seen 2026-10-20), which `reply_of` joins.
+            body["tool_choice"] =
+                json!({ "type": "tool", "name": REPLY_TOOL, "disable_parallel_tool_use": true });
             // A forced tool call can't run in thinking mode (DeepSeek answers 400), so the
             // shape wins over thinking on these endpoints.
             body["thinking"] = json!({ "type": "disabled" });
@@ -145,7 +149,7 @@ fn reply_of(reply: &Value, shape: Shape) -> anyhow::Result<String> {
         Some("max_tokens") => anyhow::bail!("the reply was cut off at max_tokens"),
         _ => {}
     }
-    let mut blocks = reply["content"].as_array().into_iter().flatten();
+    let blocks = reply["content"].as_array().into_iter().flatten();
     match shape {
         Shape::OutputFormat => {
             let text: String = blocks
@@ -156,12 +160,50 @@ fn reply_of(reply: &Value, shape: Shape) -> anyhow::Result<String> {
             Ok(text)
         }
         Shape::ReplyTool => {
-            let call = blocks
-                .rfind(|b| b["type"] == "tool_use" && b["name"] == REPLY_TOOL)
-                .ok_or_else(|| anyhow::anyhow!("the model didn't answer with the reply tool"))?;
-            Ok(call["input"].to_string())
+            let calls: Vec<&Value> = blocks
+                .filter(|b| b["type"] == "tool_use" && b["name"] == REPLY_TOOL)
+                .map(|b| &b["input"])
+                .collect();
+            anyhow::ensure!(
+                !calls.is_empty(),
+                "the model didn't answer with the reply tool"
+            );
+            Ok(joined(&calls)?.to_string())
         }
     }
+}
+
+/// One answer from the reply tool's calls. A model that splits its answer over several calls
+/// (an edit each) gives parts of one object: their lists are joined in order, and any other
+/// field must be the same in every call that gives it (taking only one call lost the rest).
+fn joined(calls: &[&Value]) -> anyhow::Result<Value> {
+    let [first, rest @ ..] = calls else {
+        anyhow::bail!("no reply");
+    };
+    if rest.is_empty() {
+        return Ok((*first).clone());
+    }
+    let mut out = serde_json::Map::new();
+    for call in calls {
+        let Some(fields) = call.as_object() else {
+            anyhow::bail!("the reply was split over several calls that aren't objects");
+        };
+        for (key, value) in fields {
+            match (out.get_mut(key), value) {
+                (None, v) => {
+                    out.insert(key.clone(), v.clone());
+                }
+                (Some(Value::Array(all)), Value::Array(more)) => all.extend(more.iter().cloned()),
+                (Some(Value::Null), v) => *out.get_mut(key).expect("present") = v.clone(),
+                (Some(_), Value::Null) => {}
+                (Some(have), v) if have == v => {}
+                _ => {
+                    anyhow::bail!("the reply was split over several calls that disagree on `{key}`")
+                }
+            }
+        }
+    }
+    Ok(Value::Object(out))
 }
 
 #[cfg(test)]
@@ -236,7 +278,10 @@ mod tests {
             "compatible endpoints cache on their own"
         );
         assert_eq!(b["tools"][0]["input_schema"], prompt().schema);
-        assert_eq!(b["tool_choice"], json!({ "type": "tool", "name": "reply" }));
+        assert_eq!(
+            b["tool_choice"],
+            json!({ "type": "tool", "name": "reply", "disable_parallel_tool_use": true })
+        );
         assert_eq!(b["thinking"], json!({ "type": "disabled" }));
 
         let ok = json!({ "stop_reason": "tool_use", "content": [
@@ -246,6 +291,29 @@ mod tests {
         let no_call = json!({ "stop_reason": "end_turn", "content": [
             { "type": "text", "text": "{\"edits\": []}" } ] });
         assert!(reply_of(&no_call, Shape::ReplyTool).is_err());
+    }
+
+    #[test]
+    fn an_answer_split_over_several_calls_is_joined() {
+        // As DeepSeek answered a round of seven items: one call per edit.
+        let split = json!({ "stop_reason": "tool_use", "content": [
+            { "type": "tool_use", "id": "t1", "name": "reply",
+              "input": { "edits": [{ "item": "i1" }], "thread": null } },
+            { "type": "tool_use", "id": "t2", "name": "reply",
+              "input": { "edits": [{ "item": "i2" }], "thread": "T" } },
+            { "type": "tool_use", "id": "t3", "name": "reply",
+              "input": { "edits": [{ "item": "i3" }], "thread": "T" } } ] });
+        let joined: Value =
+            serde_json::from_str(&reply_of(&split, Shape::ReplyTool).unwrap()).unwrap();
+        assert_eq!(
+            joined,
+            json!({ "edits": [{ "item": "i1" }, { "item": "i2" }, { "item": "i3" }],
+                    "thread": "T" })
+        );
+        let disagree = json!({ "stop_reason": "tool_use", "content": [
+            { "type": "tool_use", "id": "t1", "name": "reply", "input": { "more": true } },
+            { "type": "tool_use", "id": "t2", "name": "reply", "input": { "more": false } } ] });
+        assert!(reply_of(&disagree, Shape::ReplyTool).is_err());
     }
 
     #[test]

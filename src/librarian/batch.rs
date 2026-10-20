@@ -29,7 +29,8 @@ const ROUND_ITEMS: usize = 8;
 /// Most knowledge pages a record's session read that its item is shown and offered.
 const MAX_READ_PAGES: usize = 8;
 /// Told to an item sent back that came back without edits.
-const DROPPED: &str = "- The last reply had no edits for this item, but it still has to be filed: correct the                        edits refused above instead of dropping them.";
+const DROPPED: &str = "- The last reply had no edits for this item, but it still has to be filed: correct the \
+                       edits refused above instead of dropping them.";
 
 /// One thing to file.
 pub(super) struct Item {
@@ -68,35 +69,38 @@ pub(super) struct Filed {
     pub not_written: HashSet<String>,
 }
 
-/// An edit as the model tags it: which item it files.
+/// The edits that file one item.
 #[derive(Deserialize)]
-struct Tagged {
-    item: String,
-    #[serde(flatten)]
-    edit: Edit,
+struct ItemPlan {
+    #[serde(default)]
+    edits: Vec<Edit>,
 }
 
 #[derive(Deserialize)]
 struct Plan {
     #[serde(default)]
-    edits: Vec<Tagged>,
+    items: HashMap<String, ItemPlan>,
 }
 
-/// The edit plan for a batch: every edit tagged with one of the items' ids.
+/// The edit plan for a batch: an entry for every item, by its id, each required, so a reply
+/// can't leave an item out unseen (DeepSeek answered rounds of eight with one edit, 2026-10-20).
 pub fn batch_plan_schema(ids: &[String]) -> serde_json::Value {
-    let mut schema = plan_schema();
-    let item = json!({ "type": "string", "enum": ids });
-    for edit in schema["properties"]["edits"]["items"]["anyOf"]
-        .as_array_mut()
-        .expect("plan_schema lists the edits")
-    {
-        edit["properties"]["item"] = item.clone();
-        edit["required"]
-            .as_array_mut()
-            .expect("required")
-            .insert(0, json!("item"));
-    }
-    schema
+    let edits = plan_schema();
+    let entries: serde_json::Map<String, serde_json::Value> =
+        ids.iter().map(|id| (id.clone(), edits.clone())).collect();
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "object",
+                "properties": entries,
+                "required": ids,
+                "additionalProperties": false,
+            },
+        },
+        "required": ["items"],
+        "additionalProperties": false,
+    })
 }
 
 fn id_of(i: usize) -> String {
@@ -226,15 +230,18 @@ impl Librarian {
                     continue;
                 }
             };
-            // The round's edits, in order, with the item each files.
-            let mut edits: Vec<Edit> = Vec::new();
-            let mut owner: Vec<usize> = Vec::new();
-            for t in plan.edits {
-                if let Some(&i) = round.iter().find(|&&i| id_of(i) == t.item) {
-                    edits.push(t.edit);
-                    owner.push(i);
-                }
-            }
+            // The round's edits with the item each files: the items in order, and the pages
+            // created first, so an item may change a page another item creates.
+            let mut plan = plan;
+            let mut tagged: Vec<(usize, Edit)> = round
+                .iter()
+                .flat_map(|&i| {
+                    let mine = plan.items.remove(&id_of(i)).map(|p| p.edits);
+                    mine.into_iter().flatten().map(move |e| (i, e))
+                })
+                .collect();
+            tagged.sort_by_key(|(_, e)| !matches!(e, Edit::Create { .. }));
+            let (owner, edits): (Vec<usize>, Vec<Edit>) = tagged.into_iter().unzip();
             let cites: Vec<Option<String>> =
                 owner.iter().map(|&i| Some(items[i].cite.clone())).collect();
 
@@ -740,13 +747,20 @@ mod tests {
     #[test]
     fn the_batch_plan_names_its_items() {
         let s = batch_plan_schema(&["i1".into(), "i2".into()]);
-        for edit in s["properties"]["edits"]["items"]["anyOf"]
-            .as_array()
-            .unwrap()
-        {
-            assert_eq!(edit["properties"]["item"]["enum"], json!(["i1", "i2"]));
-            assert_eq!(edit["required"][0], "item");
+        let items = &s["properties"]["items"];
+        assert_eq!(items["required"], json!(["i1", "i2"]));
+        assert_eq!(items["additionalProperties"], false);
+        for id in ["i1", "i2"] {
+            assert_eq!(items["properties"][id], plan_schema());
         }
+        // Every item answered, the created pages first.
+        let plan: Plan = serde_json::from_value(json!({ "items": {
+            "i1": { "edits": [{ "op": "supersede", "page": "expertise/a", "claim": "c",
+                                "replacement": null, "reason": "r" }] },
+            "i2": { "edits": [] } } }))
+        .unwrap();
+        assert_eq!(plan.items["i1"].edits.len(), 1);
+        assert!(plan.items["i2"].edits.is_empty());
     }
 
     fn create(page: &str, about: &str) -> Edit {

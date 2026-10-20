@@ -175,15 +175,28 @@ impl LlmClient for FakeLlm {
         }
         let mut value: Value = serde_json::from_str(&reply)
             .map_err(|e| anyhow::anyhow!("the scripted reply is not JSON: {e}: {reply}"))?;
-        // Scripts written for one item may leave its edits untagged.
-        if step == Step::Plan {
+        // Scripts write a plan as one list of edits, each tagged with its item (scripts for one
+        // item may leave them untagged); the reply holds them by item, every item present.
+        if step == Step::Plan && value.get("items").is_none() {
             let ids: Vec<String> = items(&prompt.user).into_iter().map(|i| i.id).collect();
-            for e in value["edits"].as_array_mut().into_iter().flatten() {
-                if e.get("item").is_none() {
-                    assert_eq!(ids.len(), 1, "untagged edits in a plan for {ids:?}");
-                    e["item"] = json!(ids[0]);
+            let mut by_item: serde_json::Map<String, Value> = ids
+                .iter()
+                .map(|id| (id.clone(), json!({ "edits": [] })))
+                .collect();
+            for mut e in value["edits"].as_array().cloned().unwrap_or_default() {
+                let id = match e.as_object_mut().and_then(|o| o.remove("item")) {
+                    Some(Value::String(id)) => id,
+                    _ => {
+                        assert_eq!(ids.len(), 1, "untagged edits in a plan for {ids:?}");
+                        ids[0].clone()
+                    }
+                };
+                // An edit for an item not in this round has no place in the reply.
+                if let Some(entry) = by_item.get_mut(&id) {
+                    entry["edits"].as_array_mut().unwrap().push(e);
                 }
             }
+            value = json!({ "items": by_item });
         }
         let reply = value.to_string();
         if let Err(e) = fits(&prompt.schema, &value, "$") {
