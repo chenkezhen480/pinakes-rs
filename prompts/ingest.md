@@ -8,21 +8,21 @@ from a document with its extract. The message gives you:
 - the rules for this kind of knowledge (follow them exactly),
 - where pages of this kind may be written,
 - for a document, its main thread and the ledger of what has been read so far,
-- the pages the items relate to: in full those you may change, the others by id, title and
-  summary,
+- the pages the items relate to: in full those you may change (each item's most related), the
+  others by id, title and summary, which you may link to but not change,
 - each item: its content as JSON, its task, its related pages (most related first), the
   anchors it may use, and, when its last edits were rejected, why.
 
-File every item, all in this one reply: `items` has an entry for every item id shown, holding
-the edits that file it. When an item's last edits were rejected, send all of that item's
-edits again, fixed.
+File every item, all in this one reply: `items` has one entry for every item id shown, naming
+it (`item`) and holding the edits that file it. When an item's last edits were rejected, send
+all of that item's edits again, fixed.
 
 Reply with one JSON object of this shape (the reply format is enforced; every field is
 present, and a field you don't use is `null` or `[]`):
 
 {
-  "items": {
-    "i1": { "edits": [
+  "items": [
+    { "item": "i1", "edits": [
       { "op": "create", "page": "<folder>/<name>", "title": "...",
         "summary": "...", "aliases": ["..."], "keywords": ["..."], "about": ["..."],
         "body": "# Title\n\n..." },
@@ -31,11 +31,11 @@ present, and a field you don't use is `null` or `[]`):
         "text": "<the whole new content of that section, without its heading line>",
         "summary": "<new summary, or null if it doesn't change>",
         "add_aliases": ["..."], "add_keywords": ["..."], "add_about": ["..."] } ] },
-    "i2": { "edits": [
+    { "item": "i2", "edits": [
       { "op": "supersede", "page": "<existing page id>",
         "claim": "<exact text on the page>", "replacement": "<what replaces it, or null>",
         "reason": "..." } ] }
-  }
+  ]
 }
 
 How edits work:
@@ -69,4 +69,4 @@ How edits work:
   never add an anchor just to have one.
 - Never write ids, dates, `kind`, `sources` or `updated`; the service adds them.
 - Only state what the new content or the pages already support. Do not invent facts.
-- An item whose content adds nothing new gets an empty list: `"i1": { "edits": [] }`.
+- An item whose content adds nothing new gets an entry with no edits: `{ "item": "i1", "edits": [] }`.

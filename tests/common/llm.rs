@@ -176,12 +176,12 @@ impl LlmClient for FakeLlm {
         let mut value: Value = serde_json::from_str(&reply)
             .map_err(|e| anyhow::anyhow!("the scripted reply is not JSON: {e}: {reply}"))?;
         // Scripts write a plan as one list of edits, each tagged with its item (scripts for one
-        // item may leave them untagged); the reply holds them by item, every item present.
+        // item may leave them untagged); the reply holds an entry per item, every item present.
         if step == Step::Plan && value.get("items").is_none() {
             let ids: Vec<String> = items(&prompt.user).into_iter().map(|i| i.id).collect();
-            let mut by_item: serde_json::Map<String, Value> = ids
+            let mut by_item: Vec<Value> = ids
                 .iter()
-                .map(|id| (id.clone(), json!({ "edits": [] })))
+                .map(|id| json!({ "item": id, "edits": [] }))
                 .collect();
             for mut e in value["edits"].as_array().cloned().unwrap_or_default() {
                 let id = match e.as_object_mut().and_then(|o| o.remove("item")) {
@@ -192,7 +192,7 @@ impl LlmClient for FakeLlm {
                     }
                 };
                 // An edit for an item not in this round has no place in the reply.
-                if let Some(entry) = by_item.get_mut(&id) {
+                if let Some(entry) = by_item.iter_mut().find(|x| x["item"] == id.as_str()) {
                     entry["edits"].as_array_mut().unwrap().push(e);
                 }
             }

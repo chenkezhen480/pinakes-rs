@@ -26,6 +26,10 @@ use crate::wiki::Page;
 /// Most items one write call files, so a reply stays a size the model writes well; a larger
 /// batch is filed in rounds. The work is divided by items, never the text by size.
 const ROUND_ITEMS: usize = 8;
+/// Most related pages of each item shown whole; the rest are shown by title and summary. The
+/// whole pages were most of what a write and a verify call sent (2026-10-20: 23 a round, 58%
+/// of the input), while a concept mostly writes its own page and only links to the others.
+const WHOLE_PAGES: usize = 3;
 /// Most knowledge pages a record's session read that its item is shown and offered.
 const MAX_READ_PAGES: usize = 8;
 /// Told to an item sent back that came back without edits.
@@ -72,32 +76,31 @@ pub(super) struct Filed {
 /// The edits that file one item.
 #[derive(Deserialize)]
 struct ItemPlan {
+    item: String,
     #[serde(default)]
     edits: Vec<Edit>,
 }
 
 #[derive(Deserialize)]
 struct Plan {
-    #[serde(default)]
-    items: HashMap<String, ItemPlan>,
+    // Required: an empty answer (`{}`) is unreadable, not a plan without edits.
+    items: Vec<ItemPlan>,
 }
 
-/// The edit plan for a batch: an entry for every item, by its id, each required, so a reply
-/// can't leave an item out unseen (DeepSeek answered rounds of eight with one edit, 2026-10-20).
+/// The edit plan for a batch: an entry per item, naming it, with the edits that file it, so an
+/// item answers for itself (DeepSeek answered rounds of eight with one edit, 2026-10-20). A
+/// list of entries rather than an object keyed by item: given that object, DeepSeek answered
+/// the reply tool with an empty input, every time for some rounds (2026-10-20).
 pub fn batch_plan_schema(ids: &[String]) -> serde_json::Value {
-    let edits = plan_schema();
-    let entries: serde_json::Map<String, serde_json::Value> =
-        ids.iter().map(|id| (id.clone(), edits.clone())).collect();
+    let mut entry = plan_schema();
+    entry["properties"]
+        .as_object_mut()
+        .expect("plan_schema is an object")
+        .insert("item".into(), json!({ "type": "string", "enum": ids }));
+    entry["required"] = json!(["item", "edits"]);
     json!({
         "type": "object",
-        "properties": {
-            "items": {
-                "type": "object",
-                "properties": entries,
-                "required": ids,
-                "additionalProperties": false,
-            },
-        },
+        "properties": { "items": { "type": "array", "items": entry } },
         "required": ["items"],
         "additionalProperties": false,
     })
@@ -202,18 +205,30 @@ impl Librarian {
             let round: Vec<usize> = open.iter().take(ROUND_ITEMS).copied().collect();
             let ids: Vec<String> = round.iter().map(|&i| id_of(i)).collect();
             let pages = pages_of(round.iter().map(|&i| &related[i]));
+            let whole = whole_of(round.iter().map(|&i| &related[i]));
 
             // Step 3: one plan for the round.
             let msg = write_message(
                 rules, target, today, note, items, &round, &related, &anchors, &reads, &pages,
-                &feedback,
+                &whole, &feedback,
             );
-            let reply = self
-                .llm
-                .complete(&self.prompt(prompts::INGEST, msg, batch_plan_schema(&ids)))
-                .await
-                .context("planning the edits")?;
-            let plan = match parse_json::<Plan>(&reply) {
+            // A reply that can't be read is asked for again at once: DeepSeek now and then
+            // answers the reply tool with an empty input (seen 2026-10-20), which says nothing
+            // about the items, so it isn't counted against them unless every try is like it.
+            let prompt = self.prompt(prompts::INGEST, msg, batch_plan_schema(&ids));
+            let mut read = None;
+            for _ in 0..ATTEMPTS {
+                let reply = self
+                    .llm
+                    .complete(&prompt)
+                    .await
+                    .context("planning the edits")?;
+                read = Some(parse_json::<Plan>(&reply));
+                if matches!(read, Some(Ok(_))) {
+                    break;
+                }
+            }
+            let plan = match read.expect("asked at least once") {
                 Ok(p) => p,
                 Err(e) => {
                     let why =
@@ -236,8 +251,14 @@ impl Librarian {
             let mut tagged: Vec<(usize, Edit)> = round
                 .iter()
                 .flat_map(|&i| {
-                    let mine = plan.items.remove(&id_of(i)).map(|p| p.edits);
-                    mine.into_iter().flatten().map(move |e| (i, e))
+                    let id = id_of(i);
+                    let mine: Vec<Edit> = plan
+                        .items
+                        .iter_mut()
+                        .filter(|p| p.item == id)
+                        .flat_map(|p| std::mem::take(&mut p.edits))
+                        .collect();
+                    mine.into_iter().map(move |e| (i, e))
                 })
                 .collect();
             tagged.sort_by_key(|(_, e)| !matches!(e, Edit::Create { .. }));
@@ -249,9 +270,20 @@ impl Librarian {
             let checked = check(tenant, target, writer, &cites, today, &edits, true).await?;
             let shown = items_section(items, &round);
             let labels: Vec<String> = owner.iter().map(|&i| id_of(i)).collect();
+            // The verifier sees whole the pages the plan shown whole, and those it changes.
+            let mut seen = whole.clone();
+            seen.extend(edits.iter().map(|e| page_id(&e.page())));
             let verdicts = self
                 .verify(
-                    rules, target, &shown, note, &pages, &edits, &labels, &checked,
+                    rules,
+                    target,
+                    &shown,
+                    note,
+                    &pages,
+                    Some(&seen),
+                    &edits,
+                    &labels,
+                    &checked,
                 )
                 .await?;
             // A concept's page must be written by its item unless it exists already.
@@ -585,6 +617,15 @@ fn settle_round(
 }
 
 /// The pages a round shows, each once, in the order the items found them.
+/// The pages a round shows whole: each item's first `WHOLE_PAGES` related pages (its own
+/// page, an earlier version's pages, then the most related), the others by title and summary.
+fn whole_of<'a>(related: impl Iterator<Item = &'a Related>) -> HashSet<String> {
+    related
+        .flat_map(|r| r.pages.iter().take(WHOLE_PAGES))
+        .map(|p| page_id(p.path.as_str()))
+        .collect()
+}
+
 fn pages_of<'a>(related: impl Iterator<Item = &'a Related>) -> Vec<Page> {
     let mut seen = HashSet::new();
     let mut pages = Vec::new();
@@ -619,13 +660,23 @@ fn push_item(msg: &mut String, items: &[Item], i: usize) {
 /// The pages shown: in full those of the job's kind and audience, which edits may change; the
 /// others as their id, title and summary, which is enough to link to them or see they are
 /// about something else.
-pub(super) fn push_shown_pages(msg: &mut String, title: &str, pages: &[Page], target: &Target) {
+/// The pages shown: whole those the job may change (and, given `whole`, only those in it), the
+/// others by title and summary.
+pub(super) fn push_shown_pages(
+    msg: &mut String,
+    title: &str,
+    pages: &[Page],
+    target: &Target,
+    whole: Option<&HashSet<String>>,
+) {
     let _ = write!(msg, "## {title}\n\n");
     if pages.is_empty() {
         msg.push_str("None: no page in the wiki is related yet.\n\n");
     }
     for page in pages {
-        if target.allows(&page.path) {
+        if target.allows(&page.path)
+            && whole.is_none_or(|w| w.contains(&page_id(page.path.as_str())))
+        {
             let text = cut(&page.render(), MAX_PAGE_CHARS);
             let _ = write!(msg, "### {}\n\n```markdown\n{text}\n```\n\n", page.path);
         } else {
@@ -655,6 +706,7 @@ fn write_message(
     anchors: &[Vec<String>],
     reads: &[Vec<String>],
     pages: &[Page],
+    whole: &HashSet<String>,
     feedback: &[Vec<String>],
 ) -> String {
     let mut msg = format!(
@@ -679,7 +731,7 @@ fn write_message(
     if let Some(note) = note {
         let _ = write!(msg, "## This document\n\n{note}\n\n");
     }
-    push_shown_pages(&mut msg, "Pages", pages, target);
+    push_shown_pages(&mut msg, "Pages", pages, target, Some(whole));
     msg.push_str("## Items\n\n");
     for &i in round {
         push_item(&mut msg, items, i);
@@ -743,24 +795,52 @@ pub(super) fn batch_key(tenant: &str, target: &Target, writer: &Scope) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wiki::PagePath;
 
     #[test]
     fn the_batch_plan_names_its_items() {
         let s = batch_plan_schema(&["i1".into(), "i2".into()]);
-        let items = &s["properties"]["items"];
-        assert_eq!(items["required"], json!(["i1", "i2"]));
-        assert_eq!(items["additionalProperties"], false);
-        for id in ["i1", "i2"] {
-            assert_eq!(items["properties"][id], plan_schema());
-        }
-        // Every item answered, the created pages first.
-        let plan: Plan = serde_json::from_value(json!({ "items": {
-            "i1": { "edits": [{ "op": "supersede", "page": "expertise/a", "claim": "c",
-                                "replacement": null, "reason": "r" }] },
-            "i2": { "edits": [] } } }))
+        let entry = &s["properties"]["items"]["items"];
+        assert_eq!(entry["properties"]["item"]["enum"], json!(["i1", "i2"]));
+        assert_eq!(entry["required"], json!(["item", "edits"]));
+        assert_eq!(
+            entry["properties"]["edits"],
+            plan_schema()["properties"]["edits"]
+        );
+        let plan: Plan = serde_json::from_value(json!({ "items": [
+            { "item": "i1", "edits": [{ "op": "supersede", "page": "expertise/a", "claim": "c",
+                                         "replacement": null, "reason": "r" }] },
+            { "item": "i2", "edits": [] } ] }))
         .unwrap();
-        assert_eq!(plan.items["i1"].edits.len(), 1);
-        assert!(plan.items["i2"].edits.is_empty());
+        assert_eq!(plan.items[0].edits.len(), 1);
+        assert!(plan.items[1].edits.is_empty());
+        // An empty answer is unreadable (asked for again), not a plan that files nothing.
+        assert!(serde_json::from_value::<Plan>(json!({})).is_err());
+    }
+
+    #[test]
+    fn each_item_shows_its_first_pages_whole() {
+        let related = |names: &[&str]| Related {
+            pages: names
+                .iter()
+                .map(|n| Page::new(PagePath::parse(&format!("expertise/{n}")).unwrap()))
+                .collect(),
+            entities: Vec::new(),
+        };
+        let a = related(&["a", "b", "c", "d", "e"]);
+        let b = related(&["c", "f"]);
+        let whole = whole_of([&a, &b].into_iter());
+        let mut got: Vec<&str> = whole.iter().map(String::as_str).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            ["expertise/a", "expertise/b", "expertise/c", "expertise/f"]
+        );
+        assert_eq!(
+            pages_of([&a, &b].into_iter()).len(),
+            6,
+            "the rest by summary"
+        );
     }
 
     fn create(page: &str, about: &str) -> Edit {

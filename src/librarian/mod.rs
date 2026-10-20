@@ -735,6 +735,7 @@ impl Librarian {
         content: &str,
         note: Option<&str>,
         related: &[Page],
+        whole: Option<&HashSet<String>>,
         edits: &[Edit],
         labels: &[String],
         checked: &Checked,
@@ -750,7 +751,13 @@ impl Librarian {
             // The document's main thread and ledger: links to the ledger's pages are expected.
             let _ = write!(msg, "## This document\n\n{note}\n\n");
         }
-        batch::push_shown_pages(&mut msg, "Related pages, as they stand", related, target);
+        batch::push_shown_pages(
+            &mut msg,
+            "Related pages, as they stand",
+            related,
+            target,
+            whole,
+        );
         msg.push_str(content);
         msg.push_str("## Edits to check\n\n");
         for &i in &todo {
@@ -965,6 +972,7 @@ impl Librarian {
                 &content,
                 None,
                 &related.pages,
+                None,
                 std::slice::from_ref(&edit),
                 &[],
                 &checked,
@@ -1443,7 +1451,7 @@ pub fn description_schema(def: &SchemaDef) -> serde_json::Value {
 
 #[derive(Deserialize)]
 struct Verdicts {
-    #[serde(default)]
+    // Required: an empty answer (`{}`) is asked for again, not taken as no verdicts.
     verdicts: Vec<Verdict>,
 }
 
