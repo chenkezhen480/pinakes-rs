@@ -30,6 +30,7 @@ use super::{
 use crate::identity::Scope;
 use crate::jobs::JobResult;
 use crate::librarian::edit::Target;
+use crate::search::catalog::Catalog;
 use crate::tenants::Tenant;
 use crate::wiki::PagePath;
 
@@ -569,7 +570,7 @@ impl Librarian {
             let limit = earlier
                 .as_ref()
                 .map_or(lines.len(), |e| e.read_up_to(state.cursor, lines.len()));
-            let read = match first.take() {
+            let mut read = match first.take() {
                 Some(read) => read,
                 None => {
                     self.read_window(
@@ -596,6 +597,14 @@ impl Librarian {
                 read.steps.last().map_or(state.cursor - 1, |s| s.end),
                 lines.len(),
             );
+
+            // A concept's page another document's pages already hold is this document's own
+            // under a name of its own: the read doesn't see the wiki's pages, and two laws'
+            // "scope" concepts were both named `expertise/scope-of-application` (2026-10-20).
+            let snap = tenant.snapshot().await?;
+            for c in read.steps.iter_mut().filter_map(|s| s.concept.as_mut()) {
+                c.page = own_page(&c.page, &snap.catalog, &first_sources);
+            }
 
             // The window's concepts, filed as one batch from their extracts.
             let note = document_note(&state, earlier.as_ref());
@@ -906,6 +915,27 @@ fn document_note(state: &ReadingState, earlier: Option<&Earlier>) -> String {
     note
 }
 
+/// The page a concept is filed as: the one its read named, unless a page of that name holds
+/// another document's concepts (it cites none of this document's records), then the first of
+/// `<name>-2`, `<name>-3`… that is free or this document's own, so a later window that names
+/// the same page again finds the same one.
+fn own_page(page: &str, catalog: &Catalog, records: &[String]) -> String {
+    let ours = |p: &str| match catalog.get(p) {
+        None => true,
+        Some((_, e)) => e.sources.iter().any(|s| {
+            let record = s.split('#').next().unwrap_or(s);
+            records.iter().any(|r| r == record)
+        }),
+    };
+    if ours(page) {
+        return page.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{page}-{n}"))
+        .find(|p| ours(p))
+        .expect("some name is free")
+}
+
 /// One concept as an item: the caller's record (source_url, date, entities…) without its
 /// content, and the concept's extract in place of its lines.
 fn concept_item(
@@ -1042,6 +1072,42 @@ fn read_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_another_document_holds_is_named_anew() {
+        use crate::search::tokenize::Analyzer;
+        use crate::wiki::Page;
+        let page = |name: &str, source: &str| {
+            let text =
+                format!("---\nkind: expertise\ntitle: T\nsources:\n- {source}\n---\n\n# T\n");
+            Page::parse(PagePath::parse(name).unwrap(), &text).unwrap()
+        };
+        let catalog = Catalog::build(
+            vec![
+                page("expertise/scope", "2026-10-20-expertise-aaaa.json#L6-7"),
+                page("expertise/scope-2", "2026-10-20-expertise-bbbb.json#L6-6"),
+            ],
+            &Analyzer::new([]),
+        );
+        let first = ["2026-10-20-expertise-aaaa.json".to_owned()];
+        let second = ["2026-10-20-expertise-bbbb.json".to_owned()];
+        let third = ["2026-10-20-expertise-cccc.json".to_owned()];
+        // Its own page and a new one keep their names; another document's gets a free one,
+        // and the same one again in a later window.
+        assert_eq!(
+            own_page("expertise/scope", &catalog, &first),
+            "expertise/scope"
+        );
+        assert_eq!(own_page("expertise/new", &catalog, &third), "expertise/new");
+        assert_eq!(
+            own_page("expertise/scope", &catalog, &second),
+            "expertise/scope-2"
+        );
+        assert_eq!(
+            own_page("expertise/scope", &catalog, &third),
+            "expertise/scope-3"
+        );
+    }
 
     #[test]
     fn a_removed_step_is_seen_by_the_step_before_it() {

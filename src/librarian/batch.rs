@@ -52,8 +52,8 @@ pub(super) struct Item {
     pub read: Vec<String>,
     /// What the item is for, when its content doesn't say it all (the page a concept goes to).
     pub task: Option<String>,
-    /// The page the item must write, unless it exists already and there is nothing to add:
-    /// the page the reading chose for a concept, which the ledger records.
+    /// The page the item must write (create it, or update it citing the item): the page the
+    /// reading chose for a concept, which the ledger records.
     pub page: Option<String>,
     /// What the pages its edits write cite: the record, or the concept's lines in it.
     pub cite: String,
@@ -286,14 +286,10 @@ impl Librarian {
                     &checked,
                 )
                 .await?;
-            // A concept's page must be written by its item unless it exists already.
-            let snap = tenant.snapshot().await?;
-            let must_write = |i: usize| {
-                items[i]
-                    .page
-                    .clone()
-                    .filter(|p| snap.catalog.get(p).is_none())
-            };
+            // A concept's page must be written by its item, even when it exists already: an item
+            // that passed with nothing left its lines on no page (2026-10-20: a concept read onto
+            // another document's page of the same name, or onto an earlier concept's page).
+            let must_write = |i: usize| items[i].page.clone();
             let outcomes = settle_round(&round, &edits, &owner, &checked, &verdicts, &must_write);
 
             // Step 5: what passed is written now, together; what failed goes again.
@@ -582,8 +578,9 @@ fn settle_round(
             outcome.insert(
                 i,
                 Outcome::Missed(format!(
-                    "the concept is filed as `{page}`, as its task says: create that page \
-                     (link to it from other pages, never under another name)"
+                    "the concept is filed as `{page}`, as its task says: write that page from its \
+                     extract (create it, or update it if it exists; link to it from other pages, \
+                     never under another name)"
                 )),
             );
         }
