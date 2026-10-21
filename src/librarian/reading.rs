@@ -908,6 +908,12 @@ fn document_note(state: &ReadingState, earlier: Option<&Earlier>) -> String {
             state.reading.ledger_lines(MAX_LEDGER_LINES).join("\n")
         }
     );
+    note.push_str(
+        "Each item is a concept: file it as the page its task names, from its extract (update \
+         that page if it exists, create it if not). If an extract holds something that belongs \
+         to another concept, file that on that concept's page too: nothing in it is left out. \
+         Link to the ledger's pages where a concept refers to them.\n\n",
+    );
     if earlier.is_some() {
         note.push_str(&version_note(doc, state.version));
         note.push('\n');
@@ -973,11 +979,9 @@ fn concept_item(
         entities: job.entities.clone(),
         first_pages,
         read: Vec::new(),
+        // What every concept's task shares is said once, in the document's note.
         task: Some(format!(
-            "File the concept \"{}\" (lines {from}-{to}) as `{}`: update that page if it exists, \
-             create it if not, from its extract. If the extract holds something that belongs to \
-             another concept, file that on that concept's page too: nothing in it is left out. \
-             Link to the ledger's pages where this concept refers to them.",
+            "File the concept \"{}\" (lines {from}-{to}) as `{}`.",
             c.title, c.page
         )),
         page: Some(c.page.clone()),

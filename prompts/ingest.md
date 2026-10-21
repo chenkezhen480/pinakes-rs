@@ -42,7 +42,9 @@ How edits work:
 
 - `create` writes a new page. `page` must be in the folder you are given, with a short
   lowercase name of letters, digits and `-` (Chinese characters are allowed). Never create a
-  page that already exists; update it instead.
+  page that already exists; update it instead. A concept's own new page (the one its task
+  names) has `body` `""`: the service writes its extract under its title, so don't write it
+  again; give a body only to another page.
 - `update` changes one section of an existing page. `heading` names the section (without `#`):
   an existing heading replaces that whole section with `text`; a new heading adds a section at
   the end. Set `heading` and `text` to `null` to change only the front matter fields. To
@@ -62,7 +64,8 @@ How edits work:
   elsewhere.
 - Items of one batch may link to each other's pages; an item may create a page another item
   links to.
-- `summary` is 1–3 sentences. `aliases` and `keywords` are short terms in English and Chinese.
+- `summary` is one sentence (two at most) saying what the page holds. `aliases` and `keywords`
+  are short terms in English and Chinese, at most 6 of each: what people would search for.
 - `about` anchors: only the anchors listed as allowed, and only what the page is really about.
   Experience and decision pages need at least one. A preference page is its user's (its folder
   says whose): anchor it only to what its preferences really concern, or leave `about` empty;

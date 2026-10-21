@@ -262,7 +262,21 @@ impl Librarian {
                 })
                 .collect();
             tagged.sort_by_key(|(_, e)| !matches!(e, Edit::Create { .. }));
-            let (owner, edits): (Vec<usize>, Vec<Edit>) = tagged.into_iter().unzip();
+            let (owner, mut edits): (Vec<usize>, Vec<Edit>) = tagged.into_iter().unzip();
+            // A concept's own new page left without a body is its extract under its title: the
+            // read wrote that text already, and writing it again was most of a plan's output
+            // (2026-10-20).
+            for (k, e) in edits.iter_mut().enumerate() {
+                if let Edit::Create {
+                    page, title, body, ..
+                } = e
+                    && body.trim().is_empty()
+                    && items[owner[k]].page.as_deref().map(page_id) == Some(page_id(page))
+                    && let Some(extract) = items[owner[k]].content["extract"].as_str()
+                {
+                    *body = format!("# {title}\n\n{extract}\n");
+                }
+            }
             let cites: Vec<Option<String>> =
                 owner.iter().map(|&i| Some(items[i].cite.clone())).collect();
 
@@ -270,9 +284,9 @@ impl Librarian {
             let checked = check(tenant, target, writer, &cites, today, &edits, true).await?;
             let shown = items_section(items, &round);
             let labels: Vec<String> = owner.iter().map(|&i| id_of(i)).collect();
-            // The verifier sees whole the pages the plan shown whole, and those it changes.
-            let mut seen = whole.clone();
-            seen.extend(edits.iter().map(|e| page_id(&e.page())));
+            // The verifier sees whole only the pages the plan changes, the others by title and
+            // summary (the related pages shown whole were a third of its input, 2026-10-20).
+            let seen: HashSet<String> = edits.iter().map(|e| page_id(&e.page())).collect();
             let verdicts = self
                 .verify(
                     rules,
@@ -654,11 +668,9 @@ fn push_item(msg: &mut String, items: &[Item], i: usize) {
     }
 }
 
-/// The pages shown: in full those of the job's kind and audience, which edits may change; the
-/// others as their id, title and summary, which is enough to link to them or see they are
-/// about something else.
-/// The pages shown: whole those the job may change (and, given `whole`, only those in it), the
-/// others by title and summary.
+/// The pages shown: whole those of the job's kind and audience, which edits may change (and,
+/// given `whole`, only those in it); the others as their id, title and summary, which is
+/// enough to link to them or see they are about something else.
 pub(super) fn push_shown_pages(
     msg: &mut String,
     title: &str,
@@ -729,19 +741,49 @@ fn write_message(
         let _ = write!(msg, "## This document\n\n{note}\n\n");
     }
     push_shown_pages(&mut msg, "Pages", pages, target, Some(whole));
+    // What the items' anchors share is said once: the node types are the tenant's, the same for
+    // every item, and an item's anchor pages are mostly its related pages (the two lists were
+    // over half of the items' text, 2026-10-20).
+    let types = |i: usize| anchors[i].iter().find(|l| l.starts_with("- Node types:"));
+    let shared = types(round[0]).filter(|t| round.iter().all(|&i| types(i) == Some(*t)));
+    if let Some(t) = shared {
+        let _ = write!(
+            msg,
+            "## Anchors\n\nNode types every item may anchor to: {}\n\n",
+            t.trim_start_matches("- Node types: ")
+        );
+    }
     msg.push_str("## Items\n\n");
     for &i in round {
         push_item(&mut msg, items, i);
-        let related_ids: Vec<&str> = related[i].pages.iter().map(|p| p.path.as_str()).collect();
+        let related_ids = related[i]
+            .pages
+            .iter()
+            .map(|p| p.path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let related_ids = if related_ids.is_empty() {
+            "none".to_owned()
+        } else {
+            related_ids
+        };
+        let lines: Vec<String> = anchors[i]
+            .iter()
+            .filter(|l| shared.is_none_or(|t| *l != t))
+            .map(|l| match l.strip_prefix("- Pages: ") {
+                Some(p) if p == related_ids => "- Pages: its related pages".to_owned(),
+                _ => l.clone(),
+            })
+            .collect();
         let _ = write!(
             msg,
-            "Related pages: {}\n\nAllowed anchors:\n{}\n\n",
-            if related_ids.is_empty() {
-                "none".to_owned()
+            "Related pages: {related_ids}\n\nAllowed anchors{}:\n{}\n\n",
+            if shared.is_some() {
+                " (and the node types above)"
             } else {
-                related_ids.join(", ")
+                ""
             },
-            anchors[i].join("\n")
+            lines.join("\n")
         );
         if !reads[i].is_empty() {
             let _ = write!(

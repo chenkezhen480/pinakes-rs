@@ -33,7 +33,9 @@ present, and a field you don't use is `null` or `[]`):
   rules, conditions, steps and exceptions, in the document's terms. Numbers, dates, deadlines,
   amounts and conditions exactly as the lines write them (they are checked against the lines).
   Nothing in the lines that is knowledge is left out. For a new version, also say what changed
-  since the earlier version, as the changes shown say.
+  since the earlier version, as the changes shown say. A new concept's page is written from its
+  extract as it stands, so write it as the page's text: Markdown paragraphs and lists, no
+  heading (the title is), no links.
 - `page`: the page the concept is filed as. When it continues a concept already in the ledger,
   or is the same concept as a page in the earlier version's reading, that page; otherwise a new
   id in the folder given, named after the concept (such as `expertise/cross-border-returns`).

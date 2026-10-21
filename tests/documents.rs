@@ -502,6 +502,49 @@ async fn documents_are_read_one_concept_at_a_time() {
     assert!(cites.contains("#L"), "{hits}");
 }
 
+/// A concept's own new page the plan leaves without a body is its extract under its title (the
+/// read wrote it already); a body the plan gives is kept.
+#[tokio::test]
+async fn a_new_concept_page_without_a_body_is_its_extract() {
+    let llm = FakeLlm::new(|step, msg, _| match step {
+        Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
+        Step::Plan => {
+            let mut plan: Value = serde_json::from_str(&rule_plan(msg, |_| false)).unwrap();
+            for e in plan["edits"].as_array_mut().unwrap() {
+                if e["page"] == "expertise/rule-1" {
+                    e["body"] = json!("");
+                }
+            }
+            plan.to_string()
+        }
+        Step::Verify => all_ok(msg),
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => NOT_THE_SAME.into(),
+        _ => unreachable!("not asked here"),
+    });
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let (_, r) = file(
+        &app,
+        c,
+        json!({ "title": "手册", "content": rules_text(&["甲", "乙"]) }),
+    )
+    .await;
+    assert_eq!(r["pages_created"].as_array().unwrap().len(), 2, "{r}");
+
+    let plan = &llm.calls(Step::Plan)[0];
+    let extract = items(plan)[0].content["extract"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, page) = app.get(c, "/pages/expertise/rule-1").await;
+    assert_eq!(page["body"], format!("# 甲\n\n{extract}\n"), "{page}");
+    let (_, other) = app.get(c, "/pages/expertise/rule-2").await;
+    assert_eq!(other["body"], "# 乙\n\n乙规定的概括。\n", "{other}");
+}
+
 /// A reading that stops half way (here the model is unreachable while the third concept is
 /// filed) is resumed by the next upload of the same text: the concepts already filed are not
 /// read or written again, and the version is recorded under the first upload's record.
