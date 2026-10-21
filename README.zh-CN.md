@@ -172,9 +172,9 @@ flowchart LR
 | | `jwt` | 请求直接来自用户的机器（例如接了 MCP 的智能体）：宿主签发包含租户、用户、组的 token，Pinakes 用宿主的公钥验签 |
 | **图存储**（`[graph] backend`） | `sqlite`（默认） | 每个租户目录下一个 `graph.sqlite`，无需额外服务 |
 | | `neo4j` | 使用 compose 的 `neo4j` profile；两者之间用 `pinakes-migrate-graph` 迁移数据 |
-| **语义检索**（`[embedding] enabled`） | 关闭（默认） | 只用关键词检索，不下载任何东西；`semantic` 与 `both` 会说明如何开启 |
+| **语义检索**（`[embedding] enabled`） | 关闭（默认） | 只用关键词检索，不下载任何东西；`semantic` 会说明如何开启，`auto` 只用关键词 |
 | | 开启（控制台开关或配置行） | 在后台一次性下载 `jina-embeddings-v2-base-zh`（约 640 MB）到 `<data>/models`，只保留由它生成的 8 位版本（316 MB），并嵌入所有页面，无需重启；可用 `HF_ENDPOINT` 指定镜像 |
-| **默认检索模式**（`[search] default_mode`） | `keyword`（默认）、`semantic`、`both`、`auto` | 检索请求未指定时使用；`auto` 先用关键词，覆盖不足时再用语义 |
+| **默认检索模式**（`[search] default_mode`） | `auto`（默认）、`keyword`、`semantic` | 检索请求未指定时使用；`auto` 在开启向量时同时按关键词和语义检索，关闭时只用关键词 |
 | **文档转换** | 内置（默认） | Markdown、文本、HTML、Word（`.docx`）、表格（`.xlsx`、`.csv`）、PowerPoint（`.pptx`）和 PDF（读取文字层，在单独进程中进行；扫描件由模型逐页转写，模型须能接收图片，如 DeepSeek 的 `deepseek-flash`）由服务自行读取 |
 | | 加上 MarkItDown（`[converter] url`，compose profile `markitdown`） | 旧版二进制 Office（`.doc`、`.xls`、`.ppt`）；没有它时会拒绝并说明怎么办 |
 | **外部获取**（`[acquisition] enabled`） | 关闭（默认） | 先在部署层面打开，再按租户配置白名单开启（`PUT /admin/tenants/{id}/acquisition`） |

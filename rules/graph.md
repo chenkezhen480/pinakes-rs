@@ -7,7 +7,7 @@ what the types mean.
 ## What to write
 
 - `title`: a short name for the schema, such as "Commerce graph".
-- `summary`: 1–2 sentences on what the schema models.
+- `summary`: 1–2 sentences on what the schema models, in English and then the same in Chinese.
 - `aliases`: other names of the schema in both languages.
 - For each node type and relation type: `en` and `zh`, one short phrase each saying what it is,
   and a few `aliases` people use for it (both languages; for a relation, the verbs and phrases

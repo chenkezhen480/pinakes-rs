@@ -42,9 +42,12 @@ How edits work:
 
 - `create` writes a new page. `page` must be in the folder you are given, with a short
   lowercase name of letters, digits and `-` (Chinese characters are allowed). Never create a
-  page that already exists; update it instead. A concept's own new page (the one its task
-  names) has `body` `""`: the service writes its extract under its title, so don't write it
-  again; give a body only to another page.
+  page that already exists; update it instead.
+- `file` creates a document concept's own page, the one its task names, when its task says the
+  page is new: `{ "op": "file", "title": "...", "summary": "...", "aliases": [...],
+  "keywords": [...], "about": [...] }`, with no page and no text. The service writes the
+  concept's extract as its text, so file a new concept's page this way, never with `create`;
+  `create` is for any other new page.
 - `update` changes one section of an existing page. `heading` names the section (without `#`):
   an existing heading replaces that whole section with `text`; a new heading adds a section at
   the end. Set `heading` and `text` to `null` to change only the front matter fields. To
@@ -64,8 +67,13 @@ How edits work:
   elsewhere.
 - Items of one batch may link to each other's pages; an item may create a page another item
   links to.
-- `summary` is one sentence (two at most) saying what the page holds. `aliases` and `keywords`
-  are short terms in English and Chinese, at most 6 of each: what people would search for.
+- `summary` says what the page holds, as its kind's rules say, in English and then the same in
+  Chinese, such as `Refunds are due within 14 days of a return. 退货后 14 天内必须退款。`:
+  people search in either language, whatever the page's. Keep it short: at most 30 English
+  words and 60 Chinese characters, 400 characters in all (a summary over 600 is refused). The
+  page holds the details; the summary only says what they are about. `aliases` and `keywords` are short
+  terms people would search for, at most 6 of each, in both languages: each term also in the
+  other one (`refund`, `退款`).
 - `about` anchors: only the anchors listed as allowed, and only what the page is really about.
   Experience and decision pages need at least one. A preference page is its user's (its folder
   says whose): anchor it only to what its preferences really concern, or leave `about` empty;

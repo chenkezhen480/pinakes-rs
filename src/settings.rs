@@ -284,8 +284,8 @@ pub const FIELDS: &[Field] = &[
     ),
     f(
         "search.default_mode",
-        Choice(&["keyword", "semantic", "both", "auto"]),
-        "The mode of a search that doesn't say. semantic and both need embeddings on; auto ranks by meaning only where keywords come back weak.",
+        Choice(&["keyword", "semantic", "auto"]),
+        "The mode of a search that doesn't say. semantic needs embeddings on; auto ranks by keywords and meaning when they are on, by keywords when they are off.",
     ),
     f(
         "search.hop.top_memories",
@@ -549,7 +549,7 @@ pub const ZH: &[(&str, &str)] = &[
     ),
     (
         "search.default_mode",
-        "检索未指定时的模式。semantic 和 both 需要开启向量嵌入；auto 只在关键词结果不足时按语义补充。",
+        "检索未指定时的模式。semantic 需要开启向量嵌入；auto 在开启向量时同时按关键词和语义检索，关闭时只用关键词。",
     ),
     (
         "search.hop.top_memories",

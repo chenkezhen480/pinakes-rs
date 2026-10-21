@@ -561,8 +561,8 @@ impl Librarian {
 
 /// Searches with each query and adds up how each page ranks (1 for first, ½ for second, …),
 /// so pages found for many parts of a text come first. Also the entities named. With
-/// `meaning`, the searches run in `both` mode (blocking: it embeds each query); otherwise by
-/// keywords alone.
+/// `meaning`, the searches rank by keywords and meaning (blocking: it embeds each query);
+/// otherwise by keywords alone.
 #[allow(clippy::too_many_arguments)]
 fn find(
     snap: &SearchSnapshot,
@@ -588,7 +588,7 @@ fn find(
             "query": q,
             "keywords": short(keywords),
             "entities": short(entities),
-            "mode": if meaning.is_some() { "both" } else { "keyword" },
+            "mode": "auto",
             "slots": { "memories": 20, "knowledge": 20, "relations": 0 },
             "hop": false,
         }))?;

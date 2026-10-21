@@ -10,7 +10,7 @@ entities, written as linked wiki pages. It comes back in the knowledge slot.
 - Start with a short definition, then sections with headings. Link related pages by their
   ids, `[[<folder>/<name>]]` such as `[[expertise/cross-border-returns]]`, and only to pages
   that exist.
-- The summary is 1–3 sentences that define the concept.
+- The summary defines the concept in one short sentence in English and the same in Chinese.
 - Aliases hold the other names of the concept in English and Chinese; keywords hold the terms
   people search for.
 

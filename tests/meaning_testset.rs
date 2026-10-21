@@ -208,7 +208,7 @@ async fn semantic_mode_recovers_cross_language_misses() {
     let keyword = ask(&w, &xl, json!({ "mode": "keyword" }), judge).await;
     report("cross-language, keyword", &keyword);
     let mut table = Vec::new();
-    for mode in ["semantic", "both", "auto"] {
+    for mode in ["semantic", "auto"] {
         let out = ask(&w, &xl, json!({ "mode": mode }), judge).await;
         report(&format!("cross-language, {mode}"), &out);
         table.push((mode, out.passed));

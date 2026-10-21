@@ -419,7 +419,7 @@ vector_graph_rows = {}
         queries.push((None, json!({ "query": query, "keywords": keywords })));
     }
     stand.queries.store(true, Ordering::Relaxed);
-    for mode in ["keyword", "semantic", "both"] {
+    for mode in ["keyword", "semantic", "auto"] {
         let mut wall = Vec::new();
         for _ in 0..RUNS {
             for (user, body) in &queries {

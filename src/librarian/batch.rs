@@ -15,8 +15,8 @@ use serde_json::json;
 use super::edit::Target;
 use super::{
     ATTEMPTS, Checked, Edit, HeldEdit, Librarian, MAX_PAGE_CHARS, Related, added_links,
-    anchor_options, anchorable_pages, apply_and_record, check, cut, op_name, page_id, parse_json,
-    plan_schema, prompts, record_log,
+    anchor_options, anchorable_pages, apply_and_record, check, cut, object, op, op_name, page_id,
+    parse_json, plan_schema, prompts, record_log, string, strings,
 };
 use crate::identity::Scope;
 use crate::jobs::{JobResult, Rejected};
@@ -78,7 +78,59 @@ pub(super) struct Filed {
 struct ItemPlan {
     item: String,
     #[serde(default)]
-    edits: Vec<Edit>,
+    edits: Vec<PlanEdit>,
+}
+
+/// An edit of a batch plan: one of the plan's edits, or a concept's own new page given without
+/// its text, which is the concept's extract. Asked to leave that text out of a `create`, the
+/// model wrote it anyway for 339 of 461 pages (2026-10-20), so the op has no field for it.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PlanEdit {
+    File(FileEdit),
+    Edit(Edit),
+}
+
+#[derive(Deserialize)]
+struct FileEdit {
+    #[allow(dead_code)]
+    op: FileOp,
+    title: String,
+    summary: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    about: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FileOp {
+    File,
+}
+
+impl PlanEdit {
+    /// The edit it stands for, filing `item`: `file` creates the item's page from its extract
+    /// under the title given.
+    fn into_edit(self, item: &Item) -> Edit {
+        match self {
+            PlanEdit::Edit(e) => e,
+            PlanEdit::File(f) => {
+                let extract = item.content["extract"].as_str().unwrap_or_default();
+                Edit::Create {
+                    page: item.page.clone().unwrap_or_default(),
+                    body: format!("# {}\n\n{extract}\n", f.title),
+                    title: f.title,
+                    summary: f.summary,
+                    aliases: f.aliases,
+                    keywords: f.keywords,
+                    about: f.about,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -90,9 +142,23 @@ struct Plan {
 /// The edit plan for a batch: an entry per item, naming it, with the edits that file it, so an
 /// item answers for itself (DeepSeek answered rounds of eight with one edit, 2026-10-20). A
 /// list of entries rather than an object keyed by item: given that object, DeepSeek answered
-/// the reply tool with an empty input, every time for some rounds (2026-10-20).
-pub fn batch_plan_schema(ids: &[String]) -> serde_json::Value {
+/// the reply tool with an empty input, every time for some rounds (2026-10-20). With `file`
+/// (every item a concept with its page), the edits may also be `file`.
+pub fn batch_plan_schema(ids: &[String], file: bool) -> serde_json::Value {
     let mut entry = plan_schema();
+    if file {
+        entry["properties"]["edits"]["items"]["anyOf"]
+            .as_array_mut()
+            .expect("plan_schema lists its edits")
+            .push(object(&[
+                ("op", op("file")),
+                ("title", string()),
+                ("summary", string()),
+                ("aliases", strings()),
+                ("keywords", strings()),
+                ("about", strings()),
+            ]));
+    }
     entry["properties"]
         .as_object_mut()
         .expect("plan_schema is an object")
@@ -215,7 +281,10 @@ impl Librarian {
             // A reply that can't be read is asked for again at once: DeepSeek now and then
             // answers the reply tool with an empty input (seen 2026-10-20), which says nothing
             // about the items, so it isn't counted against them unless every try is like it.
-            let prompt = self.prompt(prompts::INGEST, msg, batch_plan_schema(&ids));
+            let file = round
+                .iter()
+                .all(|&i| items[i].page.is_some() && items[i].content["extract"].is_string());
+            let prompt = self.prompt(prompts::INGEST, msg, batch_plan_schema(&ids, file));
             let mut read = None;
             for _ in 0..ATTEMPTS {
                 let reply = self
@@ -257,26 +326,13 @@ impl Librarian {
                         .iter_mut()
                         .filter(|p| p.item == id)
                         .flat_map(|p| std::mem::take(&mut p.edits))
+                        .map(|e| e.into_edit(&items[i]))
                         .collect();
                     mine.into_iter().map(move |e| (i, e))
                 })
                 .collect();
             tagged.sort_by_key(|(_, e)| !matches!(e, Edit::Create { .. }));
-            let (owner, mut edits): (Vec<usize>, Vec<Edit>) = tagged.into_iter().unzip();
-            // A concept's own new page left without a body is its extract under its title: the
-            // read wrote that text already, and writing it again was most of a plan's output
-            // (2026-10-20).
-            for (k, e) in edits.iter_mut().enumerate() {
-                if let Edit::Create {
-                    page, title, body, ..
-                } = e
-                    && body.trim().is_empty()
-                    && items[owner[k]].page.as_deref().map(page_id) == Some(page_id(page))
-                    && let Some(extract) = items[owner[k]].content["extract"].as_str()
-                {
-                    *body = format!("# {title}\n\n{extract}\n");
-                }
-            }
+            let (owner, edits): (Vec<usize>, Vec<Edit>) = tagged.into_iter().unzip();
             let cites: Vec<Option<String>> =
                 owner.iter().map(|&i| Some(items[i].cite.clone())).collect();
 
@@ -593,7 +649,7 @@ fn settle_round(
                 i,
                 Outcome::Missed(format!(
                     "the concept is filed as `{page}`, as its task says: write that page from its \
-                     extract (create it, or update it if it exists; link to it from other pages, \
+                     extract (`file` it, or update it if it exists; link to it from other pages, \
                      never under another name)"
                 )),
             );
@@ -756,6 +812,19 @@ fn write_message(
     msg.push_str("## Items\n\n");
     for &i in round {
         push_item(&mut msg, items, i);
+        if let Some(own) = &items[i].page
+            && items[i].content["extract"].is_string()
+        {
+            let exists = related[i]
+                .pages
+                .iter()
+                .any(|p| page_id(p.path.as_str()) == page_id(own));
+            msg.push_str(if exists {
+                "Its page exists: update it.\n\n"
+            } else {
+                "Its page is new: `file` creates it.\n\n"
+            });
+        }
         let related_ids = related[i]
             .pages
             .iter()
@@ -838,7 +907,7 @@ mod tests {
 
     #[test]
     fn the_batch_plan_names_its_items() {
-        let s = batch_plan_schema(&["i1".into(), "i2".into()]);
+        let s = batch_plan_schema(&["i1".into(), "i2".into()], false);
         let entry = &s["properties"]["items"]["items"];
         assert_eq!(entry["properties"]["item"]["enum"], json!(["i1", "i2"]));
         assert_eq!(entry["required"], json!(["item", "edits"]));
@@ -846,6 +915,12 @@ mod tests {
             entry["properties"]["edits"],
             plan_schema()["properties"]["edits"]
         );
+        // Concepts may also be filed with `file`, which has no text.
+        let s = batch_plan_schema(&["i1".into()], true);
+        let ops = &s["properties"]["items"]["items"]["properties"]["edits"]["items"]["anyOf"];
+        let file = ops.as_array().unwrap().last().unwrap();
+        assert_eq!(file["properties"]["op"]["enum"], json!(["file"]));
+        assert!(file["properties"].get("body").is_none());
         let plan: Plan = serde_json::from_value(json!({ "items": [
             { "item": "i1", "edits": [{ "op": "supersede", "page": "expertise/a", "claim": "c",
                                          "replacement": null, "reason": "r" }] },
@@ -853,6 +928,28 @@ mod tests {
         .unwrap();
         assert_eq!(plan.items[0].edits.len(), 1);
         assert!(plan.items[1].edits.is_empty());
+        // `file` creates the item's page, its text the extract under the title.
+        let mut plan: Plan = serde_json::from_value(json!({ "items": [
+            { "item": "i1", "edits": [{ "op": "file", "title": "甲", "summary": "s",
+                                         "aliases": [], "keywords": [], "about": [] }] } ] }))
+        .unwrap();
+        let item = Item {
+            content: json!({ "extract": "甲的规定。" }),
+            queries: Vec::new(),
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            first_pages: Vec::new(),
+            read: Vec::new(),
+            task: None,
+            page: Some("expertise/jia".into()),
+            cite: String::new(),
+        };
+        let edit = plan.items[0].edits.remove(0).into_edit(&item);
+        assert!(
+            matches!(&edit, Edit::Create { page, body, .. }
+                if page == "expertise/jia" && body == "# 甲\n\n甲的规定。\n"),
+            "{edit:?}"
+        );
         // An empty answer is unreadable (asked for again), not a plan that files nothing.
         assert!(serde_json::from_value::<Plan>(json!({})).is_err());
     }

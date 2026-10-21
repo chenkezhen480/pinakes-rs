@@ -198,9 +198,9 @@ Each is one line of `config.toml` (or the compose profile named); the defaults a
 | | `jwt` | Calls come straight from users' machines (an agent with MCP): the host signs a token holding tenant, user and groups; Pinakes checks it with the host's public key |
 | **Graph store** (`[graph] backend`) | `sqlite` (default) | `graph.sqlite` in each tenant's folder: nothing else to run |
 | | `neo4j` | The compose profile `neo4j`; move data between the two with `pinakes-migrate-graph` |
-| **Meaning search** (`[embedding] enabled`) | off (default) | Keyword search only: nothing is downloaded; `semantic` and `both` say how to turn it on |
+| **Meaning search** (`[embedding] enabled`) | off (default) | Keyword search only: nothing is downloaded; `semantic` says how to turn it on, `auto` searches by keywords |
 | | on (the console's switch, or the config line) | Downloads `jina-embeddings-v2-base-zh` (about 640 MB) into `<data>/models` once, in the background, keeps an 8-bit copy of it (316 MB) in its place, and embeds every page; no restart. `HF_ENDPOINT` names a mirror |
-| **Default search mode** (`[search] default_mode`) | `keyword` (default), `semantic`, `both`, `auto` | When a search doesn't say; `auto` tries keywords first and falls back to meaning when coverage is weak |
+| **Default search mode** (`[search] default_mode`) | `auto` (default), `keyword`, `semantic` | When a search doesn't say; `auto` ranks by keywords and meaning when embeddings are on, by keywords when they are off |
 | **Document conversion** | built in (default) | Markdown, text, HTML, Word (`.docx`), spreadsheets (`.xlsx`, `.csv`), PowerPoint (`.pptx`) and PDF (its text layer, read in a process of its own; a scan is transcribed page by page by the model, which must take images, such as DeepSeek's `deepseek-flash`), read by the service itself |
 | | plus MarkItDown (`[converter] url`, compose profile `markitdown`) | The old binary Office formats (`.doc`, `.xls`, `.ppt`); without it they are refused with what to do |
 | **Acquisition** (`[acquisition] enabled`) | off (default) | On for the deployment, then per tenant with its allowlist (`PUT /admin/tenants/{id}/acquisition`) |

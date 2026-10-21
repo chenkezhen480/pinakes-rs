@@ -84,7 +84,7 @@ How searches rank and how many hits each slot holds.
 | `slots.knowledge` | a whole number, 0 or more | `3` | after a restart | Hits in the knowledge slot when a search doesn't say (at most 20). |
 | `slots.relations` | a whole number, 0 or more | `5` | after a restart | Hits in the relations slot when a search doesn't say (at most 20). |
 | `session_idle_minutes` | a whole number, 0 or more | `30` | after a restart | A search session (which pages an agent has read) ends after this many idle minutes. |
-| `default_mode` | one of keyword, semantic, both, auto | `"keyword"` | after a restart | The mode of a search that doesn't say. semantic and both need embeddings on; auto ranks by meaning only where keywords come back weak. |
+| `default_mode` | one of keyword, semantic, auto | `"auto"` | after a restart | The mode of a search that doesn't say. semantic needs embeddings on; auto ranks by keywords and meaning when they are on, by keywords when they are off. |
 | `hop.top_memories` | a whole number, 0 or more | `3` | after a restart | How many of the top memories bring the knowledge pages they are anchored to into the knowledge slot. |
 | `ablation.pin_names` | true or false | `true` | after a restart | Experiment switch: titles and aliases named in a query pin their pages to the top. Leave on. (advanced) |
 | `ablation.words` | true or false | `true` | after a restart | Experiment switch: search the words of each field (jieba, stemming). Leave on. (advanced) |

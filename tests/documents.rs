@@ -502,17 +502,20 @@ async fn documents_are_read_one_concept_at_a_time() {
     assert!(cites.contains("#L"), "{hits}");
 }
 
-/// A concept's own new page the plan leaves without a body is its extract under its title (the
-/// read wrote it already); a body the plan gives is kept.
+/// A concept's own new page filed with `file`, which has no text, is its extract under its
+/// title (the read wrote it already); a page created with a body keeps it.
 #[tokio::test]
-async fn a_new_concept_page_without_a_body_is_its_extract() {
+async fn a_concept_filed_without_its_text_gets_its_extract() {
     let llm = FakeLlm::new(|step, msg, _| match step {
         Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
         Step::Plan => {
+            assert!(msg.contains("Its page is new: `file` creates it."), "{msg}");
             let mut plan: Value = serde_json::from_str(&rule_plan(msg, |_| false)).unwrap();
             for e in plan["edits"].as_array_mut().unwrap() {
                 if e["page"] == "expertise/rule-1" {
-                    e["body"] = json!("");
+                    *e = json!({ "item": e["item"], "op": "file", "title": e["title"],
+                                 "summary": e["summary"], "aliases": [], "keywords": [],
+                                 "about": [] });
                 }
             }
             plan.to_string()

@@ -688,7 +688,7 @@ export type Members = { users?: Array<string>, groups?: Array<string>, };
 /**
  * How the memories and knowledge channels rank pages. Names are matched in every mode.
  */
-export type Mode = "keyword" | "semantic" | "both" | "auto";
+export type Mode = "keyword" | "semantic" | "auto";
 
 /**
  * A change to the model: a field left out stays as it is; `null` unsets it. The key is

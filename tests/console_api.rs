@@ -124,10 +124,7 @@ async fn settings_are_explained_and_written_back_to_the_file() {
     assert!(port["description"].as_str().unwrap().contains("port"));
     let mode = field(&view, "search.default_mode");
     assert_eq!(mode["kind"], "choice");
-    assert_eq!(
-        mode["options"],
-        json!(["keyword", "semantic", "both", "auto"])
-    );
+    assert_eq!(mode["options"], json!(["keyword", "semantic", "auto"]));
     assert_eq!(view["restart_needed"], false);
 
     let (status, view) = app

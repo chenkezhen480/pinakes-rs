@@ -1046,17 +1046,17 @@ search_url = \"x\"
         );
         Config::from_toml_str("[search]\ndefault_mode = \"auto\"\n").unwrap();
         let model = "[embedding]\nmodel = \"jina-embeddings-v2-base-zh\"\n";
-        let both = "[search]\ndefault_mode = \"both\"\n";
+        let semantic = "[search]\ndefault_mode = \"semantic\"\n";
         // A config from before the switch (a model, no `enabled` line) starts with them on.
         assert!(
-            Config::from_toml_str(&format!("{both}{model}"))
+            Config::from_toml_str(&format!("{semantic}{model}"))
                 .unwrap()
                 .embedding
                 .enabled
         );
         assert!(!Config::from_toml_str(model).unwrap().embedding.enabled);
-        assert!(Config::from_toml_str(&format!("{both}{model}enabled = false\n")).is_err());
-        Config::from_toml_str(&format!("{both}{model}enabled = true\n")).unwrap();
+        assert!(Config::from_toml_str(&format!("{semantic}{model}enabled = false\n")).is_err());
+        Config::from_toml_str(&format!("{semantic}{model}enabled = true\n")).unwrap();
         assert!(Config::from_toml_str("[embedding]\nenabled = true\n").is_err());
         assert!(Config::from_toml_str("[embedding]\nmodel = \"multilingual-e5-small\"\n").is_err());
     }

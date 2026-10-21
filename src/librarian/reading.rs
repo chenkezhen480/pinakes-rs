@@ -910,9 +910,10 @@ fn document_note(state: &ReadingState, earlier: Option<&Earlier>) -> String {
     );
     note.push_str(
         "Each item is a concept: file it as the page its task names, from its extract (update \
-         that page if it exists, create it if not). If an extract holds something that belongs \
+         that page if it exists, `file` it if not). If an extract holds something that belongs \
          to another concept, file that on that concept's page too: nothing in it is left out. \
-         Link to the ledger's pages where a concept refers to them.\n\n",
+         Where you write a page's text (an update, or another page), link to the ledger's pages \
+         it refers to; a page you `file` is its extract as it stands.\n\n",
     );
     if earlier.is_some() {
         note.push_str(&version_note(doc, state.version));

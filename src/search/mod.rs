@@ -263,22 +263,34 @@ impl SearchSnapshot {
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// BM25 over the keywords.
-    #[default]
     Keyword,
     /// Similarity of the query to the page vectors.
     Semantic,
-    /// Both: pages the keywords match strongly keep their keyword rank, meaning orders the
-    /// rest.
-    Both,
-    /// Keywords first; a slot that comes back weak is searched again with both.
+    /// Keywords and meaning together when meaning is available (embeddings on, the pages
+    /// embedded): pages the keywords match strongly keep their keyword rank, meaning orders
+    /// the rest. Keywords alone otherwise. The default, which uses the vectors once the admin
+    /// turns them on. `both`, the same ranking that refused to run without meaning, was folded
+    /// into it (2026-10-21): two names for one thing only gave agents a choice that changed
+    /// nothing.
+    #[default]
+    #[serde(alias = "both")]
     Auto,
 }
 
 impl Mode {
     /// Whether this mode needs page vectors and the embedding model.
     pub fn needs_meaning(self) -> bool {
-        matches!(self, Mode::Semantic | Mode::Both)
+        self == Mode::Semantic
     }
+}
+
+/// How a search ranks a channel's pages: what its mode comes to on this snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ranking {
+    Keywords,
+    Meaning,
+    /// Keyword hits that are strong first, in keyword order; meaning orders the rest.
+    Both,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -906,8 +918,8 @@ pub fn has_meaning(snap: &SearchSnapshot, embedder: Option<&dyn Embedder>) -> bo
     meaning(snap, embedder).is_some()
 }
 
-/// Whether a search in this mode can run on this snapshot: `semantic` and `both` need
-/// [`has_meaning`]. `auto` runs without it, by keywords alone.
+/// Whether a search in this mode can run on this snapshot: `semantic` needs [`has_meaning`].
+/// `auto` runs without it, by keywords alone.
 pub fn check_meaning(
     mode: Mode,
     snap: &SearchSnapshot,
@@ -949,6 +961,15 @@ pub fn search(
     let mode = req.mode.unwrap_or(cfg.default_mode);
     check_meaning(mode, snap, embedder)?;
     let meaning = meaning(snap, embedder);
+    // `auto` ranks by both when meaning is available: searching only a slot that came back weak
+    // again with both found less (E2, 2026-10-21: R@5 0.786 against 0.821, the misses across
+    // languages, where a keyword hit can look strong and be the wrong page).
+    let mut ranking = match mode {
+        Mode::Keyword => Ranking::Keywords,
+        Mode::Semantic => Ranking::Meaning,
+        Mode::Auto if meaning.is_some() => Ranking::Both,
+        Mode::Auto => Ranking::Keywords,
+    };
     let defaults = cfg.slots;
     let ablation = cfg.ablation;
     let sizes = SlotSizes {
@@ -1185,11 +1206,13 @@ pub fn search(
             .in_scope(|| embedder.embed(&[req.query.trim().to_owned()]))?;
         Ok((v.into_iter().next().unwrap_or_default(), micros(started)))
     };
-    // In `both` mode the query is embedded while the keywords are searched, side by side on
+    // If the model goes away meanwhile (turned off mid-search), keywords answer an `auto`
+    // search, as they do without one.
+    let meaning_lost = std::cell::Cell::new(false);
+    // Ranking by both, the query is embedded while the keywords are searched, side by side on
     // the compute pool when a thread of it is free, so the search costs the longer of the two
-    // rather than both. `auto` embeds only once a slot comes back weak, and `semantic` has no
-    // keyword search to overlap.
-    if mode == Mode::Both
+    // rather than both. `semantic` has no keyword search to overlap.
+    if ranking == Ranking::Both
         && let Some((_, embedder)) = meaning
     {
         let parent = tracing::Span::current();
@@ -1203,9 +1226,17 @@ pub fn search(
                 })
             },
         );
-        let (v, spent) = embedded?;
-        timings_us.push(("embed_query", spent));
-        query_vector = Some(v);
+        match embedded {
+            Ok((v, spent)) => {
+                timings_us.push(("embed_query", spent));
+                query_vector = Some(v);
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "meaning went away mid-search; keywords answer");
+                meaning_lost.set(true);
+                ranking = Ranking::Keywords;
+            }
+        }
         let (hits, spent) = keyword;
         for (slot, hits) in hits {
             by_keywords.insert(slot, hits?);
@@ -1213,12 +1244,12 @@ pub fn search(
         timings_us.push(("keyword_search", spent));
     }
     let mut run_channel = |slot: Slot,
-                           mode: Mode,
+                           ranking: Ranking,
                            timings: &mut Vec<(&'static str, u64)>|
      -> anyhow::Result<Vec<Candidate>> {
         let mut by_ord: HashMap<usize, (Option<f32>, Option<f32>)> = HashMap::new();
-        if matches!(mode, Mode::Keyword | Mode::Both) {
-            // A slot `auto` searches again with both rankings reuses its keyword hits.
+        if matches!(ranking, Ranking::Keywords | Ranking::Both) {
+            // A slot searched by keywords after meaning went away reuses its keyword hits.
             if let Entry::Vacant(e) = by_keywords.entry(slot) {
                 e.insert(keyword_hits(slot)?);
             }
@@ -1226,7 +1257,7 @@ pub fn search(
                 by_ord.entry(ord).or_default().0 = Some(score);
             }
         }
-        if matches!(mode, Mode::Semantic | Mode::Both)
+        if matches!(ranking, Ranking::Meaning | Ranking::Both)
             && let Some((vectors, embedder)) = meaning
         {
             if query_vector.is_none() {
@@ -1277,7 +1308,7 @@ pub fn search(
                     None => {}
                 }
             }
-            // In `both` mode every keyword candidate gets its similarity too; through the graph,
+            // Ranked by both, every keyword candidate gets its similarity too; through the graph,
             // a candidate the walk didn't reach is compared on its own.
             for (&ord, e) in by_ord.iter_mut() {
                 if e.1.is_none() {
@@ -1295,18 +1326,18 @@ pub fn search(
             .map(|(ord, (bm25, similarity))| candidate(snap, &counted, ord, bm25, similarity, pins))
             .collect();
         cands.retain(Candidate::above_floor);
-        // In `both` mode a page keywords match strongly keeps its keyword rank; meaning orders
+        // Ranked by both, a page keywords match strongly keeps its keyword rank; meaning orders
         // the rest. Scores from different rankings are never compared.
         for c in &mut cands {
-            c.score = match mode {
-                Mode::Semantic => c.similarity.unwrap_or(0.0),
-                Mode::Keyword | Mode::Auto => c.bm25.unwrap_or(0.0),
-                Mode::Both if c.bm25.is_some() && c.keyword_strong() => c.bm25.unwrap_or(0.0),
-                Mode::Both => c.similarity.unwrap_or(0.0),
+            c.score = match ranking {
+                Ranking::Meaning => c.similarity.unwrap_or(0.0),
+                Ranking::Keywords => c.bm25.unwrap_or(0.0),
+                Ranking::Both if c.bm25.is_some() && c.keyword_strong() => c.bm25.unwrap_or(0.0),
+                Ranking::Both => c.similarity.unwrap_or(0.0),
             };
         }
-        let tier = |c: &Candidate| match mode {
-            Mode::Both => u8::from(c.bm25.is_some() && c.keyword_strong()),
+        let tier = |c: &Candidate| match ranking {
+            Ranking::Both => u8::from(c.bm25.is_some() && c.keyword_strong()),
             _ => 0,
         };
         cands.sort_by(|a, b| {
@@ -1320,29 +1351,17 @@ pub fn search(
         });
         Ok(cands)
     };
-    // `auto` searches a slot that comes back weak again with both rankings, when meaning is
-    // available. If the model goes away meanwhile (turned off mid-search), keywords answer, as
-    // they do without one.
-    let meaning_lost = std::cell::Cell::new(false);
     let mut run_slot = |slot: Slot,
                         timings: &mut Vec<(&'static str, u64)>|
      -> anyhow::Result<(Vec<Candidate>, Coverage)> {
-        let first = if mode == Mode::Auto {
-            Mode::Keyword
-        } else {
-            mode
-        };
-        let mut cands = run_channel(slot, first, timings)?;
-        if mode == Mode::Auto && meaning.is_some() && !cands.first().is_some_and(Candidate::strong)
-        {
-            match run_channel(slot, Mode::Both, timings) {
-                Ok(both) => cands = both,
-                Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), "meaning went away mid-search; keywords answer");
-                    meaning_lost.set(true);
-                }
+        let cands = match run_channel(slot, ranking, timings) {
+            Err(e) if ranking == Ranking::Both => {
+                tracing::warn!(error = %format!("{e:#}"), "meaning went away mid-search; keywords answer");
+                meaning_lost.set(true);
+                run_channel(slot, Ranking::Keywords, timings)?
             }
-        }
+            r => r?,
+        };
         // A keyword counts as matched only through a page that is good enough to show.
         for c in &cands {
             for (i, m) in matched_any.iter_mut().enumerate() {

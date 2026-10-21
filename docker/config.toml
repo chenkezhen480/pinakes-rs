@@ -57,7 +57,7 @@ timeout_secs = 120
 slots = { memories = 3, knowledge = 3, relations = 5 }   # hits per slot by default, max 20
 session_idle_minutes = 30      # read-tracker sessions expire after this idle time
 languages = ["en", "zh"]
-default_mode = "keyword"       # keyword, semantic, both or auto, when a search doesn't say
+default_mode = "auto"          # keyword, semantic or auto, when a search doesn't say
 hop = { top_memories = 3 }     # the top memories whose knowledge anchors join the knowledge slot
 vector_graph_rows = 100000     # (M9) from this many page vectors on, meaning search walks a graph index; 0 never
 

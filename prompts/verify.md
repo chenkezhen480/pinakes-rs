@@ -15,9 +15,13 @@ An edit passes only if:
 
 A document is read window by window (shown under "This document": its main thread and the
 ledger of concepts read so far, each with its page). Links to the ledger's pages, and to pages
-other items of the batch create, are expected. A document's page is a condensed account of its
-concept's extract, and its numbers, deadlines, amounts and conditions must match the extract
-exactly.
+other items of the batch create, are expected, but never required: a concept's new page is its
+extract as it stands, without links, and that is right. A document's page is a condensed
+account of its concept's extract, and its numbers, deadlines, amounts and conditions must match
+the extract exactly. Each concept is filed on its own page, the one its task names, which the service chose:
+that page is never a duplicate of another document's page on a similar subject (another law's
+article on the same matter stays a page of its own, linked to the other), and a concept folded
+into a page other than its own is wrong.
 
 Judge each edit as part of its plan: the edits are applied together, in order, so an edit
 that is right once the plan's other edits are applied passes (a summary changed by one edit

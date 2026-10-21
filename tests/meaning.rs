@@ -172,21 +172,15 @@ async fn hits_say_how_they_were_found_in_each_mode() {
         hits(&resp, "knowledge")[0],
         ("expertise/shipping".into(), "alias".into())
     );
-    // Both: a strong keyword hit keeps its place; meaning orders the rest.
+    // Auto, the default: while meaning is available, a strong keyword hit keeps its place and
+    // meaning orders the rest.
     let resp = w
-        .search(json!({ "query": "parcels arrive", "keywords": ["shipping"], "mode": "both" }))
+        .search(json!({ "query": "parcels arrive", "keywords": ["shipping"] }))
         .await;
+    assert_eq!(resp["mode"], "auto");
     assert_eq!(
         hits(&resp, "knowledge")[0],
         ("expertise/shipping".into(), "keyword".into())
-    );
-    // Auto: a strong keyword slot is left alone; a weak one is searched by meaning too.
-    let resp = w
-        .search(json!({ "query": "parcels arrive", "keywords": ["shipping"], "mode": "auto" }))
-        .await;
-    assert!(
-        hits(&resp, "knowledge").iter().all(|(_, m)| m != "meaning"),
-        "{resp}"
     );
     let resp = w
         .search(json!({ "query": "retourned goodz", "keywords": ["zzz"], "mode": "auto" }))
@@ -197,7 +191,8 @@ async fn hits_say_how_they_were_found_in_each_mode() {
     );
     // Keyword mode never embeds the query.
     let before = w.fake.seen().len();
-    w.search(json!({ "query": "returned goods" })).await;
+    w.search(json!({ "query": "returned goods", "mode": "keyword" }))
+        .await;
     assert_eq!(w.fake.seen().len(), before);
 }
 

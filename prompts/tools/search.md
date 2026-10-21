@@ -22,8 +22,12 @@ Then:
 
 - Read the summaries first; open only promising hits, following their `route` (`read` with the
   page id, `graph` with a node id).
+- `mode` picks how pages are ranked; leave it out at first. `auto` (the usual default) ranks by
+  your keywords and by meaning together, or by keywords alone when the service has meaning
+  search off (the result's `note` says so). `keyword` ranks by the terms only: for exact names,
+  identifiers and codes. `semantic` ranks by meaning only, which finds pages that say it in other
+  words or in the other language.
 - On a `weak` slot or unmatched keywords: retry with other terms (synonyms, the other language,
-  the identifier), or set `mode: "semantic"` to search by meaning, which also finds pages written
-  in the other language. `mode: "both"` combines keywords and meaning. When the service has
-  semantic search off, those modes answer that they are unavailable: retry with other keywords.
+  the identifier), or with `mode: "semantic"`. When the service has meaning search off,
+  `semantic` answers that it is unavailable: retry with other keywords.
 - Pass the `session` from the result to every later call of the task.

@@ -11,7 +11,7 @@ to that user.
 - A short list, one preference per line: `- <topic>: <preference>`, such as
   `- Reply language: Chinese` or `- Role: handles the EU enterprise accounts`.
 - Keep it short: at most about 20 lines. The summary lists the most important preferences in
-  1–2 sentences.
+  a sentence or two, in English and the same in Chinese.
 
 ## Merging
 

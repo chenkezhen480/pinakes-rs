@@ -72,9 +72,11 @@ pub(crate) fn schema(tool: &str) -> Value {
                     canonical terms, in both English and Chinese."),
                 "mode": {
                     "type": "string",
-                    "enum": ["keyword", "semantic", "both", "auto"],
-                    "description": "How pages are ranked. Leave it out at first; use semantic \
-                        (by meaning) when a slot came back weak.",
+                    "enum": ["keyword", "semantic", "auto"],
+                    "description": "How pages are ranked. Leave it out at first: auto ranks by \
+                        keywords and meaning (keywords alone when meaning search is off). keyword \
+                        ranks by the terms only, for exact names and identifiers; semantic by \
+                        meaning only, when a slot came back weak.",
                 },
             }),
             vec!["query"],

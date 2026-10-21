@@ -23,7 +23,7 @@
   let tab = $state<"search" | "chat">(router.query.get("tab") === "chat" ? "chat" : "search");
   let query = $state(router.query.get("q") ?? "");
   let keywords = $state("");
-  let mode = $state<Mode>("keyword");
+  let mode = $state<Mode>("auto");
   let result = $state<SearchResponse | null>(null);
   let ran = $state(0);
   const searching = new Action();
@@ -96,8 +96,8 @@
     <div class="row">
       <input type="text" class="mono" bind:value={keywords} placeholder={t("search.keywords")} aria-label={t("search.keywords")} />
       <div class="modes" role="radiogroup" aria-label={t("search.mode")}>
-        {#each ["keyword", "auto", "semantic", "both"] as const as m (m)}
-          <label class:on={mode === m} class:off={!semanticOn && (m === "semantic" || m === "both")} title={!semanticOn && (m === "semantic" || m === "both") ? t("search.semanticOff") : ""}>
+        {#each ["auto", "keyword", "semantic"] as const as m (m)}
+          <label class:on={mode === m} class:off={!semanticOn && m === "semantic"} title={!semanticOn && m === "semantic" ? t("search.semanticOff") : ""}>
             <input type="radio" bind:group={mode} value={m} />{t(`search.mode.${m}`)}
           </label>
         {/each}

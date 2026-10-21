@@ -203,7 +203,7 @@ async fn only_the_admin_turns_it_on() {
 async fn on_in_the_config_loads_at_start_and_a_default_mode_needing_it_keeps_it_on() {
     let (fake, loads) = (Fake::new(), Arc::new(AtomicUsize::new(0)));
     let app = TestApp::with_switch(
-        &format!("[search]\ndefault_mode = \"both\"\n{MODEL}enabled = true\n"),
+        &format!("[search]\ndefault_mode = \"semantic\"\n{MODEL}enabled = true\n"),
         switch(fake, loads.clone()),
     );
     wait_for(&app, "on").await;
@@ -313,7 +313,7 @@ Goods may be returned within seven days.
 ",
     ))
     .unwrap();
-    // Weak by keywords, so auto asks for meaning, which fails: keywords answer, and say so.
+    // Auto asks for meaning, which fails: keywords answer, and say so.
     let (status, body) = app
         .post(
             Caller::new(&key),
