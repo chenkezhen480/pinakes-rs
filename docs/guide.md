@@ -307,6 +307,9 @@ POST /search
 { "mode": "keyword",
   "entities": ["mainland:order/1042"],
   "intent": "relation",
+  "preferences": { "page": "users/u_7b21e0d4a1b2c3d4/preferences", "lines": [
+    { "heading": "Preferences", "text": "- Reply language: Chinese" },
+    { "heading": "Preferences", "text": "- Role: handles the mainland enterprise accounts" } ] },
   "memories": { "coverage": "strong", "hits": [
     { "page": "experience/refund-handling", "match": "alias",
       "matched_keywords": ["partial refund", "部分退款"],
@@ -325,7 +328,11 @@ POST /search
 
 Each slot says whether its coverage is `strong` or `weak`; each hit says how it matched (`alias`,
 `keyword`, `meaning` or `anchor`), which keywords it matched, and its **route**. The response
-lists the keywords that matched nothing. The agent decides what to do with these signals: read a
+lists the keywords that matched nothing. The caller's own preferences page comes whole with every
+search (`preferences`, left out while they have none), whatever was asked, so a reply language or
+an answer format applies to every answer, not only to those whose search finds the page; it then
+takes no place in the memories slot. The page is kept newest first (code moves the lines a filing
+adds or changes to the top), and a search sends at most its first 30 lines. The agent decides what to do with these signals: read a
 hit, follow an edge, retry with other keywords, or switch to `semantic`.
 
 **Follow-ups** take only ids that `search` returned:

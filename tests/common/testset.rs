@@ -293,15 +293,23 @@ pub fn graph_calls(t: &TenantFile) -> Vec<GraphCall> {
     out
 }
 
+/// The pages of a slot. The caller's preferences page, sent whole with every search, counts as a
+/// memory.
 pub fn slot_pages(resp: &Value, slot: &str) -> Vec<String> {
-    resp[slot]["hits"]
+    let mut pages: Vec<String> = resp[slot]["hits"]
         .as_array()
         .map(|hits| {
             hits.iter()
                 .map(|h| h["page"].as_str().unwrap().to_owned())
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if slot == "memories"
+        && let Some(p) = resp["preferences"]["page"].as_str()
+    {
+        pages.push(p.to_owned());
+    }
+    pages
 }
 
 /// The relations slot's edges as `(from, type, to)`.

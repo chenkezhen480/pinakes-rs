@@ -16,6 +16,8 @@ to that user.
 ## Merging
 
 - The latest statement wins: a new statement on the same topic replaces the old line.
+- The list is kept newest first: the lines you add or change are moved to the top for you, so
+  write them anywhere and don't reorder the rest.
 - A stated preference outranks an observed habit; an observed habit is marked "(observed)" and
   never replaces a stated preference.
 

@@ -278,6 +278,7 @@ impl<'a> Draft<'a> {
         if current.is_none() && matches!(edit, Edit::Create { .. } | Edit::Replace { .. }) {
             created.insert(path.clone());
         }
+        let body_before = current.as_ref().map(|c| c.body.clone());
         let linked_before: HashSet<String> = current
             .as_ref()
             .map(|c| links(&c.body).into_iter().collect())
@@ -350,10 +351,13 @@ impl<'a> Draft<'a> {
                 &created,
             ),
         };
-        let page = match result {
+        let mut page = match result {
             Ok(p) => p,
             Err(e) => return Ok(Err(e)),
         };
+        if r.target.kind == Kind::Preference {
+            page.body = newest_first(body_before.as_deref(), &page.body);
+        }
         // Links the edit adds must lead somewhere every reader of the page can go: a link to
         // a page a later step might write (under a name guessed now) would dangle.
         for link in links(&page.body).into_iter().filter(|_| r.links) {
@@ -392,6 +396,39 @@ impl<'a> Draft<'a> {
             })
             .collect()
     }
+}
+
+/// A preferences list, newest first: in each run of `- ` items, the items this edit adds or
+/// changes move to the top, the rest keep their order (an item's indented lines go with it).
+/// Every search sends the page whole and cuts it from the end, so the latest come first and the
+/// oldest go first (the user, 2026-10-22).
+fn newest_first(before: Option<&str>, after: &str) -> String {
+    let old: HashSet<&str> = before
+        .map(|b| b.lines().map(str::trim).collect())
+        .unwrap_or_default();
+    fn flush<'a>(run: &mut Vec<Vec<&'a str>>, out: &mut Vec<&'a str>, old: &HashSet<&str>) {
+        let is_new = |item: &Vec<&str>| item.iter().any(|l| !old.contains(l.trim()));
+        let (new, kept): (Vec<_>, Vec<_>) = run.drain(..).partition(is_new);
+        out.extend(new.into_iter().chain(kept).flatten());
+    }
+    let mut out: Vec<&str> = Vec::new();
+    let mut run: Vec<Vec<&str>> = Vec::new();
+    for line in after.lines() {
+        if line.starts_with("- ") {
+            run.push(vec![line]);
+        } else if let Some(item) = run.last_mut().filter(|_| line.starts_with([' ', '\t'])) {
+            item.push(line);
+        } else {
+            flush(&mut run, &mut out, &old);
+            out.push(line);
+        }
+    }
+    flush(&mut run, &mut out, &old);
+    let mut body = out.join("\n");
+    if after.ends_with('\n') {
+        body.push('\n');
+    }
+    body
 }
 
 fn check_text(what: &str, s: &str, max: usize) -> Result<String, String> {
@@ -1086,6 +1123,22 @@ mod tests {
         let at = find_claim(body, "rate is 13%. for").unwrap();
         assert!(body[..at].ends_with("Shops say the "));
         assert_eq!(find_claim("~~a b~~ (superseded)\n", "a b"), None);
+    }
+
+    #[test]
+    fn preferences_are_kept_newest_first() {
+        let before = "# Prefs\n\n- Reply language: English\n- Tables: none\n- Units: metric\n";
+        // A changed line and an added one, wherever the model put them, go to the top.
+        let after = "# Prefs\n\n- Reply language: Chinese\n- Tables: none\n- Units: metric\n\
+                     - Role: EU accounts\n  since October\n";
+        assert_eq!(
+            newest_first(Some(before), after),
+            "# Prefs\n\n- Reply language: Chinese\n- Role: EU accounts\n  since October\n\
+             - Tables: none\n- Units: metric\n"
+        );
+        // Unchanged, or a first page: as written.
+        assert_eq!(newest_first(Some(before), before), before);
+        assert_eq!(newest_first(None, after), after);
     }
 
     #[test]

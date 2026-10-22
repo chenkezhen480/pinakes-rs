@@ -20,6 +20,14 @@ How each part works is in [docs/guide.md](docs/guide.md).
 
 ### Changed
 
+- Every search carries the caller's whole preferences page (`preferences` in the response),
+  whatever it asks: a preference shaped an answer only when the agent's search happened to find
+  the page, so "reply in Chinese" was lost on a question about refunds. The page no longer takes
+  a place in the memories slot, and the tool descriptions ask the agent to follow it in every
+  answer.
+- A preferences page is kept newest first: code moves the lines a filing adds or changes to the
+  top of their list, so the latest preferences come first and the oldest are the ones a long
+  page loses when a search sends it cut short.
 - A preference page no longer needs an anchor: it is its user's, by its folder. A reply language
   or an answer format concerns no node or page, and forcing one lost such preferences (the
   verifier held the made-up anchor, or code refused the page without one). Experience and

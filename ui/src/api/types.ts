@@ -902,6 +902,12 @@ export type PreferenceIn = { statement: string,
 observed: boolean, entities: Array<string>, date: string | null, };
 
 /**
+ * The caller's preferences page, whole: it comes with every search, so preferences shape every
+ * answer, not only those whose search happens to find the page (2026-10-22).
+ */
+export type Preferences = { page: string, lines: Array<HitLine>, };
+
+/**
  * A common endpoint, to fill the form with.
  */
 export type Preset = { name: string, provider: LlmProvider, base_url: string | null, model: string, key_env: string, };
@@ -1077,7 +1083,11 @@ export type SearchResponse = {
 /**
  * The mode the search ran in: the request's, or the default.
  */
-mode: Mode, entities: Array<string>, intent: Intent | null, memories: PageSlot, knowledge: PageSlot, relations: RelationSlot, unmatched_keywords: Array<string>, 
+mode: Mode, entities: Array<string>, intent: Intent | null, 
+/**
+ * The caller's preferences, on every search while they have any.
+ */
+preferences: Preferences | null, memories: PageSlot, knowledge: PageSlot, relations: RelationSlot, unmatched_keywords: Array<string>, 
 /**
  * Set when the search ran by keywords alone though its mode would rank by meaning too
  * (`auto` while semantic search is off), saying so.

@@ -61,6 +61,8 @@ const CANDIDATES: usize = 50;
 /// Matching lines returned per hit, and their length.
 const LINES_PER_HIT: usize = 3;
 const MAX_LINE_CHARS: usize = 240;
+/// Lines of the caller's preferences sent with a search (the page keeps to about 20).
+const MAX_PREFERENCE_LINES: usize = 30;
 /// Weight of query words when the agent also passed keywords.
 const QUERY_WEIGHT: f32 = 0.3;
 /// A keyword counts as matched in a field when this share of its parts is found there.
@@ -489,6 +491,15 @@ pub struct PageSlot {
     pub hits: Vec<Hit>,
 }
 
+/// The caller's preferences page, whole: it comes with every search, so preferences shape every
+/// answer, not only those whose search happens to find the page (2026-10-22).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Preferences {
+    pub page: String,
+    pub lines: Vec<HitLine>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RelationSlot {
@@ -525,6 +536,9 @@ pub struct SearchResponse {
     pub entities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
+    /// The caller's preferences, on every search while they have any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferences: Option<Preferences>,
     pub memories: PageSlot,
     pub knowledge: PageSlot,
     pub relations: RelationSlot,
@@ -577,6 +591,9 @@ impl SearchResponse {
         });
         if let Some(intent) = self.intent {
             out["intent"] = serde_json::json!(intent);
+        }
+        if let Some(p) = &self.preferences {
+            out["preferences"] = serde_json::json!(p.page);
         }
         out
     }
@@ -1397,6 +1414,13 @@ pub fn search(
     // 5. Hop: the knowledge pages the top memories are anchored to, when those memories match
     // well on their own, fill the knowledge slot's free places after its own hits ("these
     // score lower, so the hop can't drift far"). A page already among the hits stays as it is.
+    // The caller's preferences page comes whole on every search, so it takes no memories place.
+    let preferences = scope
+        .user()
+        .and_then(|u| snap.catalog.get(&format!("users/{}/preferences", u.dir)));
+    if let Some((ord, _)) = preferences {
+        mem.retain(|c| c.ord != ord);
+    }
     mem.truncate(sizes.memories);
     kno.truncate(sizes.knowledge);
     if req.hop && kno.len() < sizes.knowledge {
@@ -1501,6 +1525,20 @@ pub fn search(
         .filter(|(_, m)| !**m)
         .map(|(k, _)| k.text.clone())
         .collect();
+    let preferences = preferences.map(|(_, page)| Preferences {
+        page: page.path.as_str().to_owned(),
+        lines: page
+            .sections
+            .iter()
+            .flat_map(|s| {
+                s.lines.iter().map(|l| HitLine {
+                    heading: s.heading.clone(),
+                    text: truncate(&l.text, MAX_LINE_CHARS),
+                })
+            })
+            .take(MAX_PREFERENCE_LINES)
+            .collect(),
+    });
     let memories = make_slot(mem, mem_cov);
     let knowledge = make_slot(kno, kno_cov);
     timings_us.push(("assemble", micros(step)));
@@ -1523,6 +1561,7 @@ pub fn search(
         mode,
         entities,
         intent,
+        preferences,
         memories,
         knowledge,
         relations: relation_slot,

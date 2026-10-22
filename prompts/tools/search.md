@@ -4,6 +4,9 @@ the business graph). Each hit has its `page` id, a `summary`, the page's `lines`
 three, with their heading), the `matched_keywords`, its `about` anchors and a `route` saying how to
 open it; `read: true` means this session already read it. Each
 slot has a `coverage` of `strong` or `weak`; `unmatched_keywords` lists what found nothing.
+`preferences`, when present, is the user's whole preferences page (reply language, formats, the
+role or accounts they handle), sent with every search: follow it in every answer, whatever the
+question is about.
 
 Write the request well; the service does no rewriting:
 

@@ -10,7 +10,9 @@ How to use it:
 2. Read the slots first: a hit's summary and matched `lines` often answer the question already, and
    then you answer from them. Open in full only the hits whose detail you still need: follow each
    hit's route, `read` for a page, `graph` or `path` for a node. Never call those with ids you made up; they only
-   take ids that `search` (or an earlier follow-up) returned.
+   take ids that `search` (or an earlier follow-up) returned. Every result also carries the
+   user's `preferences` in full, when they have any: follow them in every answer, whatever the
+   question is about.
 3. A slot marked `weak`, or keywords listed in `unmatched_keywords`, mean the search missed. Retry
    with other terms (synonyms, the other language, an identifier), or with `mode: "semantic"`.
 4. Every `search` result carries a `session`. Pass it to every later call of the same task that

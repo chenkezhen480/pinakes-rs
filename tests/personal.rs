@@ -55,13 +55,10 @@ async fn no_user_header_means_the_default_user() {
     app.restart();
 
     let body = json!({ "query": "my reply style", "keywords": ["reply style"] });
+    // The caller's preferences come whole, beside the memories slot.
     let pages = |resp: &serde_json::Value| -> Vec<String> {
-        resp["memories"]["hits"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|h| h["page"].as_str().unwrap().to_owned())
-            .collect()
+        assert_eq!(resp["memories"]["hits"], json!([]));
+        vec![resp["preferences"]["page"].as_str().unwrap().to_owned()]
     };
     let admin_page = format!("users/{}/preferences", user_dir_name("admin"));
     let bob_page = format!("users/{}/preferences", user_dir_name("bob"));
@@ -100,4 +97,39 @@ async fn multi_tenant_deployments_keep_no_default_user() {
         )
         .await;
     assert_eq!(resp["memories"]["hits"], json!([]));
+    assert!(resp.get("preferences").is_none());
+}
+
+#[tokio::test]
+async fn preferences_come_with_every_search() {
+    let mut app = TestApp::with_config(PERSONAL);
+    let key = app.state.prepare().await.unwrap().unwrap();
+    seed_preferences(&app, "000000", "admin", "Admin preferences");
+    app.restart();
+
+    // A search about something else still carries them, whole.
+    let (_, resp) = app
+        .post(
+            Caller::new(&key),
+            "/search",
+            json!({ "query": "how are refunds approved", "keywords": ["refund"] }),
+        )
+        .await;
+    let page = format!("users/{}/preferences", user_dir_name("admin"));
+    assert_eq!(resp["preferences"]["page"], json!(page));
+    assert_eq!(
+        resp["preferences"]["lines"],
+        json!([{ "heading": "Admin preferences", "text": "Short answers, in English." }])
+    );
+
+    // A user without preferences gets none, and never another's.
+    let (_, bob) = app
+        .post(
+            Caller::new(&key).user(Some("bob")),
+            "/search",
+            json!({ "query": "reply style", "keywords": ["reply style"] }),
+        )
+        .await;
+    assert!(bob.get("preferences").is_none());
+    assert!(!bob.to_string().contains(&page));
 }
