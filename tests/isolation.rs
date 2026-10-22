@@ -388,10 +388,12 @@ async fn hostile_tenant_ids_stay_inside_the_data_folder() {
         let (s, _) = app.call(Call::get("/pages").key(&key)).await;
         assert_eq!(s, StatusCode::OK);
     }
-    let names: Vec<String> = std::fs::read_dir(app.data.path())
+    // Sorted: a directory lists in no set order (Linux CI listed it the other way round).
+    let mut names: Vec<String> = std::fs::read_dir(app.data.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
+    names.sort();
     // The service's own audit log names the ids as data, inside the data folder.
     assert_eq!(names, vec!["audit.jsonl", "tenants"]);
     for e in std::fs::read_dir(app.data.path().join("tenants")).unwrap() {
