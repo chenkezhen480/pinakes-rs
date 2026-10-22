@@ -48,7 +48,8 @@ How each part works is in [docs/guide.md](docs/guide.md).
 - Article numbers in Chinese numerals went unchecked: a page could be titled 第二十二条 for a
   law's 第二十一条, as only digits were compared. Ordinals after 第 are now compared as numbers,
   and a concept's title is checked with its extract (the title becomes the page's); the
-  document's title counts as a source of numbers.
+  document's title counts as a source of numbers. The text read counts every number it writes in
+  Chinese numerals, so 第八项 for an item numbered 八、 passes.
 - Experience pages could turn a record's advice into a pitfall it never reported ("the email had
   no unsubscribe link" from "put an unsubscribe link in every email"). The experience rules now
   say a pitfall is only what the record says went wrong; advice is a step.

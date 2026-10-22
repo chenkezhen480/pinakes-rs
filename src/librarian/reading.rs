@@ -140,11 +140,13 @@ fn numbers(text: &str) -> Vec<String> {
     out
 }
 
+/// The characters Chinese numerals are written with, up to the thousands.
+const CN_DIGITS: &str = "零〇一二两三四五六七八九十百千";
+
 /// The text with every ordinal written in Chinese numerals after 第 (第二十一条, 第三款, 第十章)
 /// in digits instead (第21条), so the article a law's text names and the one an extract names
 /// are compared as numbers. Only after 第: elsewhere these characters are words too (一律, 万一).
 fn ordinals_as_digits(text: &str) -> String {
-    const DIGITS: &str = "零〇一二两三四五六七八九十百千";
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -153,7 +155,7 @@ fn ordinals_as_digits(text: &str) -> String {
         if chars[i] == '第' {
             let run: String = chars[i + 1..]
                 .iter()
-                .take_while(|c| DIGITS.contains(**c))
+                .take_while(|c| CN_DIGITS.contains(**c))
                 .collect();
             if let Some(n) = chinese_number(&run) {
                 out.push_str(&n.to_string());
@@ -161,6 +163,27 @@ fn ordinals_as_digits(text: &str) -> String {
             }
         }
         i += 1;
+    }
+    out
+}
+
+/// Every number a text writes in Chinese numerals, wherever it stands (八、, 三个月, 第二十条), as
+/// digits. Only the text an extract is read from is taken this way: a stray 一 there only lets a 1
+/// through.
+fn chinese_numbers(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut run = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if CN_DIGITS.contains(c) {
+            run.push(c);
+        } else if !run.is_empty() {
+            if let Some(n) = chinese_number(&run).map(|n| n.to_string())
+                && !out.contains(&n)
+            {
+                out.push(n);
+            }
+            run.clear();
+        }
     }
     out
 }
@@ -205,8 +228,12 @@ fn chinese_number(run: &str) -> Option<u32> {
 /// The numbers an extract has that the text it was read from doesn't. The numbering of a list
 /// the model wrote itself ("1. ", "2) ", "3、", "(4) ") is its layout, not a fact taken from the
 /// text, so it isn't checked.
+/// The text's numbers include every number it writes in Chinese numerals, not only ordinals after
+/// 第: an extract may say 第八项 for an item the text numbers 八、 (E3: a law's amendment draft was
+/// refused four times for it).
 fn numbers_missing(extract: &str, lines: &str) -> Vec<String> {
-    let source = numbers(lines);
+    let mut source = numbers(lines);
+    source.extend(chinese_numbers(lines));
     let extract: Vec<&str> = extract.lines().map(without_list_number).collect();
     numbers(&extract.join("\n"))
         .into_iter()
@@ -1255,6 +1282,9 @@ mod tests {
         );
         assert!(numbers_missing("动态核验制度（第21条）", lines).is_empty());
         assert!(numbers_missing("第二十一条：动态核验", lines).is_empty());
+        // An item the text numbers 八、 may be called 第八项 (E3: the e-commerce law's draft).
+        assert!(numbers_missing("第八项：磋商及争端解决", "八、在第六十三条后增加一条").is_empty());
+        assert!(numbers_missing("期限三个月（第3个月起）", "试用期三个月").is_empty());
         for (text, n) in [
             ("第十条", "10"),
             ("第十二款", "12"),
