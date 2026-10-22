@@ -180,6 +180,9 @@ fn id_of(i: usize) -> String {
 /// why.
 type Refusal = (usize, bool, String);
 
+/// An item's edits as finally refused: the edit, whether code refused it, and why.
+type Settled = (usize, Vec<(Edit, bool, String)>);
+
 /// What one write round came to, per item of the round.
 enum Outcome {
     /// Every edit passed the checks and the verifier (or there were none).
@@ -194,6 +197,64 @@ enum Outcome {
 }
 
 impl Librarian {
+    /// What becomes of the edits items were finally refused: refused by code they stay refused,
+    /// refused by the verifier they are held for review (or approved at once, then written).
+    /// The caller holds the tenant's wiki writer.
+    async fn settle_refused(
+        &self,
+        tenant: &Arc<Tenant>,
+        target: &Target,
+        writer: &Scope,
+        items: &[Item],
+        out: &mut [Filed],
+        settled: Vec<Settled>,
+    ) -> anyhow::Result<()> {
+        for (i, why) in settled {
+            let mut held = Vec::new();
+            for (edit, by_code, reason) in why {
+                out[i].not_written.insert(page_id(&edit.page()));
+                if by_code {
+                    out[i].rejected.push(Rejected {
+                        page: edit.page(),
+                        reason,
+                    });
+                } else {
+                    held.push(HeldEdit { edit, reason });
+                }
+            }
+            if held.is_empty() {
+                continue;
+            }
+            let (id, approved) = self
+                .hold_or_approve(tenant, target, writer, Some(&items[i].cite), held)
+                .await?;
+            match approved {
+                // Written after all: the item's pages count as filed.
+                Some(written) => {
+                    for p in written.pages_created {
+                        out[i].not_written.remove(&page_id(&p));
+                        out[i].created.push(p);
+                    }
+                    for p in written.pages_updated {
+                        out[i].not_written.remove(&page_id(&p));
+                        out[i].updated.push(p);
+                    }
+                    out[i].rejected.extend(written.rejected);
+                    out[i].approved = Some(id);
+                }
+                None => {
+                    record_log(
+                        tenant,
+                        &format!("ingest {}: held as {id}", target.kind.as_str()),
+                    )
+                    .await?;
+                    out[i].proposal = Some(id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Files a batch of items for one target and writer: steps 2 to 6 for each. `note` is what
     /// every item shares (a document's main thread and ledger); `first_sources` are records
     /// whose pages come first among the related pages (a document's versions). Returns what
@@ -302,14 +363,42 @@ impl Librarian {
                 Err(e) => {
                     let why =
                         format!("the reply was not one JSON object of the required shape: {e}");
+                    let mut spent = Vec::new();
                     for &i in &round {
                         tries[i] += 1;
                         feedback[i] = vec![why.clone()];
                         if tries[i] >= ATTEMPTS {
-                            anyhow::bail!(
-                                "the librarian's plan could not be read in {ATTEMPTS} tries: {e}"
-                            );
+                            spent.push(i);
                         }
+                    }
+                    // A reply that can't be read ends only the items whose tries it used up,
+                    // never the job: a document's other concepts and a batch's other records go
+                    // on (2026-10-22: replies empty after a send-back failed a whole job). An
+                    // item that was sent back keeps its last refused edits, held or refused as
+                    // for any item that keeps failing; a concept that never had edits is turned
+                    // back; a record that never had any comes to nothing, which the log says.
+                    if !spent.is_empty() {
+                        tracing::warn!(items = ?spent.iter().map(|&i| id_of(i)).collect::<Vec<_>>(),
+                            error = %e, "plan unreadable: items given up");
+                        let _writer = tenant.lock_wiki().await?;
+                        let mut settled = Vec::new();
+                        for &i in &spent {
+                            if !last[i].is_empty() {
+                                settled.push((i, std::mem::take(&mut last[i])));
+                            } else if let Some(page) = items[i].page.clone() {
+                                out[i].not_written.insert(page_id(&page));
+                                out[i].rejected.push(Rejected {
+                                    page,
+                                    reason: format!(
+                                        "the librarian's reply could not be read in {ATTEMPTS} \
+                                         tries: {e}"
+                                    ),
+                                });
+                            }
+                        }
+                        self.settle_refused(tenant, target, writer, items, &mut out, settled)
+                            .await?;
+                        open.retain(|i| !spent.contains(i));
                     }
                     continue;
                 }
@@ -540,48 +629,8 @@ impl Librarian {
                         .map(|i| (i, std::mem::take(&mut last[i]))),
                 )
                 .collect::<Vec<_>>();
-            for (i, why) in settled {
-                let mut held = Vec::new();
-                for (edit, by_code, reason) in why {
-                    out[i].not_written.insert(page_id(&edit.page()));
-                    if by_code {
-                        out[i].rejected.push(Rejected {
-                            page: edit.page(),
-                            reason,
-                        });
-                    } else {
-                        held.push(HeldEdit { edit, reason });
-                    }
-                }
-                if !held.is_empty() {
-                    let (id, approved) = self
-                        .hold_or_approve(tenant, target, writer, Some(&items[i].cite), held)
-                        .await?;
-                    match approved {
-                        // Written after all: the item's pages count as filed.
-                        Some(written) => {
-                            for p in written.pages_created {
-                                out[i].not_written.remove(&page_id(&p));
-                                out[i].created.push(p);
-                            }
-                            for p in written.pages_updated {
-                                out[i].not_written.remove(&page_id(&p));
-                                out[i].updated.push(p);
-                            }
-                            out[i].rejected.extend(written.rejected);
-                            out[i].approved = Some(id);
-                        }
-                        None => {
-                            record_log(
-                                tenant,
-                                &format!("ingest {}: held as {id}", target.kind.as_str()),
-                            )
-                            .await?;
-                            out[i].proposal = Some(id);
-                        }
-                    }
-                }
-            }
+            self.settle_refused(tenant, target, writer, items, &mut out, settled)
+                .await?;
             open.retain(|i| !finished.contains(i));
         }
         // A record that came to nothing at all says so in the log.

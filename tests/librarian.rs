@@ -352,6 +352,51 @@ async fn a_record_dropped_after_a_refusal_is_held_not_lost() {
     }
 }
 
+/// A model whose replies can't be read after a send-back (DeepSeek's empty reply tool): the job
+/// doesn't fail; the record's last refused edits are held, as for any record that keeps failing
+/// (E3 2026-10-22: two records' jobs failed whole this way).
+#[tokio::test]
+async fn unreadable_replies_after_a_refusal_hold_the_record_not_fail_the_job() {
+    let llm = FakeLlm::new(|step, msg, n| match step {
+        Step::Rank | Step::Screen => unreachable!("not asked here"),
+        Step::Plan if n == 0 => json!({ "edits": [create(
+            &format!("{}/oee-target", folder(msg)),
+            "OEE target",
+            "OEE target of 78% for L2.",
+            &["commerce:order"],
+            "# OEE target\n\n## 2026-07-01: 78% for L2\n\nDecided.",
+        )]})
+        .to_string(),
+        Step::Plan => common::llm::EMPTY_TOOL.into(),
+        Step::Verify => all_rejected(msg, "the record does not say which line"),
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => common::llm::NOT_THE_SAME.into(),
+        Step::Lint => common::llm::NO_FINDINGS.into(),
+        Step::Read => common::llm::skip_to_end(msg),
+    });
+    let (app, key) = shopline_with(&llm, "").await;
+    let lily = Caller::new(&key).user(Some("lily"));
+    let job = submit(
+        &app,
+        lily,
+        "/ingest/decision",
+        json!({ "topic": "OEE target", "decision": "78% for the welding line",
+                "entities": ["commerce:order"] }),
+    )
+    .await;
+    assert_eq!(job["status"], "done", "{job}");
+    // One plan, then three rounds of unreadable replies, each asked four times.
+    assert_eq!(llm.calls(Step::Plan).len(), 1 + 3 * 4);
+    let proposal = job["result"]["proposal"].as_str().expect("held");
+    let (_, list) = app.get(lily, "/proposals").await;
+    assert_eq!(list["proposals"][0]["proposal"], proposal);
+    assert_eq!(
+        list["proposals"][0]["edits"][0]["edit"]["page"],
+        format!("users/{}/decisions/oee-target", user_dir_name("lily"))
+    );
+}
+
 /// A preference page is its user's, by its folder: one with no anchor is filed (E1: a reply
 /// language concerns no node, and the anchor rule lost such preferences in every run).
 #[tokio::test]

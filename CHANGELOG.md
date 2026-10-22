@@ -52,6 +52,14 @@ How each part works is in [docs/guide.md](docs/guide.md).
 - Experience pages could turn a record's advice into a pitfall it never reported ("the email had
   no unsubscribe link" from "put an unsubscribe link in every email"). The experience rules now
   say a pitfall is only what the record says went wrong; advice is a step.
+- A page read from a document that holds for one office, company, place or edition could lose
+  that scope: the Singapore office's leave rule became `expertise/annual-leave`, and answers about
+  London used it. Reading now names the scope in the concept's title, extract and page id
+  ("新加坡办公室年假", `expertise/singapore-office-annual-leave`).
+- A write reply that couldn't be read (DeepSeek now and then calls the reply tool with an empty
+  input) failed the whole job once an item's tries ran out, losing a document's other concepts
+  or a batch's other records. Only the items it used up are given up now: one that was sent back
+  has its last refused edits held, as for any item that keeps failing.
 
 ## [0.1.0] - 2026-10-13
 

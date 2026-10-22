@@ -44,6 +44,10 @@ pub const FAILS: &str = "!fails ";
 /// A reply that makes the call fail, as an unreachable model does.
 pub const UNREACHABLE: &str = "!unreachable";
 
+/// A reply tool called with an empty input, as DeepSeek now and then answers: `{}`, past the
+/// schema the API is told to enforce.
+pub const EMPTY_TOOL: &str = "!empty-tool";
+
 /// Answers each prompt with `reply(step, user message, how many calls of this step came
 /// before)`.
 pub struct FakeLlm {
@@ -172,6 +176,9 @@ impl LlmClient for FakeLlm {
         let reply = (self.reply)(step, &prompt.user, n);
         if reply == UNREACHABLE {
             anyhow::bail!("connection refused");
+        }
+        if reply == EMPTY_TOOL {
+            return Ok("{}".into());
         }
         let mut value: Value = serde_json::from_str(&reply)
             .map_err(|e| anyhow::anyhow!("the scripted reply is not JSON: {e}: {reply}"))?;

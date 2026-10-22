@@ -29,6 +29,11 @@ present, and a field you don't use is `null` or `[]`):
   the meaning divides, not by length or by headings alone: a concept may run over several
   headings, and one heading may hold several concepts. `title` names it, as a page title;
   `keywords` are the terms people would search for it, in English and Chinese.
+- A concept's page is read alone, beside pages from other documents on the same subject. When
+  what the document says holds only for one office, company, country or city, product line or
+  edition (its main thread says which), the title and the extract name it: "新加坡办公室年假",
+  not "年假"; "London office: holiday carry-over", not "Holiday carry-over". A rule that holds
+  for all the knowledge base's readers needs no such name.
 - `extract`: everything the concept's lines say that is knowledge, condensed: what it is, its
   rules, conditions, steps and exceptions, in the document's terms. Numbers, dates, deadlines,
   amounts and conditions exactly as the lines write them (they are checked against the lines).
@@ -38,7 +43,8 @@ present, and a field you don't use is `null` or `[]`):
   heading (the title is), no links.
 - `page`: the page the concept is filed as. When it continues a concept already in the ledger,
   or is the same concept as a page in the earlier version's reading, that page; otherwise a new
-  id in the folder given, named after the concept (such as `expertise/cross-border-returns`).
+  id in the folder given, named after the concept and, as its title, whom it holds for (such as
+  `expertise/cross-border-returns`, `expertise/singapore-office-annual-leave`).
 - A `skip` step is lines that aren't knowledge (a table of contents, a revision history, legal
   boilerplate, greetings, blank space). `title`, `page` and `extract` are `null`.
 - In a new version, the lines shown are read again because they changed: they are the same kind
