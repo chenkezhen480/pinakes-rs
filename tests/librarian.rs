@@ -221,19 +221,18 @@ async fn new_content_updates_the_related_playbook() {
     );
 }
 
-/// A memory page without an anchor, or with one the page may not use, is refused by code and
-/// sent back with the reasons, up to three times; what still fails then is refused.
+/// An anchor a page may not use is refused by code and sent back with the reasons, up to three
+/// times; what still fails then is refused. A memory page may have no anchor (2026-10-22): the
+/// first plan's unanchored page is not what sends the item back.
 #[tokio::test]
-async fn every_memory_is_anchored() {
+async fn a_memory_anchors_only_to_what_exists() {
     let llm = model(|msg, n| {
         let page = format!("{}/coupon-refund-on-cancel", folder(msg));
         let about: &[&str] = match n {
             0 => &[],
             _ => {
                 assert!(msg.contains("Why its last edits were rejected"), "{msg}");
-                if n == 1 {
-                    assert!(msg.contains("needs at least one anchor"), "{msg}");
-                }
+                assert!(!msg.contains("anchor in about"), "{msg}");
                 assert!(msg.contains("no such node"), "{msg}");
                 &["commerce:order"]
             }

@@ -29,8 +29,9 @@ It comes back in the memories slot.
 
 ## Anchors
 
-- Anchor the page to the node types, nodes and pages the task touched (`about`). At least one
-  anchor is required.
+- Anchor the page to the node types, nodes and pages the task touched (`about`). When nothing
+  listed is what the task was about, leave `about` empty: a wrong anchor brings an unrelated
+  page into later searches, a missing one only skips a shortcut.
 - Prefer node types (such as `commerce:order`) over single nodes: a playbook is about a kind of thing, not
   one order.
 - Also anchor the knowledge pages (expertise, schema descriptions) the task relied on: the

@@ -39,7 +39,7 @@ anyhow = "1.0.104"
 async-trait = "0.1.92"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22.1"
-calamine = { version = "0.36", features = ["dates"] }
+calamine = { version = "0.37", features = ["dates"] }
 csv = "1.4"
 ego-tree = "0.11"
 encoding_rs = "0.8"
@@ -77,7 +77,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 unicode-normalization = "0.1.25"
 # Office files are zip archives; the same version and features calamine uses.
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 argon2 = "0.6"
 percent-encoding = "2.3.2"
 # PDF text, read by the `pinakes-pdf` helper in a process of its own (design, "PDF read by the

@@ -57,8 +57,9 @@ content never moves to a wider audience.
 names are unique in a tenant and never equal a schema name, so a reference is never ambiguous.
 
 **Anchors.** Pages list the entities and pages they are about in their front matter (`about`).
-Every memory page has at least one anchor. Searches follow anchors from text hits to the graph,
-and from memories to the knowledge they rely on.
+A page anchors to what it is really about, and to nothing when nothing fits (lint offers
+anchors for such pages later). Searches follow anchors from text hits to the graph, and from
+memories to the knowledge they rely on.
 
 ```markdown
 ---
@@ -364,8 +365,7 @@ the graph store.
    keywords or anchors, or supersede a claim (struck through with the date and reason; never
    deleted).
 4. **Check.** Code checks each edit: the right kind and folder, limits, anchors and links the
-   page's readers can see, at least one anchor on every experience and decision page (a
-   preference page is its user's, by its folder, and needs none), decision pages append-only.
+   page's readers can see (none is required), decision pages append-only.
 5. **Verify.** A second model call checks every edit against the sources. Refused edits go back
    with the reasons, up to three times; edits the verifier still refuses are held as a proposal
    for review, the rest are applied.

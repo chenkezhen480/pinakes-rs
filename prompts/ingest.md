@@ -75,8 +75,7 @@ How edits work:
   terms people would search for, at most 6 of each, in both languages: each term also in the
   other one (`refund`, `退款`).
 - `about` anchors: only the anchors listed as allowed, and only what the page is really about.
-  Experience and decision pages need at least one. A preference page is its user's (its folder
-  says whose): anchor it only to what its preferences really concern, or leave `about` empty;
+  When none of them is, leave `about` empty (a preference page is its user's by its folder);
   never add an anchor just to have one.
 - Never write ids, dates, `kind`, `sources` or `updated`; the service adds them.
 - Only state what the new content or the pages already support. Do not invent facts.

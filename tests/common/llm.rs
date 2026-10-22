@@ -48,6 +48,9 @@ pub const UNREACHABLE: &str = "!unreachable";
 /// schema the API is told to enforce.
 pub const EMPTY_TOOL: &str = "!empty-tool";
 
+/// A reply that ran past `max_tokens`: the call fails as the clients make it fail then.
+pub const CUT_OFF: &str = "!cut-off";
+
 /// Answers each prompt with `reply(step, user message, how many calls of this step came
 /// before)`.
 pub struct FakeLlm {
@@ -179,6 +182,9 @@ impl LlmClient for FakeLlm {
         }
         if reply == EMPTY_TOOL {
             return Ok("{}".into());
+        }
+        if reply == CUT_OFF {
+            anyhow::bail!(pinakes::llm::CUT_OFF);
         }
         let mut value: Value = serde_json::from_str(&reply)
             .map_err(|e| anyhow::anyhow!("the scripted reply is not JSON: {e}: {reply}"))?;

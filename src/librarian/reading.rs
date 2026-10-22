@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use anyhow::Context;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -851,11 +850,26 @@ impl Librarian {
             let reply = self
                 .llm
                 .complete(&self.prompt(prompts::READ, msg, read_schema()))
-                .await
-                .context("reading the document")?;
-            let problem = match parse_json::<ReadReply>(&reply) {
-                Err(e) => format!("the reply was not one JSON object of the required shape: {e}"),
-                Ok(r) => {
+                .await;
+            // A reply past the output limit (`None`): the window was more than one reply can
+            // hold, so the same lines are read again in a window half as long (2026-10-22: a long
+            // law's first window failed the whole document this way).
+            let reply = match reply {
+                Err(e) if crate::llm::cut_off(&e) => None,
+                Err(e) => return Err(e.context("reading the document")),
+                Ok(r) => Some(r),
+            };
+            let problem = match reply.as_deref().map(parse_json::<ReadReply>) {
+                None => {
+                    budget = (budget / 2).max(MIN_WINDOW_TOKENS);
+                    "your reply ran past the output limit and was cut off: fewer lines are shown \
+                     now; read them as before, each extract holding what its lines say"
+                        .to_owned()
+                }
+                Some(Err(e)) => {
+                    format!("the reply was not one JSON object of the required shape: {e}")
+                }
+                Some(Ok(r)) => {
                     match check_read(target, lines, &context, cursor, end, limit, r) {
                         Ok(Some(read)) => return Ok(read),
                         // Not one concept ends in the window: the same read, with more text.
@@ -917,57 +931,24 @@ fn check_read(
     let mut from = cursor;
     let mut steps = Vec::new();
     for (n, s) in r.steps.into_iter().enumerate() {
-        let n = n + 1;
-        let to = usize::try_from(s.end_line)
-            .ok()
-            .filter(|l| (from..=end).contains(l))
-            .ok_or_else(|| {
-                format!(
-                    "step {n}: end_line {} is not between {from} and {end} (steps come in \
-                     order, each after the last)",
-                    s.end_line
-                )
-            })?;
-        let concept = match s.action.as_str() {
-            "skip" => None,
-            "concept" => {
-                let title = s.title.as_deref().map(str::trim).unwrap_or_default();
-                if title.is_empty() {
-                    return Err(format!("step {n}: a concept needs its title"));
-                }
-                let page = concept_page(target, s.page.as_deref())
-                    .map_err(|e| format!("step {n}: {e}"))?;
-                let extract = s.extract.as_deref().map(str::trim).unwrap_or_default();
-                if extract.is_empty() {
-                    return Err(format!("step {n}: a concept needs its extract"));
-                }
-                // Its numbers come from the text read (a date the document gives once is used
-                // for every concept), never from nowhere; the title's too, since it becomes the
-                // page's (an article number in it is a fact like any other).
-                let titled = format!("{title}\n{extract}");
-                let missing = numbers_missing(&titled, &read_text);
-                if !missing.is_empty() {
-                    return Err(format!(
-                        "step {n}: the title or extract has {}{}, which the text shown doesn't; \
-                         numbers, dates, amounts and article numbers are written as the lines \
-                         have them",
-                        missing.join(", "),
-                        line_with(&titled, &missing[0])
-                            .map(|l| format!(" (in \"{l}\")"))
-                            .unwrap_or_default()
-                    ));
-                }
-                Some(Concept {
-                    title: title.to_owned(),
-                    page,
-                    keywords: s.keywords,
-                    extract: extract.to_owned(),
-                })
+        match check_step(target, &read_text, from, end, n + 1, s) {
+            Ok(step) => {
+                from = step.end + 1;
+                steps.push(step);
             }
-            other => return Err(format!("step {n}: action {other:?} is not concept or skip")),
-        };
-        steps.push(ReadStep { end: to, concept });
-        from = to + 1;
+            // A bad step after good ones: the good ones are kept and the next read starts
+            // where the bad one did, rather than the whole window being read again (2026-10-22:
+            // steps out of order after valid ones were most rejected reads, each one the
+            // window's every extract written anew).
+            Err(problem) if !steps.is_empty() => {
+                tracing::info!(cursor, kept = steps.len(), %problem, "read cut at a bad step");
+                return Ok(Some(Read {
+                    steps,
+                    thread: r.thread,
+                }));
+            }
+            Err(problem) => return Err(problem),
+        }
     }
     if end == limit && from <= limit {
         return Err(format!(
@@ -978,6 +959,67 @@ fn check_read(
         steps,
         thread: r.thread,
     }))
+}
+
+/// One step of a read checked: its lines run on from `from` within the window, and a concept has
+/// its title, page and extract, with no number the text shown lacks.
+fn check_step(
+    target: &Target,
+    read_text: &str,
+    from: usize,
+    end: usize,
+    n: usize,
+    s: StepReply,
+) -> Result<ReadStep, String> {
+    let to = usize::try_from(s.end_line)
+        .ok()
+        .filter(|l| (from..=end).contains(l))
+        .ok_or_else(|| {
+            format!(
+                "step {n}: end_line {} is not between {from} and {end} (steps come in order, \
+                 each after the last)",
+                s.end_line
+            )
+        })?;
+    let concept = match s.action.as_str() {
+        "skip" => None,
+        "concept" => {
+            let title = s.title.as_deref().map(str::trim).unwrap_or_default();
+            if title.is_empty() {
+                return Err(format!("step {n}: a concept needs its title"));
+            }
+            let page =
+                concept_page(target, s.page.as_deref()).map_err(|e| format!("step {n}: {e}"))?;
+            let extract = s.extract.as_deref().map(str::trim).unwrap_or_default();
+            if extract.is_empty() {
+                return Err(format!("step {n}: a concept needs its extract"));
+            }
+            // Its numbers come from the text read (a date the document gives once is used for
+            // every concept), never from nowhere; the title's too, since it becomes the page's
+            // (an article number in it is a fact like any other).
+            let titled = format!("{title}\n{extract}");
+            let missing = numbers_missing(&titled, read_text);
+            if !missing.is_empty() {
+                return Err(format!(
+                    "step {n}: the title or extract has {}{}, which the text shown doesn't; \
+                     numbers, dates, amounts and article numbers are written as the lines have \
+                     them",
+                    missing.join(", "),
+                    line_with(&titled, &missing[0])
+                        .map(|l| format!(" (in \"{l}\")"))
+                        .unwrap_or_default()
+                ));
+            }
+            Some(Concept {
+                title: title.to_owned(),
+                page,
+                keywords: s.keywords,
+                extract: extract.to_owned(),
+            })
+        }
+        other => return Err(format!("step {n}: action {other:?} is not concept or skip")),
+    };
+    Ok(ReadStep { end: to, concept })
 }
 
 /// What every item of a window shares: the document, its main thread and ledger, and for a new
@@ -1425,5 +1467,45 @@ mod tests {
         assert!(concept_page(&t, Some("experience/returns")).is_err());
         assert!(concept_page(&t, Some("expertise/../x")).is_err());
         assert!(concept_page(&t, None).is_err());
+    }
+
+    #[test]
+    fn a_bad_step_after_good_ones_keeps_the_good_ones() {
+        let t = Target::new(
+            crate::kinds::Kind::Expertise,
+            super::super::PageAudience::Tenant,
+        )
+        .unwrap();
+        let lines: Vec<String> = (1..=30).map(|i| format!("Rule {i}: refunds.")).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let step = |end: i64, page: &str| {
+            json!({ "action": "concept", "end_line": end, "title": "Refunds", "page": page,
+                    "keywords": ["refund"], "extract": "Refunds." })
+        };
+        let reply = |steps: Vec<serde_json::Value>| -> ReadReply {
+            serde_json::from_value(json!({ "steps": steps, "more": false, "thread": null }))
+                .unwrap()
+        };
+        // As in E3: a step ends before the one before it; the steps before it stand, and the
+        // next read starts at line 11.
+        let r = reply(vec![
+            step(4, "expertise/a"),
+            step(10, "expertise/b"),
+            step(8, "expertise/c"),
+        ]);
+        let read = check_read(&t, &lines, "", 1, 20, 30, r).unwrap().unwrap();
+        assert_eq!(
+            read.steps.iter().map(|s| s.end).collect::<Vec<_>>(),
+            vec![4, 10]
+        );
+        // A bad first step still sends the whole read back, with the reason.
+        let r = reply(vec![step(0, "expertise/a"), step(10, "expertise/b")]);
+        let Err(err) = check_read(&t, &lines, "", 1, 20, 30, r) else {
+            panic!("a bad first step was taken");
+        };
+        assert!(err.starts_with("step 1: end_line 0"), "{err}");
+        // So does a good read that leaves the document's last lines in no step.
+        let r = reply(vec![step(10, "expertise/a")]);
+        assert!(check_read(&t, &lines, "", 1, 30, 30, r).is_err());
     }
 }

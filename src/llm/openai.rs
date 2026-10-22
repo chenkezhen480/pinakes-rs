@@ -88,7 +88,7 @@ impl LlmClient for OpenAiCompatible {
 fn text_of(reply: &Value) -> anyhow::Result<String> {
     let choice = &reply["choices"][0];
     if choice["finish_reason"] == "length" {
-        anyhow::bail!("the reply was cut off at max_tokens");
+        anyhow::bail!(super::CUT_OFF);
     }
     let text = choice["message"]["content"].as_str().unwrap_or_default();
     anyhow::ensure!(!text.trim().is_empty(), "the reply has no text");

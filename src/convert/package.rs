@@ -110,7 +110,12 @@ impl<'a> Package<'a> {
     /// handed whole to another reader (spreadsheets), so it never meets an entry that unpacks
     /// to more than declared.
     pub fn verify(mut self) -> Result<(), Refused> {
-        let names: Vec<String> = self.zip.file_names().map(str::to_owned).collect();
+        let names = self
+            .zip
+            .file_names()
+            .map(|n| n.map(|n| n.into_owned()))
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| Refused::Unreadable(format!("a damaged archive entry name: {e}")))?;
         for name in names {
             if !name.ends_with('/') {
                 self.read(&name)?;

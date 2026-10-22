@@ -348,12 +348,13 @@ impl Librarian {
             let prompt = self.prompt(prompts::INGEST, msg, batch_plan_schema(&ids, file));
             let mut read = None;
             for _ in 0..ATTEMPTS {
-                let reply = self
-                    .llm
-                    .complete(&prompt)
-                    .await
-                    .context("planning the edits")?;
-                read = Some(parse_json::<Plan>(&reply));
+                // A plan past the output limit is as unreadable as an empty one, not a failure
+                // of the service: asked again, then the items it used up are given up.
+                read = Some(match self.llm.complete(&prompt).await {
+                    Ok(reply) => parse_json::<Plan>(&reply),
+                    Err(e) if crate::llm::cut_off(&e) => Err(e.to_string()),
+                    Err(e) => return Err(e.context("planning the edits")),
+                });
                 if matches!(read, Some(Ok(_))) {
                     break;
                 }
@@ -415,7 +416,7 @@ impl Librarian {
                         .iter_mut()
                         .filter(|p| p.item == id)
                         .flat_map(|p| std::mem::take(&mut p.edits))
-                        .map(|e| e.into_edit(&items[i]))
+                        .map(|e| target.placed(e.into_edit(&items[i])))
                         .collect();
                     mine.into_iter().map(move |e| (i, e))
                 })

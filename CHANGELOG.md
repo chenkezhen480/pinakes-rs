@@ -29,10 +29,26 @@ How each part works is in [docs/guide.md](docs/guide.md).
   out. Agents had opened almost every hit they found (on E3, 130 of 175 questions whose answer was
   already in the search result); with this, reads per question went from 0.98 to 0.69 and the time
   per question from 4.8 to 4.1 seconds, with the same scores.
+- Anchors are optional on experience and decision pages too: a page anchors to what it is really
+  about, and to nothing when nothing allowed fits. With one required, a model with nothing that fit
+  anchored to something unrelated, which the verifier sent back (the largest share of send-backs
+  on E3); a missing anchor only skips the search's hop, and lint offers anchors later.
+- A document's read keeps the steps before a bad one: the next read starts where the bad step
+  did, instead of the whole window being read again (steps out of order after valid ones were most
+  refused reads, each one the window's every extract written anew).
+- A reply that runs past the output limit no longer fails the job: a document's read is asked
+  again with a window half as long, and a plan counts as an unreadable reply (a long law's first
+  window failed a whole document this way).
+- An edit whose page id is off only in its audience (`experience/x` for a group's
+  `groups/g_…/experience/x`) is moved into the job's folder by code instead of being sent back; an
+  update of a page that doesn't exist is sent back saying to create it (or `file` it) instead.
 
 ### Security
 
 - rustls 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
+- rustls-webpki 0.103.16, webpki-roots and webpki-root-certs 1.0.10 (RUSTSEC-2026-0381, -0382,
+  -0383); zip 9 and calamine 0.37 (RUSTSEC-2026-0367, -0368, -0369: archive extraction, which the
+  converters don't use, but the old zip was flagged).
 
 ### Fixed
 

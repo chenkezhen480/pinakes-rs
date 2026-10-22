@@ -164,6 +164,36 @@ impl Target {
     pub fn allows(&self, path: &PagePath) -> bool {
         path.kind() == Some(self.kind) && PageAudience::of(path) == self.audience
     }
+
+    /// The edit with its page moved into this job's folder when only the audience part of the
+    /// page id is off (`experience/x` for `groups/g_…/experience/x`): what the model meant is
+    /// clear, so code puts it right rather than sending the item back (2026-10-22: a send-back
+    /// round each). A page of another kind stays as it is, to be refused.
+    pub fn placed(&self, mut edit: Edit) -> Edit {
+        let page = edit.page();
+        if PagePath::parse(&page).is_ok_and(|p| self.allows(&p)) {
+            return edit;
+        }
+        let folder = self.folder();
+        let sub = folder.rsplit('/').next().unwrap_or_default();
+        let name = page
+            .strip_prefix(&format!("{sub}/"))
+            .or_else(|| page.split_once(&format!("/{sub}/")).map(|(_, n)| n));
+        let Some(moved) = name
+            .map(|n| format!("{folder}/{n}"))
+            .filter(|m| PagePath::parse(m).is_ok_and(|p| self.allows(&p)))
+        else {
+            return edit;
+        };
+        tracing::info!(from = %page, to = %moved, "page moved into the job's folder");
+        match &mut edit {
+            Edit::Create { page, .. }
+            | Edit::Update { page, .. }
+            | Edit::Supersede { page, .. }
+            | Edit::Replace { page, .. } => *page = moved,
+        }
+        edit
+    }
 }
 
 /// Says whether a page (second argument) may anchor to an anchor (first), given the pages the
@@ -278,7 +308,12 @@ impl<'a> Draft<'a> {
                 add_about,
                 ..
             } => match current {
-                None => Err(format!("{path} does not exist")),
+                // Said with what to do: a model told only that a page is missing kept updating
+                // it (2026-10-22: one concept's own new page six times running).
+                None => Err(format!(
+                    "{path} does not exist, so it can't be updated: `create` it (`file` it, for a \
+                     concept's own page), or update the existing page you meant"
+                )),
                 Some(page) => update(
                     page,
                     heading.as_deref(),
@@ -406,8 +441,10 @@ fn add_anchors(
     Ok(())
 }
 
-/// Code-owned fields, and the anchor every experience and decision page needs (a preference page
-/// is its user's, by its folder: its anchors are optional).
+/// Code-owned fields. Anchors are optional on every page (2026-10-22: experience and decision
+/// pages had to have one, and a model with nothing that fit anchored to something unrelated,
+/// which the verifier sent back; a missing anchor only skips the search's hop, and lint offers
+/// anchors for such pages later).
 fn finish(page: &mut Page, r: &Rules) -> Result<(), String> {
     page.front.kind = Some(r.target.kind);
     page.front.updated = Some(r.today.to_owned());
@@ -415,10 +452,6 @@ fn finish(page: &mut Page, r: &Rules) -> Result<(), String> {
         && !page.front.sources.iter().any(|s| s == source)
     {
         page.front.sources.push(source.to_owned());
-    }
-    let anchored = matches!(r.target.kind, Kind::Experience | Kind::Decision);
-    if anchored && page.front.about.is_empty() {
-        return Err("an experience or decision page needs at least one anchor in about".into());
     }
     if page.body.chars().count() > MAX_BODY {
         return Err(format!(
@@ -723,6 +756,39 @@ mod tests {
         (dir, wiki)
     }
 
+    #[test]
+    fn a_page_off_only_in_its_audience_is_moved_into_the_folder() {
+        let group = Target::new(
+            Kind::Experience,
+            PageAudience::Group("g_0123456789abcdef".into()),
+        )
+        .unwrap();
+        let update = |page: &str| Edit::Update {
+            page: page.into(),
+            heading: None,
+            text: Some("x".into()),
+            summary: None,
+            add_aliases: vec![],
+            add_keywords: vec![],
+            add_about: vec![],
+        };
+        let moved = |t: &Target, page: &str| t.placed(update(page)).page();
+        let mine = "groups/g_0123456789abcdef/experience/refunds";
+        assert_eq!(moved(&group, "experience/refunds"), mine);
+        assert_eq!(
+            moved(&group, &format!("users/{U}/experience/refunds")),
+            mine
+        );
+        assert_eq!(moved(&group, mine), mine);
+        // Another kind is not this job's to fix: it is refused as before.
+        assert_eq!(moved(&group, "decisions/refunds"), "decisions/refunds");
+        let tenant = Target::new(Kind::Expertise, PageAudience::Tenant).unwrap();
+        assert_eq!(
+            moved(&tenant, "groups/g_0123456789abcdef/expertise/returns"),
+            "expertise/returns"
+        );
+    }
+
     fn anchors_ok(a: &str, _: &PagePath, _: &HashSet<PagePath>) -> Result<(), String> {
         if a.starts_with("bad") {
             Err("unknown".into())
@@ -798,13 +864,19 @@ mod tests {
         let bad = [
             create_edit("expertise/refunds", &["commerce:order"]),
             create_edit(&format!("users/{U}/decisions/x"), &["commerce:order"]),
-            create_edit("experience/refunds", &[]),
             create_edit("experience/refunds", &["bad:anchor"]),
             create_edit("experience/../x", &["commerce:order"]),
         ];
         for e in &bad {
             assert!(draft.apply(e, &r).unwrap().is_err(), "{e:?}");
         }
+        // No anchor is required (2026-10-22): nothing that fits is better than a wrong one.
+        assert!(
+            Draft::new(&wiki)
+                .apply(&create_edit("experience/unanchored", &[]), &r)
+                .unwrap()
+                .is_ok()
+        );
         let ok = draft
             .apply(&create_edit("experience/refunds", &["commerce:order"]), &r)
             .unwrap()

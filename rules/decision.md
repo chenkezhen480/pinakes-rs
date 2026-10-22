@@ -24,7 +24,8 @@ result. It comes back in the memories slot, only to that user or group.
 
 ## Anchors
 
-- Anchor the page to what the decision was about: node types, nodes or pages. At least one
-  anchor is required.
+- Anchor the page to what the decision was about: node types, nodes or pages. When nothing
+  listed is what it was about, leave `about` empty: a wrong anchor brings an unrelated page into
+  later searches, a missing one only skips a shortcut.
 - Also anchor the knowledge pages (expertise, schema descriptions) the decision rested on. When
   the item lists knowledge pages the caller read while deciding, anchor those it used.

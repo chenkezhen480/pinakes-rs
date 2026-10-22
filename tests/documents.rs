@@ -548,6 +548,39 @@ async fn a_concept_filed_without_its_text_gets_its_extract() {
     assert_eq!(other["body"], "# 乙\n\n乙规定的概括。\n", "{other}");
 }
 
+/// A read whose reply runs past the output limit is asked again with a shorter window and told
+/// why, and the document is read whole (E3 2026-10-22: a long law's first window failed the
+/// whole document).
+#[tokio::test]
+async fn a_read_cut_off_at_the_output_limit_is_read_again_shorter() {
+    let llm = FakeLlm::new(|step, msg, n| match step {
+        Step::Read if n == 0 => common::llm::CUT_OFF.into(),
+        Step::Read => reader(msg, |l| l.starts_with('【'), rule_name, None),
+        Step::Plan => rule_plan(msg, |_| false),
+        Step::Verify => all_ok(msg),
+        Step::Describe => describe_from_definition(msg),
+        Step::VerifyDescribe => OK.into(),
+        Step::Match => NOT_THE_SAME.into(),
+        _ => unreachable!("not asked here"),
+    });
+    let app = TestApp::with_llm(llm.llm());
+    let key = app.create_tenant("acme").await;
+    let c = Caller::new(&key);
+    let (_, r) = file(
+        &app,
+        c,
+        json!({ "title": "手册", "content": rules_text(&["甲", "乙"]) }),
+    )
+    .await;
+    assert_eq!(r["pages_created"].as_array().unwrap().len(), 2, "{r}");
+    let reads = llm.calls(Step::Read);
+    assert!(
+        reads[1].contains("ran past the output limit"),
+        "{}",
+        reads[1]
+    );
+}
+
 /// A reading that stops half way (here the model is unreachable while the third concept is
 /// filed) is resumed by the next upload of the same text: the concepts already filed are not
 /// read or written again, and the version is recorded under the first upload's record.

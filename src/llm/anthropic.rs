@@ -146,7 +146,7 @@ impl LlmClient for Anthropic {
 fn reply_of(reply: &Value, shape: Shape) -> anyhow::Result<String> {
     match reply["stop_reason"].as_str() {
         Some("refusal") => anyhow::bail!("the model declined the request"),
-        Some("max_tokens") => anyhow::bail!("the reply was cut off at max_tokens"),
+        Some("max_tokens") => anyhow::bail!(super::CUT_OFF),
         _ => {}
     }
     let blocks = reply["content"].as_array().into_iter().flatten();

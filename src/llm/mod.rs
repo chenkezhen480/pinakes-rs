@@ -59,6 +59,15 @@ pub trait LlmClient: Send + Sync {
     }
 }
 
+/// The error a call fails with when the model's reply ran past `max_tokens`: callers that can ask
+/// for less (a shorter reading window) tell it from a failure of the service.
+pub const CUT_OFF: &str = "the reply was cut off at max_tokens";
+
+/// Whether a call failed because its reply was cut off at `max_tokens`.
+pub fn cut_off(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.to_string() == CUT_OFF)
+}
+
 /// About how many tokens a text costs: a CJK character about one, other text about a quarter
 /// of a token per character.
 pub fn estimate_tokens(text: &str) -> u64 {
