@@ -62,6 +62,11 @@ A self-hosted knowledge service in Rust. The full design is in `docs/design.md`
 - Every wiki write runs as a job on the tenant's write queue (`src/jobs.rs`) or holds the
   tenant's `wiki_writer` lock; code, never the LLM, writes `kind`, `updated` and `sources`.
 - Librarian tests script the model (`tests/common/llm.rs`); only the live test calls a real one.
+  A change to the librarian is judged by code before a run (one run's answer scores move as much as
+  a change does; 2026-10-22): `PINAKES_TEST_REPLAY="<run folder>;…" cargo test --lib
+  recorded_reads_replay -- --nocapture` replays a run's recorded reads (`compare/results/<run>/
+  llm_bodies.jsonl`) through today's checks, and `compare/e3/wiki_check.py` scores a written wiki
+  by code (numbers its sources lack, scope in titles, dead links, anchors, pitfalls no record has).
 - Files are converted by the service itself (`src/convert/`, pure Rust: HTML, DOCX, XLSX/XLSM (read
   cell by cell), CSV, PPTX, PDF; decided 2026-10-10, replacing "the service never parses Word, PDF or HTML itself").
   Every reader is bounded: the file's size, a zip's entries, unpacked size and ratio checked before

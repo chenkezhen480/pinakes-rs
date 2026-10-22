@@ -1211,6 +1211,10 @@ fn read_message(
 }
 
 #[cfg(test)]
+#[path = "reading_replay.rs"]
+mod replay;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
