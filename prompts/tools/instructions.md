@@ -7,8 +7,9 @@ How to use it:
 1. Start every lookup with `search`. One call returns memories, knowledge and relations in separate
    slots, each hit with a short summary and a route. Search before answering anything about this
    team's work, its domain, its data or the user's own preferences.
-2. Read the slots first. Open in full only the hits that look promising: follow each hit's route,
-   `read` for a page, `graph` or `path` for a node. Never call those with ids you made up; they only
+2. Read the slots first: a hit's summary and matched `lines` often answer the question already, and
+   then you answer from them. Open in full only the hits whose detail you still need: follow each
+   hit's route, `read` for a page, `graph` or `path` for a node. Never call those with ids you made up; they only
    take ids that `search` (or an earlier follow-up) returned.
 3. A slot marked `weak`, or keywords listed in `unmatched_keywords`, mean the search missed. Retry
    with other terms (synonyms, the other language, an identifier), or with `mode: "semantic"`.

@@ -24,6 +24,11 @@ How each part works is in [docs/guide.md](docs/guide.md).
   or an answer format concerns no node or page, and forcing one lost such preferences (the
   verifier held the made-up anchor, or code refused the page without one). Experience and
   decision pages still need at least one; lint no longer reports an unanchored preference.
+- The tool descriptions name a search hit's matched `lines` and tell the agent to answer from a
+  hit's summary and lines when they hold what was asked, opening a page only for what they leave
+  out. Agents had opened almost every hit they found (on E3, 130 of 175 questions whose answer was
+  already in the search result); with this, reads per question went from 0.98 to 0.69 and the time
+  per question from 4.8 to 4.1 seconds, with the same scores.
 
 ### Security
 
@@ -40,6 +45,13 @@ How each part works is in [docs/guide.md](docs/guide.md).
   could answer with no edits for it, which counted as filed. It is now asked again, and if it
   keeps dropping the record, the edits it was last refused for are held (or refused) as for any
   record that keeps failing. A record that files nothing says so in `log.md`.
+- Article numbers in Chinese numerals went unchecked: a page could be titled 第二十二条 for a
+  law's 第二十一条, as only digits were compared. Ordinals after 第 are now compared as numbers,
+  and a concept's title is checked with its extract (the title becomes the page's); the
+  document's title counts as a source of numbers.
+- Experience pages could turn a record's advice into a pitfall it never reported ("the email had
+  no unsubscribe link" from "put an unsubscribe link in every email"). The experience rules now
+  say a pitfall is only what the record says went wrong; advice is a step.
 
 ## [0.1.0] - 2026-10-13
 

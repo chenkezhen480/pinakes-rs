@@ -111,9 +111,9 @@ pub fn read_schema() -> serde_json::Value {
 }
 
 /// The numbers in a text: digit runs, with decimals, thousands separators dropped and leading
-/// zeros ignored.
+/// zeros ignored. An ordinal in Chinese numerals (第二十一条) counts as its digits.
 fn numbers(text: &str) -> Vec<String> {
-    let text = text.replace([',', '，'], "");
+    let text = ordinals_as_digits(&text.replace([',', '，'], ""));
     let mut out = Vec::new();
     let mut cur = String::new();
     for c in text.chars().chain(std::iter::once(' ')) {
@@ -140,6 +140,68 @@ fn numbers(text: &str) -> Vec<String> {
     out
 }
 
+/// The text with every ordinal written in Chinese numerals after 第 (第二十一条, 第三款, 第十章)
+/// in digits instead (第21条), so the article a law's text names and the one an extract names
+/// are compared as numbers. Only after 第: elsewhere these characters are words too (一律, 万一).
+fn ordinals_as_digits(text: &str) -> String {
+    const DIGITS: &str = "零〇一二两三四五六七八九十百千";
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        out.push(chars[i]);
+        if chars[i] == '第' {
+            let run: String = chars[i + 1..]
+                .iter()
+                .take_while(|c| DIGITS.contains(**c))
+                .collect();
+            if let Some(n) = chinese_number(&run) {
+                out.push_str(&n.to_string());
+                i += run.chars().count();
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// A number written in Chinese numerals up to the thousands (二十一 is 21, 一百零三 is 103, 十二
+/// is 12), or None when the run isn't one.
+fn chinese_number(run: &str) -> Option<u32> {
+    if run.is_empty() {
+        return None;
+    }
+    let (mut total, mut digit) = (0, None);
+    for c in run.chars() {
+        let d = match c {
+            '零' | '〇' => Some(0),
+            '一' => Some(1),
+            '二' | '两' => Some(2),
+            '三' => Some(3),
+            '四' => Some(4),
+            '五' => Some(5),
+            '六' => Some(6),
+            '七' => Some(7),
+            '八' => Some(8),
+            '九' => Some(9),
+            _ => None,
+        };
+        if let Some(d) = d {
+            digit = Some(d);
+            continue;
+        }
+        let unit = match c {
+            '十' => 10,
+            '百' => 100,
+            '千' => 1000,
+            _ => return None,
+        };
+        // 十 alone is one ten.
+        total += digit.take().unwrap_or(1) * unit;
+    }
+    Some(total + digit.unwrap_or(0))
+}
+
 /// The numbers an extract has that the text it was read from doesn't. The numbering of a list
 /// the model wrote itself ("1. ", "2) ", "3、", "(4) ") is its layout, not a fact taken from the
 /// text, so it isn't checked.
@@ -152,7 +214,8 @@ fn numbers_missing(extract: &str, lines: &str) -> Vec<String> {
         .collect()
 }
 
-/// What an extract's numbers may come from besides the lines it reads: the main thread, and for
+/// What an extract's numbers may come from besides the lines it reads: the main thread (the
+/// caller puts the document's title before it), and for
 /// a new version what changed (an extract says what a rule was before) and the version numbers
 /// the message itself gives ("since version 2 …"). A first version adds no version number: "1"
 /// would let any 1 through. Not the line numbers: any number within the window's range would
@@ -751,8 +814,9 @@ impl Librarian {
                 earlier,
                 feedback.as_deref(),
             );
+            // The document's title too: a concept's title may carry its year or edition.
             let context = number_sources(
-                &state.reading.thread,
+                &format!("{}\n{}", state.document.title, state.reading.thread),
                 earlier.and_then(|e| e.changes_text(cursor, end)),
                 state.version,
                 earlier.map(|e| e.version),
@@ -851,14 +915,17 @@ fn check_read(
                     return Err(format!("step {n}: a concept needs its extract"));
                 }
                 // Its numbers come from the text read (a date the document gives once is used
-                // for every concept), never from nowhere.
-                let missing = numbers_missing(extract, &read_text);
+                // for every concept), never from nowhere; the title's too, since it becomes the
+                // page's (an article number in it is a fact like any other).
+                let titled = format!("{title}\n{extract}");
+                let missing = numbers_missing(&titled, &read_text);
                 if !missing.is_empty() {
                     return Err(format!(
-                        "step {n}: the extract has {}{}, which the text shown doesn't; numbers, \
-                         dates and amounts are written as the lines have them",
+                        "step {n}: the title or extract has {}{}, which the text shown doesn't; \
+                         numbers, dates, amounts and article numbers are written as the lines \
+                         have them",
                         missing.join(", "),
-                        line_with(extract, &missing[0])
+                        line_with(&titled, &missing[0])
                             .map(|l| format!(" (in \"{l}\")"))
                             .unwrap_or_default()
                     ));
@@ -1176,6 +1243,28 @@ mod tests {
         assert!(numbers_missing("上限 25 元，5000 元以上复核，费率 1.5%", lines).is_empty());
         assert_eq!(numbers_missing("上限 20 元", lines), vec!["20"]);
         assert_eq!(numbers("2026-11-01 起 7 天"), vec!["2026", "11", "1", "7"]);
+    }
+
+    #[test]
+    fn an_article_number_in_chinese_numerals_is_checked() {
+        // E3: a page titled 第二十二条 for the law's 第二十一条 passed, as only digits were compared.
+        let lines = "第二十一条 互联网信息服务提供者应当建立互联网账号信息动态核验制度。";
+        assert_eq!(
+            numbers_missing("动态核验制度（第二十二条）", lines),
+            vec!["22"]
+        );
+        assert!(numbers_missing("动态核验制度（第21条）", lines).is_empty());
+        assert!(numbers_missing("第二十一条：动态核验", lines).is_empty());
+        for (text, n) in [
+            ("第十条", "10"),
+            ("第十二款", "12"),
+            ("第一百零三条", "103"),
+            ("第两千条", "2000"),
+        ] {
+            assert_eq!(numbers(text), vec![n], "{text}");
+        }
+        // Not after 第, these are words.
+        assert!(numbers("一律退款，万一出错").is_empty());
     }
 
     #[test]

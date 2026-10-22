@@ -1,7 +1,8 @@
 The only way into the knowledge base. Returns three slots at once: `memories` (experience,
 decisions, preferences), `knowledge` (expertise, schema descriptions) and `relations` (edges from
-the business graph). Each hit has its `page` id, a `summary`, the `matched_keywords`, its `about`
-anchors and a `route` saying how to open it; `read: true` means this session already read it. Each
+the business graph). Each hit has its `page` id, a `summary`, the page's `lines` that matched (up to
+three, with their heading), the `matched_keywords`, its `about` anchors and a `route` saying how to
+open it; `read: true` means this session already read it. Each
 slot has a `coverage` of `strong` or `weak`; `unmatched_keywords` lists what found nothing.
 
 Write the request well; the service does no rewriting:
@@ -20,8 +21,9 @@ Write the request well; the service does no rewriting:
 
 Then:
 
-- Read the summaries first; open only promising hits, following their `route` (`read` with the
-  page id, `graph` with a node id).
+- Read the summaries and `lines` first. When they hold what was asked, answer from them: opening
+  the page costs another step. Open a hit, following its `route` (`read` with the page id, `graph`
+  with a node id), only for what they leave out.
 - `mode` picks how pages are ranked; leave it out at first. `auto` (the usual default) ranks by
   your keywords and by meaning together, or by keywords alone when the service has meaning
   search off (the result's `note` says so). `keyword` ranks by the terms only: for exact names,

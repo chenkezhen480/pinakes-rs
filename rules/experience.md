@@ -10,6 +10,10 @@ It comes back in the memories slot.
 - Sections: `## Steps that work` (numbered), `## Pitfalls` (each pitfall with its fix), and
   optionally `## Notes`.
 - Each pitfall and each step that came from experience says how often it was seen: "Seen 3 times."
+- Write only what the record says happened. A pitfall is a mistake or problem the record reports.
+  Advice the record gives ("put an unsubscribe link in every email") is a step, never turned into
+  a pitfall claiming it was missing or done wrong ("the email had no unsubscribe link") unless the
+  record says so.
 - The summary is a sentence or two an agent can act on without opening the page, in English and
   the same in Chinese.
 
